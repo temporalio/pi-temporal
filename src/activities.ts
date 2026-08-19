@@ -21,30 +21,20 @@ const heartbeatEvery = (ms: number) => {
   return () => clearInterval(timer);
 };
 
-// Best-effort idempotency: tag the prompt with a zero-width marker carrying the promptId, so a
-// re-drive can find it in the recorded messages. Returns the assistant's answer if this prompt was
-// already applied AND answered with real text, else null (meaning: run it).
-//
-// VERIFIED LIMIT (crash test): this is coarse and cannot cleanly recover a crash MID-turn. If the
-// worker dies after Pi recorded a tool-call assistant message but before the final answer, the
-// turn has a dangling tool call. Pi's SDK exposes no way to resume an in-flight turn, so on retry
-// we can only (a) re-prompt, which duplicates the prompt and re-runs any side effect, or (b) treat
-// a non-empty final answer as the completion signal and otherwise re-run. We take (b): a tool-call
-// message has empty text, so it does not count as done, and the turn is re-driven (accepting the
-// duplicate-side-effect risk). Clean mid-turn recovery needs step-level control, which Pi does not
-// expose today (see README). Between turns, recovery is clean.
+// The prompt carries a zero-width marker with its promptId, so a re-driven activity can tell
+// whether this exact prompt was already recorded on a prior attempt. Present means: do not prompt
+// again; instead finish whatever the interrupted turn left behind.
 const marker = (promptId: string) => `​[pi-temporal:${promptId}]`;
 
 type Msg = { role?: string; content?: unknown };
 
-function completedAnswer(messages: Msg[], promptId: string): string | null {
-  const idx = messages.findIndex((m) => textOf(m.content).includes(marker(promptId)));
-  if (idx === -1) return null;
-  const answer = [...messages.slice(idx + 1)]
-    .reverse()
-    .find((m) => m.role === "assistant" && textOf(m.content).trim() !== "");
-  return answer ? textOf(answer.content) : null;
-}
+const markerPresent = (messages: Msg[], promptId: string) =>
+  messages.some((m) => textOf(m.content).includes(marker(promptId)));
+
+const lastAssistantText = (messages: Msg[]) => {
+  const answer = [...messages].reverse().find((m) => m.role === "assistant" && textOf(m.content).trim() !== "");
+  return answer ? textOf(answer.content) : "";
+};
 
 export function makeActivities(opts: { projectDir: string; openaiKey?: string; modelHint?: string }) {
   async function runPrompt(input: RunPromptInput): Promise<RunPromptResult> {
@@ -68,14 +58,18 @@ export function makeActivities(opts: { projectDir: string; openaiKey?: string; m
       });
 
       try {
-        const already = completedAnswer(session.state.messages as Msg[], input.promptId);
-        if (already !== null) return { ran: false, finalText: already };
+        // A retry of an already-recorded prompt: finish the turn the crash interrupted (repair any
+        // dangling tool call, or drive an unanswered prompt to completion) rather than re-prompting,
+        // which would duplicate the prompt and re-run side effects.
+        if (markerPresent(session.state.messages as Msg[], input.promptId)) {
+          await session.resumeInterruptedTurn();
+          await session.waitForIdle();
+          return { ran: false, finalText: lastAssistantText(session.state.messages as Msg[]) };
+        }
 
         await session.prompt(`${input.text}${marker(input.promptId)}`);
         await session.waitForIdle();
-
-        const answer = [...(session.state.messages as Msg[])].reverse().find((m) => m.role === "assistant");
-        return { ran: true, finalText: answer ? textOf(answer.content) : "" };
+        return { ran: true, finalText: lastAssistantText(session.state.messages as Msg[]) };
       } finally {
         session.dispose();
       }

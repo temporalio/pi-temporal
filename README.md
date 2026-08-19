@@ -2,7 +2,20 @@
 
 A Temporal-backed durable executor for the [Pi coding agent](https://github.com/earendil-works/pi), shipped as a plugin around Pi's SDK. Same pattern we proved on the OpenCode fork: the agent's own loop runs under a durable executor, while the session record stays in the app's own log.
 
-Status: runs against a live Pi (SDK 0.84.2). A happy-path turn works end to end, and a turn re-executes on a fresh worker after a crash. The important negative result is that a mid-turn crash cannot be recovered cleanly at turn granularity (see below).
+Status: runs against a live Pi. A happy-path turn works end to end, and a turn re-executes on a fresh worker after a crash. The earlier turn-level mid-crash limitation is now addressed by driving the fork's resume API (see below); a live re-verification of the mid-crash case is pending a working model key (the local OpenAI key currently returns 401).
+
+## Depends on the Pi fork
+
+Mid-turn recovery needs the resume API added on the `temporalio/pi` fork branch `moe/step-and-resume` (`AgentSession.resumeInterruptedTurn()`, `AgentSession.step()`), which is not in the published `@earendil-works/pi-coding-agent`. Until a fork build is published, link it locally:
+
+```
+# in the fork
+cd ~/repos/pi/packages/coding-agent && npm link
+# in this repo
+cd ~/repos/pi-temporal && npm link @earendil-works/pi-coding-agent
+```
+
+The linked package resolves its sibling `@earendil-works/pi-agent-core` (which carries `Agent.step` and the exported tool-result helpers) from the fork's own workspace, so the whole fork API is picked up.
 
 ## The idea
 
@@ -23,9 +36,9 @@ Step-level durability would need Pi to expose "run one model call plus its tools
 
 - **Between turns: clean.** A worker dying between turns loses nothing. The next prompt re-drives on any worker from the session file. A fresh worker that never saw the session serves it correctly.
 - **Worker re-execution: works.** Kill the worker mid-turn and Temporal re-runs the `runPrompt` activity on another worker (observed: activity attempt 2 completes), with no duplicate prompt. That is durable execution doing its job.
-- **Mid-turn recovery: coarse, and this is the real limitation.** A crash mid agent-run leaves Pi's session with a dangling tool-call assistant message and no final answer. Pi's SDK exposes no way to resume an in-flight turn, so on retry we can only re-prompt (which duplicates the prompt and re-runs the side effect) or bail. There is no clean resume at turn granularity. Clean mid-turn recovery needs step-level control (run one model call plus its tools, checkpoint, continue), which the OpenCode engine exposed and Pi's SDK does not.
+- **Mid-turn recovery: handled via the fork's resume API.** A crash mid agent-run leaves Pi's session with a dangling tool-call assistant message and no final answer. The stock SDK cannot resume that. The fork adds `AgentSession.resumeInterruptedTurn()`, which repairs dangling tool calls (fails them, keeps completed tool results) and drives the turn to completion. On a retry, `runPrompt` sees the prompt marker already recorded and calls `resumeInterruptedTurn()` instead of re-prompting, so there is no duplicate prompt and no re-run side effect. The resume mechanic is proven by the fork's own unit tests (`packages/coding-agent/test/resume-interrupted-turn.test.ts`, mock model); the live crash test here is pending a working model key.
 
-The concrete finding: `runPrompt` is one whole agent-run, so a mid-turn crash is not a resumable unit. This is the strongest argument for asking the Pi maintainers for a step boundary, or for driving Pi through a lower-level loop than `session.prompt`.
+For per-step durability, drive `AgentSession.step()` (also on the fork) one step per activity, calling `resumeInterruptedTurn()` first when the transcript ends in a dangling tool call.
 
 ## Reproducing
 
@@ -46,10 +59,11 @@ The concrete finding: `runPrompt` is one whole agent-run, so a mid-turn crash is
 - [x] Design + scaffold against Pi's real SDK (`createAgentSession`, `session.prompt`, `SessionManager`, `ModelRuntime`), typechecks.
 - [x] Live happy-path turn (OpenAI via `ModelRuntime.getAvailable` + `setRuntimeApiKey`).
 - [x] Crash test: turn re-executes on a fresh worker (activity attempt 2), no duplicate prompt.
-- [x] Found the turn-level limit: mid-turn crash cannot resume cleanly (dangling tool call, no Pi resume API).
-- [ ] Idempotency for a mid-turn re-drive (blocked on step-level control from Pi).
-- [ ] Package as an installable Pi extension (`pi install`).
-- [ ] Raise step-level durability, or a "resume in-flight turn" API, with the Pi maintainers. **This is now the gating item, not a nice-to-have.**
+- [x] Found the turn-level limit: mid-turn crash cannot resume cleanly on the stock SDK.
+- [x] Added the fix on the Pi fork (`resumeInterruptedTurn`, `step`); proven by the fork's mock-model tests.
+- [x] Wired `runPrompt` to call `resumeInterruptedTurn()` on retry instead of re-prompting.
+- [ ] Live re-verification of the mid-crash case (blocked on a working model key: local OpenAI key returns 401).
+- [ ] Package as an installable Pi extension (`pi install`), once a fork build is published.
 
 ## Prior art
 
