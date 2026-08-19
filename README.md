@@ -2,7 +2,10 @@
 
 A Temporal-backed durable executor for the [Pi coding agent](https://github.com/earendil-works/pi), shipped as a plugin around Pi's SDK. Same pattern we proved on the OpenCode fork: the agent's own loop runs under a durable executor, while the session record stays in the app's own log.
 
-Status: runs against a live Pi. A happy-path turn works end to end, and a turn re-executes on a fresh worker after a crash. The earlier turn-level mid-crash limitation is now addressed by driving the fork's resume API (see below); a live re-verification of the mid-crash case is pending a working model key (the local OpenAI key currently returns 401).
+Status: verified end to end against a live Pi (SDK 0.84.2 fork). Happy path works, and a worker killed mid-turn recovers on a fresh worker with no duplicate prompt. Both recovery paths are proven:
+
+- Crash before anything persisted: the whole turn re-runs from scratch and completes.
+- Crash with a dangling tool call already on disk: `resumeInterruptedTurn()` repairs it (fails the dangling tool, keeps completed results) and drives the turn to completion. The user prompt is not re-added and the side effect is not blindly re-run.
 
 ## Depends on the Pi fork
 
@@ -62,7 +65,7 @@ For per-step durability, drive `AgentSession.step()` (also on the fork) one step
 - [x] Found the turn-level limit: mid-turn crash cannot resume cleanly on the stock SDK.
 - [x] Added the fix on the Pi fork (`resumeInterruptedTurn`, `step`); proven by the fork's mock-model tests.
 - [x] Wired `runPrompt` to call `resumeInterruptedTurn()` on retry instead of re-prompting.
-- [ ] Live re-verification of the mid-crash case (blocked on a working model key: local OpenAI key returns 401).
+- [x] Live re-verification: mid-turn crash recovers via `resumeInterruptedTurn()`, no duplicate prompt, tool balance intact.
 - [ ] Package as an installable Pi extension (`pi install`), once a fork build is published.
 
 ## Prior art
