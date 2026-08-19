@@ -20,18 +20,20 @@ export interface PromptInput {
   readonly text: string;
 }
 
-export interface RunPromptInput extends PromptInput {
+export interface RunStepInput extends PromptInput {
   readonly sessionId: string;
   // Absolute path to the Pi session JSONL. This file is the durable log; the activity opens it,
-  // appends the turn, and it survives across workers on shared storage.
+  // appends what the step produced, and it survives across workers on shared storage.
   readonly sessionFile: string;
+  // Which step of the turn the workflow thinks this is. Nothing reads it: the transcript decides
+  // what runs next. It rides along so a step is legible in the Temporal UI and in worker logs.
+  readonly step: number;
 }
 
-export interface RunPromptResult {
-  // Whether this call actually drove a turn, or short-circuited because the prompt was already
-  // applied and completed (idempotent re-drive).
-  readonly ran: boolean;
-  // The assistant's final text for this turn, for the caller's convenience (the log is the truth).
+export interface RunStepResult {
+  // Whether the turn is finished. False means the workflow schedules another step.
+  readonly done: boolean;
+  // The assistant's final text, once the turn is done (the log is the truth; this is a courtesy).
   readonly finalText: string;
 }
 
@@ -40,3 +42,7 @@ export interface SessionTurnOptions {
   // starts a fresh run that rebuilds nothing (the session file already holds the conversation).
   readonly idleTimeout?: string;
 }
+
+// A turn that never stops stepping is a bug (a model looping on the same tool, say), and the
+// workflow is the only place that can see it. High enough that real work never reaches it.
+export const MAX_STEPS_PER_TURN = 200;

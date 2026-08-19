@@ -2,14 +2,18 @@
 
 A Temporal-backed durable executor for the [Pi coding agent](https://github.com/earendil-works/pi), shipped as a plugin around Pi's SDK. Same pattern we proved on the OpenCode fork: the agent's own loop runs under a durable executor, while the session record stays in the app's own log.
 
-Status: verified end to end against a live Pi (SDK 0.84.2 fork). Happy path works, and a worker killed mid-turn recovers on a fresh worker with no duplicate prompt. Both recovery paths are proven:
+The durable unit is one step: a single model call and the tools it asks for. The workflow runs one Temporal activity per step, so a worker dying takes one step with it and every step before it stays done.
 
-- Crash before anything persisted: the whole turn re-runs from scratch and completes.
-- Crash with a dangling tool call already on disk: `resumeInterruptedTurn()` repairs it (fails the dangling tool, keeps completed results) and drives the turn to completion. The user prompt is not re-added and the side effect is not blindly re-run.
+Status: the turn-level shape was verified end to end against a live Pi (SDK 0.84.2 fork), both recovery paths, before the switch to stepping. The stepped executor is verified against Temporal with a stubbed activity (`step-loop-check.mts`) and by the fork's own unit tests. The live re-run needs a working model key.
 
 ## Depends on the Pi fork
 
-Mid-turn recovery calls `AgentSession.resumeInterruptedTurn()`, which is not in the published `@earendil-works/pi-coding-agent`. It comes from [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) (branch `moe/step-and-resume`), together with `AgentSession.step()`.
+Stepping calls four things the published `@earendil-works/pi-coding-agent` does not have. They come from [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) (branch `moe/step-and-resume`):
+
+- `recordPrompt(text)` puts a prompt in the transcript without running it.
+- `step()` runs one model call and its tools, and reports whether the turn is done.
+- `prepareStep()` settles what a stopped turn left behind, without running to the end of it.
+- `resumeInterruptedTurn()` is `prepareStep()` plus a run to the end of the turn, for a caller that wants the whole turn back in one call.
 
 So the dependency is a build of the fork, pinned by commit in `fork.pin`:
 
@@ -31,38 +35,44 @@ Two parts of the state, two systems:
 
 This is the `storage` vs `execution` split from the AI-399 write-up, applied to a harness that (unlike OpenCode) has no swappable `SessionExecution` abstraction. So we drive Pi from the outside via its SDK rather than replacing an internal interface.
 
-## Granularity: turn-level for now
+## Granularity: a step per activity
 
-`session.prompt(text)` runs a whole turn (the full agent loop, model calls plus tools) to `agent_end`. So the durable unit here is one prompt-to-`agent_end`, driven as one Temporal activity. That is the coarser, turn-level shape (the OpenCode Phase-1 analog), not the per-step re-drive we did on the OpenCode engine.
+One `runStep` activity does one thing:
 
-The fork now has the single-step runner (`AgentSession.step()`, one model call plus its tools, no loop), so a step per activity is within reach. Two things still make the outer driver reach past the public API, and both are small additions to the fork:
+1. If the prompt is not in the transcript, `recordPrompt` puts it there. Nothing runs yet.
+2. Otherwise `prepareStep` settles what an earlier attempt left behind. It returns false when the turn already has its answer, which is a retry landing after the last step finished.
+3. `step()` runs one model call and the tools it asks for, and says whether the turn is done.
 
-- `step()` adds no message, and nothing records a prompt without also driving the turn. So the first step still has to go through `prompt()`, which runs the rest of the turn with it.
-- `resumeInterruptedTurn()` settles the dangling tool call and then drives to the end of the turn. A stepped driver wants the settle on its own, then one step.
+The workflow loops that until a step reports done, so the number of activities is the number of steps. Nothing in the activity reads the workflow's step number: the transcript decides what runs next, and the workflow only counts so a runaway turn hits a ceiling.
 
-## What is durable, and what is not (verified by a crash test)
+That makes a retry cheap and safe for a reason worth spelling out. A step that finished but never reported back is indistinguishable, on disk, from the step after it, so re-running it does exactly what the next step would have done anyway. No work is repeated. The one case that is not automatic is a crash between a tool starting and its result landing, and that is what `prepareStep` is for.
 
-- **Between turns: clean.** A worker dying between turns loses nothing. The next prompt re-drives on any worker from the session file. A fresh worker that never saw the session serves it correctly.
-- **Worker re-execution: works.** Kill the worker mid-turn and Temporal re-runs the `runPrompt` activity on another worker (observed: activity attempt 2 completes), with no duplicate prompt. That is durable execution doing its job.
-- **Mid-turn recovery: handled via the fork's resume API.** A crash mid agent-run leaves Pi's session with a dangling tool-call assistant message and no final answer. The stock SDK cannot resume that. The fork adds `AgentSession.resumeInterruptedTurn()`, which repairs dangling tool calls (fails them, keeps completed tool results) and drives the turn to completion. On a retry, `runPrompt` sees the prompt marker already recorded and calls `resumeInterruptedTurn()` instead of re-prompting, so there is no duplicate prompt and no re-run side effect. The fork's own unit tests cover the mechanic (`packages/coding-agent/test/resume-interrupted-turn.test.ts`, mock model), and the live crash test here confirms it against a real model.
+## What is durable, and what is not
+
+- **Between turns: clean.** A worker dying between turns loses nothing. The next prompt drives on any worker from the session file. A fresh worker that never saw the session serves it correctly.
+- **Between steps: clean.** Each step is its own activity, so a worker dying loses at most the step in flight. The steps before it are on disk and are not re-run.
+- **Mid-step: the tool is reported as unknown, not re-run.** A crash between a tool starting and its result landing leaves a tool call with no result. `prepareStep` settles it with "the outcome of this tool call is unknown", and the model decides whether to try again. Blindly re-running it is the wrong default for a coding agent: the `git push` may already have happened.
+- **A step is not atomic.** Pi runs the tools of one step as a batch, so a crash part way through that batch leaves some tools run and some not. The settled ones keep their results; only the unsettled one is reported as unknown.
 
 ## Reproducing
 
-`scripts/`-style helpers are at the repo root: `submit.mts` (submit one prompt) and `inspect.mts` (summarize a session file). The crash test: start a worker, submit a turn whose bash tool sleeps a few seconds, `pkill -9 -f "pi-temporal.*src/worker.ts"` while it is in flight, wait past the 30s heartbeat timeout, start a fresh worker, and inspect. You will see the activity reach attempt 2, and the fresh worker finish the turn the crash cut in half.
+Helpers are at the repo root: `submit.mts` (submit one prompt), `inspect.mts` (summarize a session file), and `step-loop-check.mts` (run the executor against a Temporal server with a stubbed activity: one activity per step, an interrupt that ends the turn and not the session; no model key needed).
+
+The crash test: start a worker, submit a turn whose bash tool sleeps a few seconds, `pkill -9 -f "pi-temporal.*src/worker.ts"` while it is in flight, wait past the 30s heartbeat timeout, start a fresh worker, and inspect. You will see the step reach attempt 2, and the fresh worker carry the turn on from there.
 
 ## Layout
 
 - `src/config.ts` — Temporal + Pi wiring from env.
 - `src/protocol.ts` — workflow id, signal/update names, shared types.
-- `src/activities.ts` — `runPrompt`: drives one Pi turn via `@earendil-works/pi-coding-agent`, session file as the log.
-- `src/workflow.ts` — `piSession`: per-session durable executor (submit prompt, drive, interrupt, idle-terminate).
+- `src/activities.ts` — `runStep`: advances one Pi turn by one step via `@earendil-works/pi-coding-agent`, session file as the log.
+- `src/workflow.ts` — `piSession`: per-session durable executor (submit prompt, step to the end of the turn, interrupt, idle-terminate).
 - `src/worker.ts` — worker hosting the workflow + activity.
 - `src/client.ts` — helpers to submit a prompt / interrupt a session.
 - `src/demo.ts` — end-to-end smoke once a model key is set.
 
 ## Status
 
-- [x] Design + scaffold against Pi's real SDK (`createAgentSession`, `session.prompt`, `SessionManager`, `ModelRuntime`), typechecks.
+- [x] Design + scaffold against Pi's real SDK (`createAgentSession`, `SessionManager`, `ModelRuntime`), typechecks.
 - [x] Live happy-path turn (OpenAI via `ModelRuntime.getAvailable` + `setRuntimeApiKey`).
 - [x] Crash test: turn re-executes on a fresh worker (activity attempt 2), no duplicate prompt.
 - [x] Found the turn-level limit: mid-turn crash cannot resume cleanly on the stock SDK.
@@ -70,7 +80,9 @@ The fork now has the single-step runner (`AgentSession.step()`, one model call p
 - [x] Wired `runPrompt` to call `resumeInterruptedTurn()` on retry instead of re-prompting.
 - [x] Live re-verification: mid-turn crash recovers via `resumeInterruptedTurn()`, no duplicate prompt, tool balance intact.
 - [x] Pinned the dependency to [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) by commit, so CI builds it too.
-- [ ] A step per activity, once the fork can seed a prompt and settle a dangling call without driving the turn.
+- [x] Added `recordPrompt` and `prepareStep` to the fork, so a driver can step without ever running a whole turn.
+- [x] A step per activity, checked against Temporal with a stubbed activity (`step-loop-check.mts`).
+- [ ] Re-run the live crash test on the stepped executor (needs a working model key).
 - [ ] Package as an installable Pi extension (`pi install`), once a fork build is published.
 
 ## Prior art

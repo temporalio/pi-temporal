@@ -1,6 +1,7 @@
 // The per-session durable executor. One workflow per Pi session. It owns the small control state
-// (the pending-prompt queue); the large conversation state lives in Pi's session JSONL, which the
-// runPrompt activity reads and writes. A crash re-drives the in-flight turn on another worker.
+// (the pending-prompt queue and where a turn is up to); the large conversation state lives in Pi's
+// session JSONL, which the runStep activity reads and writes. One step is one activity, so a
+// worker crash re-drives that step alone, and every step before it stays done.
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
@@ -11,16 +12,17 @@ import {
   condition,
   CancellationScope,
   isCancellation,
+  log,
 } from "@temporalio/workflow";
-import { SIGNALS } from "./protocol.js";
-import type { PromptInput, RunPromptInput, RunPromptResult, SessionTurnOptions } from "./protocol.js";
+import { MAX_STEPS_PER_TURN, SIGNALS } from "./protocol.js";
+import type { PromptInput, RunStepInput, RunStepResult, SessionTurnOptions } from "./protocol.js";
 
-const { runPrompt } = proxyActivities<{
-  runPrompt(input: RunPromptInput): Promise<RunPromptResult>;
+const { runStep } = proxyActivities<{
+  runStep(input: RunStepInput): Promise<RunStepResult>;
 }>({
-  // A turn is a full agent run (many model calls and tools), so give it room; the heartbeat is the
-  // real liveness bound and re-drives within seconds of a worker death.
-  startToCloseTimeout: "1 hour",
+  // One step is a single model call plus the tools it asks for, so minutes, not hours. The
+  // heartbeat is the real liveness bound and re-drives within seconds of a worker death.
+  startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
   retry: { maximumAttempts: 100 },
 });
@@ -49,14 +51,22 @@ export async function piSession(
     if (!woke && queue.length === 0) return; // idle: retire; the next prompt starts a fresh run
 
     const prompt = queue.shift()!;
-    const input: RunPromptInput = { sessionId, sessionFile, ...prompt };
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
-        await runPrompt(input);
+        for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
+          const input: RunStepInput = { sessionId, sessionFile, step, ...prompt };
+          const { done } = await runStep(input);
+          if (done) return;
+        }
+        log.warn("turn hit the step ceiling and was left where it stopped", {
+          sessionId,
+          promptId: prompt.promptId,
+          maxSteps: MAX_STEPS_PER_TURN,
+        });
       });
     } catch (err) {
-      // An interrupt cancels the in-flight turn; the session keeps serving later prompts. A real
+      // An interrupt cancels the in-flight step; the session keeps serving later prompts. A real
       // run error is already recorded in the session log, so we log-and-continue rather than fail
       // the whole session. (Surfacing typed errors to a resume caller is a follow-up.)
       if (!isCancellation(err)) {

@@ -1,4 +1,4 @@
-// The worker: hosts the piSession workflow and the runPrompt activity. Run one or many; they pull
+// The worker: hosts the piSession workflow and the runStep activity. Run one or many; they pull
 // the same task queue, so any worker can drive any session from the shared session directory.
 
 import { fileURLToPath } from "node:url";

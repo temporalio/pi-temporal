@@ -1,12 +1,13 @@
-// The durable step body: drive exactly one Pi turn (a prompt to idle) via Pi's SDK, with the
-// session JSONL as the log. Runs inside a Temporal activity, so a worker crash re-runs this whole
-// call; it re-opens the session file. Node builtins and the Pi SDK are fine here (not workflow code).
+// The durable step body: advance one Pi turn by exactly one step (one model call and the tools it
+// asks for) via Pi's SDK, with the session JSONL as the log. Runs inside a Temporal activity, so a
+// worker crash re-runs this one step; it re-opens the session file. Node builtins and the Pi SDK
+// are fine here (not workflow code).
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Context } from "@temporalio/activity";
 import { createAgentSession, SessionManager, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { RunPromptInput, RunPromptResult } from "./protocol.js";
+import type { RunStepInput, RunStepResult } from "./protocol.js";
 import { textOf } from "./messages.js";
 
 const heartbeatEvery = (ms: number) => {
@@ -22,8 +23,8 @@ const heartbeatEvery = (ms: number) => {
 };
 
 // The prompt carries a zero-width marker with its promptId, so a re-driven activity can tell
-// whether this exact prompt was already recorded on a prior attempt. Present means: do not prompt
-// again; instead finish whatever the interrupted turn left behind.
+// whether this exact prompt was already recorded on a prior attempt. Present means: do not record
+// it again; step whatever the transcript already holds.
 const marker = (promptId: string) => `​[pi-temporal:${promptId}]`;
 
 type Msg = { role?: string; content?: unknown };
@@ -37,7 +38,7 @@ const lastAssistantText = (messages: Msg[]) => {
 };
 
 export function makeActivities(opts: { projectDir: string; openaiKey?: string; modelHint?: string }) {
-  async function runPrompt(input: RunPromptInput): Promise<RunPromptResult> {
+  async function runStep(input: RunStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
       await mkdir(dirname(input.sessionFile), { recursive: true });
@@ -58,18 +59,24 @@ export function makeActivities(opts: { projectDir: string; openaiKey?: string; m
       });
 
       try {
-        // A retry of an already-recorded prompt: finish the turn the crash interrupted (repair any
-        // dangling tool call, or drive an unanswered prompt to completion) rather than re-prompting,
-        // which would duplicate the prompt and re-run side effects.
-        if (markerPresent(session.state.messages as Msg[], input.promptId)) {
-          await session.resumeInterruptedTurn();
-          await session.waitForIdle();
-          return { ran: false, finalText: lastAssistantText(session.state.messages as Msg[]) };
+        if (!markerPresent(session.state.messages as Msg[], input.promptId)) {
+          // A fresh turn. Record the prompt without running it, so the first step is a step like
+          // any other and the crash window before it is one Temporal already covers.
+          if (!(await session.recordPrompt(`${input.text}${marker(input.promptId)}`))) {
+            throw new Error("Pi did not record the prompt; an extension may have taken the text");
+          }
+        } else if (!session.prepareStep()) {
+          // The prompt is recorded and the turn already has its answer. That is a retry landing
+          // after the last step finished but before its result reached Temporal.
+          return { done: true, finalText: lastAssistantText(session.state.messages as Msg[]) };
         }
 
-        await session.prompt(`${input.text}${marker(input.promptId)}`);
+        // prepareStep settled anything the crash left dangling, so this is a plain step: a tool
+        // whose result never landed is reported as unknown, not re-run behind the model's back.
+        const { done } = await session.step();
         await session.waitForIdle();
-        return { ran: true, finalText: lastAssistantText(session.state.messages as Msg[]) };
+        const messages = session.state.messages as Msg[];
+        return { done, finalText: done ? lastAssistantText(messages) : "" };
       } finally {
         session.dispose();
       }
@@ -78,7 +85,7 @@ export function makeActivities(opts: { projectDir: string; openaiKey?: string; m
     }
   }
 
-  return { runPrompt };
+  return { runStep };
 }
 
 export type Activities = ReturnType<typeof makeActivities>;
