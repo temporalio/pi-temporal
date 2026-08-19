@@ -10,13 +10,15 @@ async function main() {
   const cfg = fromEnv();
   const connection = await NativeConnection.connect({ address: cfg.address });
   const projectDir = process.env.PI_PROJECT_DIR ?? process.cwd();
+  const openaiKey = process.env.OPENAI_API_KEY;
+  const modelHint = process.env.PI_MODEL;
 
   const worker = await Worker.create({
     connection,
     namespace: cfg.namespace,
     taskQueue: cfg.taskQueue,
     workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),
-    activities: makeActivities({ projectDir }),
+    activities: makeActivities({ projectDir, openaiKey, modelHint }),
   });
 
   console.log(`pi-temporal worker on ${cfg.address} / ${cfg.namespace} / ${cfg.taskQueue}`);

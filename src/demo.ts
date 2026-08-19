@@ -6,6 +6,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fromEnv, sessionFileFor } from "./config.js";
 import { submitPrompt } from "./client.js";
+import { textOf } from "./messages.js";
+
+type Entry = { message?: { role?: string; content?: unknown } };
 
 async function main() {
   const sessionId = process.argv[2] ?? `demo-${Date.now()}`;
@@ -21,10 +24,11 @@ async function main() {
     await sleep(2000);
     try {
       const sm = SessionManager.open(file);
-      const entries = sm.getEntries() as Array<{ role?: string; text?: string }>;
-      const lastAssistant = [...entries].reverse().find((e) => e.role === "assistant");
-      if (lastAssistant?.text) {
-        console.log(`reply: ${lastAssistant.text}`);
+      const entries = sm.getEntries() as Entry[];
+      const lastAssistant = [...entries].reverse().find((e) => e.message?.role === "assistant");
+      const text = lastAssistant ? textOf(lastAssistant.message?.content) : "";
+      if (text) {
+        console.log(`reply: ${text}`);
         return;
       }
     } catch {
