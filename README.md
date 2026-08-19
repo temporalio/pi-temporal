@@ -4,7 +4,7 @@ A Temporal-backed durable executor for the [Pi coding agent](https://github.com/
 
 The durable unit is one step: a single model call and the tools it asks for. The workflow runs one Temporal activity per step, so a worker dying takes one step with it and every step before it stays done.
 
-Status: the turn-level shape was verified end to end against a live Pi (SDK 0.84.2 fork), both recovery paths, before the switch to stepping. The stepped executor is verified against Temporal with a stubbed activity (`step-loop-check.mts`) and by the fork's own unit tests. The live re-run needs a working model key.
+Status: verified end to end against a live Pi (SDK 0.84.2 fork). A turn that took three steps cost three activities. Killing the worker mid-step re-drove that step alone: the step before it stayed done and its `>>` append did not happen twice, the step in flight came back as attempt 2 on a fresh worker, the prompt was not re-added, and the turn ran on to its answer.
 
 ## Depends on the Pi fork
 
@@ -58,7 +58,7 @@ That makes a retry cheap and safe for a reason worth spelling out. A step that f
 
 Helpers are at the repo root: `submit.mts` (submit one prompt), `inspect.mts` (summarize a session file), and `step-loop-check.mts` (run the executor against a Temporal server with a stubbed activity: one activity per step, an interrupt that ends the turn and not the session; no model key needed).
 
-The crash test: start a worker, submit a turn whose bash tool sleeps a few seconds, `pkill -9 -f "pi-temporal.*src/worker.ts"` while it is in flight, wait past the 30s heartbeat timeout, start a fresh worker, and inspect. You will see the step reach attempt 2, and the fresh worker carry the turn on from there.
+The crash test: start a worker; submit a turn that appends to a file with one bash call and sleeps in the next, one at a time; poll the session file until `toolCalls > toolResults` (a tool call in flight); `pkill -9 -f "pi-temporal.*src/worker.ts"`; wait past the 30s heartbeat timeout; start a fresh worker. `temporal workflow show` will have the earlier step completed on attempt 1 and the interrupted one on attempt 2, and the appended file will have one line, not two.
 
 ## Layout
 
@@ -82,7 +82,7 @@ The crash test: start a worker, submit a turn whose bash tool sleeps a few secon
 - [x] Pinned the dependency to [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) by commit, so CI builds it too.
 - [x] Added `recordPrompt` and `prepareStep` to the fork, so a driver can step without ever running a whole turn.
 - [x] A step per activity, checked against Temporal with a stubbed activity (`step-loop-check.mts`).
-- [ ] Re-run the live crash test on the stepped executor (needs a working model key).
+- [x] Live crash test on the stepped executor: step 1 not re-run, step 2 on attempt 2, tool balance intact, no duplicate prompt.
 - [ ] Package as an installable Pi extension (`pi install`), once a fork build is published.
 
 ## Prior art
