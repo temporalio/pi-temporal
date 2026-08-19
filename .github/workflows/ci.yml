@@ -11,5 +11,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            fork.pin
       - run: npm ci
+      # After npm ci, which wipes node_modules and would take the fork link with it.
+      - run: scripts/setup-fork.sh
       - run: npm run typecheck

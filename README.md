@@ -9,16 +9,18 @@ Status: verified end to end against a live Pi (SDK 0.84.2 fork). Happy path work
 
 ## Depends on the Pi fork
 
-Mid-turn recovery needs the resume API added on the `temporalio/pi` fork branch `moe/step-and-resume` (`AgentSession.resumeInterruptedTurn()`, `AgentSession.step()`), which is not in the published `@earendil-works/pi-coding-agent`. Until a fork build is published, link it locally:
+Mid-turn recovery calls `AgentSession.resumeInterruptedTurn()`, which is not in the published `@earendil-works/pi-coding-agent`. It comes from [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) (branch `moe/step-and-resume`), together with `AgentSession.step()`.
+
+So the dependency is a build of the fork, pinned by commit in `fork.pin`:
 
 ```
-# in the fork
-cd ~/repos/pi/packages/coding-agent && npm link
-# in this repo
-cd ~/repos/pi-temporal && npm link @earendil-works/pi-coding-agent
+npm ci
+npm run setup-fork
 ```
 
-The linked package resolves its sibling `@earendil-works/pi-agent-core` (which carries `Agent.step` and the exported tool-result helpers) from the fork's own workspace, so the whole fork API is picked up.
+`setup-fork` fetches that exact commit into `.fork/pi` (ignored), builds it, and links it into `node_modules`. CI runs the same two commands, so a fresh clone and a CI run get the same build. The linked package resolves its sibling `@earendil-works/pi-agent-core` (which carries `Agent.step`) from the fork's own workspace, so the whole fork API is picked up.
+
+Run `setup-fork` after any `npm ci`, which wipes `node_modules` and takes the link with it. To move to a newer commit of the PR, edit `PI_FORK_REF` in `fork.pin` and run it again.
 
 ## The idea
 
@@ -31,21 +33,22 @@ This is the `storage` vs `execution` split from the AI-399 write-up, applied to 
 
 ## Granularity: turn-level for now
 
-Pi's SDK exposes `session.prompt(text)`, which runs a whole turn (the full agent loop, model calls plus tools) to `agent_end`. It does not expose a single-step runner. So the durable unit here is one prompt-to-`agent_end`, driven as one Temporal activity. That is the coarser, turn-level shape (the OpenCode Phase-1 analog), not the per-step re-drive we did on the OpenCode engine.
+`session.prompt(text)` runs a whole turn (the full agent loop, model calls plus tools) to `agent_end`. So the durable unit here is one prompt-to-`agent_end`, driven as one Temporal activity. That is the coarser, turn-level shape (the OpenCode Phase-1 analog), not the per-step re-drive we did on the OpenCode engine.
 
-Step-level durability would need Pi to expose "run one model call plus its tools, then return" so an outer driver can checkpoint between steps. That is an open item (see `docs/step-level.md` once it exists), and a good thing to raise with the Pi maintainers.
+The fork now has the single-step runner (`AgentSession.step()`, one model call plus its tools, no loop), so a step per activity is within reach. Two things still make the outer driver reach past the public API, and both are small additions to the fork:
+
+- `step()` adds no message, and nothing records a prompt without also driving the turn. So the first step still has to go through `prompt()`, which runs the rest of the turn with it.
+- `resumeInterruptedTurn()` settles the dangling tool call and then drives to the end of the turn. A stepped driver wants the settle on its own, then one step.
 
 ## What is durable, and what is not (verified by a crash test)
 
 - **Between turns: clean.** A worker dying between turns loses nothing. The next prompt re-drives on any worker from the session file. A fresh worker that never saw the session serves it correctly.
 - **Worker re-execution: works.** Kill the worker mid-turn and Temporal re-runs the `runPrompt` activity on another worker (observed: activity attempt 2 completes), with no duplicate prompt. That is durable execution doing its job.
-- **Mid-turn recovery: handled via the fork's resume API.** A crash mid agent-run leaves Pi's session with a dangling tool-call assistant message and no final answer. The stock SDK cannot resume that. The fork adds `AgentSession.resumeInterruptedTurn()`, which repairs dangling tool calls (fails them, keeps completed tool results) and drives the turn to completion. On a retry, `runPrompt` sees the prompt marker already recorded and calls `resumeInterruptedTurn()` instead of re-prompting, so there is no duplicate prompt and no re-run side effect. The resume mechanic is proven by the fork's own unit tests (`packages/coding-agent/test/resume-interrupted-turn.test.ts`, mock model); the live crash test here is pending a working model key.
-
-For per-step durability, drive `AgentSession.step()` (also on the fork) one step per activity, calling `resumeInterruptedTurn()` first when the transcript ends in a dangling tool call.
+- **Mid-turn recovery: handled via the fork's resume API.** A crash mid agent-run leaves Pi's session with a dangling tool-call assistant message and no final answer. The stock SDK cannot resume that. The fork adds `AgentSession.resumeInterruptedTurn()`, which repairs dangling tool calls (fails them, keeps completed tool results) and drives the turn to completion. On a retry, `runPrompt` sees the prompt marker already recorded and calls `resumeInterruptedTurn()` instead of re-prompting, so there is no duplicate prompt and no re-run side effect. The fork's own unit tests cover the mechanic (`packages/coding-agent/test/resume-interrupted-turn.test.ts`, mock model), and the live crash test here confirms it against a real model.
 
 ## Reproducing
 
-`scripts/`-style helpers are at the repo root: `submit.mts` (submit one prompt) and `inspect.mts` (summarize a session file). The crash test: start a worker, submit a turn whose bash tool sleeps a few seconds, `pkill -9 -f "pi-temporal.*src/worker.ts"` while it is in flight, wait past the 30s heartbeat timeout, start a fresh worker, and inspect. You will see the activity reach attempt 2 and the between-turn case recover; the mid-turn case shows the dangling-tool limitation above.
+`scripts/`-style helpers are at the repo root: `submit.mts` (submit one prompt) and `inspect.mts` (summarize a session file). The crash test: start a worker, submit a turn whose bash tool sleeps a few seconds, `pkill -9 -f "pi-temporal.*src/worker.ts"` while it is in flight, wait past the 30s heartbeat timeout, start a fresh worker, and inspect. You will see the activity reach attempt 2, and the fresh worker finish the turn the crash cut in half.
 
 ## Layout
 
@@ -66,6 +69,8 @@ For per-step durability, drive `AgentSession.step()` (also on the fork) one step
 - [x] Added the fix on the Pi fork (`resumeInterruptedTurn`, `step`); proven by the fork's mock-model tests.
 - [x] Wired `runPrompt` to call `resumeInterruptedTurn()` on retry instead of re-prompting.
 - [x] Live re-verification: mid-turn crash recovers via `resumeInterruptedTurn()`, no duplicate prompt, tool balance intact.
+- [x] Pinned the dependency to [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) by commit, so CI builds it too.
+- [ ] A step per activity, once the fork can seed a prompt and settle a dangling call without driving the turn.
 - [ ] Package as an installable Pi extension (`pi install`), once a fork build is published.
 
 ## Prior art
