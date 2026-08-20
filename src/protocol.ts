@@ -14,6 +14,25 @@ export const SIGNALS = {
   interrupt: "interrupt",
 } as const;
 
+export const QUERIES = {
+  turnState: "turnState",
+} as const;
+
+// What the session is doing, for anyone watching from outside: the pi extension, or a person
+// with the Temporal CLI. The conversation itself is in the session file, not here.
+export interface TurnState {
+  // Prompts accepted but not started.
+  readonly queued: number;
+  // The turn being driven right now, and which step it is on.
+  readonly running?: { readonly promptId: string; readonly step: number };
+  // The last turn to stop, and why it stopped.
+  readonly finished?: {
+    readonly promptId: string;
+    readonly outcome: "answered" | "interrupted" | "ceiling";
+    readonly finalText: string;
+  };
+}
+
 export interface PromptInput {
   // Deterministic id for this prompt, so a re-driven activity can tell whether it already ran.
   readonly promptId: string;

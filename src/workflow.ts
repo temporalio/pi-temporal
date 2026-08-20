@@ -8,14 +8,15 @@
 import {
   proxyActivities,
   defineSignal,
+  defineQuery,
   setHandler,
   condition,
   CancellationScope,
   isCancellation,
   log,
 } from "@temporalio/workflow";
-import { MAX_STEPS_PER_TURN, SIGNALS } from "./protocol.js";
-import type { PromptInput, RunStepInput, RunStepResult, SessionTurnOptions } from "./protocol.js";
+import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS } from "./protocol.js";
+import type { PromptInput, RunStepInput, RunStepResult, SessionTurnOptions, TurnState } from "./protocol.js";
 
 const { runStep } = proxyActivities<{
   runStep(input: RunStepInput): Promise<RunStepResult>;
@@ -29,6 +30,7 @@ const { runStep } = proxyActivities<{
 
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
+export const turnState = defineQuery<TurnState>(QUERIES.turnState);
 
 export async function piSession(
   sessionId: string,
@@ -38,6 +40,8 @@ export async function piSession(
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   const queue: PromptInput[] = [];
   let current: CancellationScope | undefined;
+  let running: TurnState["running"];
+  let finished: TurnState["finished"];
 
   setHandler(submitPrompt, (p) => {
     queue.push(p);
@@ -45,19 +49,27 @@ export async function piSession(
   setHandler(interrupt, () => {
     current?.cancel();
   });
+  setHandler(turnState, () => ({ queued: queue.length, running, finished }));
 
   for (;;) {
     const woke = await condition(() => queue.length > 0, idleTimeout);
     if (!woke && queue.length === 0) return; // idle: retire; the next prompt starts a fresh run
 
     const prompt = queue.shift()!;
+    let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
+    let finalText = "";
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
+          running = { promptId: prompt.promptId, step };
           const input: RunStepInput = { sessionId, sessionFile, step, ...prompt };
-          const { done } = await runStep(input);
-          if (done) return;
+          const result = await runStep(input);
+          if (result.done) {
+            outcome = "answered";
+            finalText = result.finalText;
+            return;
+          }
         }
         log.warn("turn hit the step ceiling and was left where it stopped", {
           sessionId,
@@ -69,11 +81,14 @@ export async function piSession(
       // An interrupt cancels the in-flight step; the session keeps serving later prompts. A real
       // run error is already recorded in the session log, so we log-and-continue rather than fail
       // the whole session. (Surfacing typed errors to a resume caller is a follow-up.)
+      outcome = "interrupted";
       if (!isCancellation(err)) {
         // TODO: classify and, for genuine failures, decide retry vs surface. For now, continue.
       }
     } finally {
       current = undefined;
+      running = undefined;
+      finished = { promptId: prompt.promptId, outcome, finalText };
     }
   }
 }

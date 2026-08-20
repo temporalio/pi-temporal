@@ -26,6 +26,28 @@ npm run setup-fork
 
 Run `setup-fork` after any `npm ci`, which wipes `node_modules` and takes the link with it. To move to a newer commit of the PR, edit `PI_FORK_REF` in `fork.pin` and run it again.
 
+## Install it into pi
+
+The repo is a pi package, so pi can install it:
+
+```
+pi install git:github.com/temporalio/pi-temporal
+pi install /path/to/pi-temporal      # a local checkout
+pi install -l /path/to/pi-temporal   # this project only
+```
+
+That adds three commands:
+
+- `/durable <task>` runs the task on the durable executor and brings the answer back here.
+- `/durable-status` shows what this session is waiting on.
+- `/durable-stop` interrupts it.
+
+`/durable` gives the task its own durable session that a worker owns, and returns straight away. Close the laptop and the worker carries on. When the turn finishes, the answer arrives as context for your next prompt, so you can just ask about it.
+
+It does not make the session you are typing in durable, and that is pi's extension API rather than a choice: an extension gets a read-only session manager and no handle on the running `AgentSession`, so it cannot drive the local loop. Driving a session takes the SDK, which is what the worker uses.
+
+So the two halves need different builds. The extension only talks to Temporal, so it runs on stock pi. The worker calls `step()`, so it needs the fork: clone this repo, run `npm ci && npm run setup-fork`, then `npm run worker`.
+
 ## The idea
 
 Two parts of the state, two systems:
@@ -58,10 +80,13 @@ That makes a retry cheap and safe for a reason worth spelling out. A step that f
 
 Helpers are at the repo root: `submit.mts` (submit one prompt), `inspect.mts` (summarize a session file), and `step-loop-check.mts` (run the executor against a Temporal server with a stubbed activity: one activity per step, an interrupt that ends the turn and not the session; no model key needed).
 
+To see what a session is doing without reading its file, ask the workflow: `temporal workflow query --workflow-id pi-session-<id> --name turnState` reports the queue, the step in flight, and how the last turn ended.
+
 The crash test: start a worker; submit a turn that appends to a file with one bash call and sleeps in the next, one at a time; poll the session file until `toolCalls > toolResults` (a tool call in flight); `pkill -9 -f "pi-temporal.*src/worker.ts"`; wait past the 30s heartbeat timeout; start a fresh worker. `temporal workflow show` will have the earlier step completed on attempt 1 and the interrupted one on attempt 2, and the appended file will have one line, not two.
 
 ## Layout
 
+- `extensions/durable.ts` — the pi extension: `/durable`, `/durable-status`, `/durable-stop`.
 - `src/config.ts` — Temporal + Pi wiring from env.
 - `src/protocol.ts` — workflow id, signal/update names, shared types.
 - `src/activities.ts` — `runStep`: advances one Pi turn by one step via `@earendil-works/pi-coding-agent`, session file as the log.
@@ -83,7 +108,8 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - [x] Added `recordPrompt` and `prepareStep` to the fork, so a driver can step without ever running a whole turn.
 - [x] A step per activity, checked against Temporal with a stubbed activity (`step-loop-check.mts`).
 - [x] Live crash test on the stepped executor: step 1 not re-run, step 2 on attempt 2, tool balance intact, no duplicate prompt.
-- [ ] Package as an installable Pi extension (`pi install`), once a fork build is published.
+- [x] Packaged as a pi package: `pi install` registers `/durable`, and a task submitted from the TUI came back as context for the next prompt.
+- [ ] A worker that pi can start for you, so `/durable` works without a separately launched worker.
 
 ## Prior art
 

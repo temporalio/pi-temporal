@@ -1,0 +1,196 @@
+// Hands a task to the durable executor from inside pi, and brings the answer back.
+//
+// It does not make the session you are typing in durable. A pi extension gets a read-only
+// session manager and no handle on the running AgentSession, so it cannot drive the local loop.
+// What it can do is give a task its own durable session that a worker owns: close the laptop,
+// the worker carries on, and the answer lands in this conversation when it is ready.
+//
+// The extension only talks to Temporal, so it runs on stock pi. The worker needs the fork build
+// (see the README): it is the side that calls step().
+
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import { Client, Connection } from "@temporalio/client";
+import { QUERIES, SIGNALS, WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
+import type { PromptInput, SessionTurnOptions, TurnState } from "../src/protocol.js";
+
+const STATUS_KEY = "pi-temporal";
+const POLL_MS = 2000;
+
+interface Env {
+  readonly address: string;
+  readonly namespace: string;
+  readonly taskQueue: string;
+  readonly sessionDir: string;
+  readonly idleTimeout: string;
+}
+
+// Read here rather than importing src/config.ts: that one is the worker's, and an extension has
+// no business inheriting the worker's defaults for the project directory.
+const env = (): Env => ({
+  address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
+  namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
+  taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
+  sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
+  idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
+});
+
+interface Task {
+  readonly sessionId: string;
+  readonly promptId: string;
+  readonly text: string;
+}
+
+export default function (pi: ExtensionAPI) {
+  const cfg = env();
+  // Started on first use, not in the factory: an invocation that never runs a task should not
+  // open a connection.
+  let connecting: Promise<{ client: Client; connection: Connection }> | undefined;
+  const watching = new Map<string, Task>();
+  let watcher: NodeJS.Timeout | undefined;
+
+  const connect = () => {
+    connecting ??= (async () => {
+      const connection = await Connection.connect({ address: cfg.address });
+      return { client: new Client({ connection, namespace: cfg.namespace }), connection };
+    })();
+    return connecting;
+  };
+
+  const describe = () =>
+    [...watching.values()].map((t) => `${t.sessionId}: ${t.text.slice(0, 60)}`).join("\n");
+
+  const showStatus = (ctx: ExtensionContext) => {
+    if (watching.size === 0) {
+      ctx.ui.setStatus(STATUS_KEY, "");
+      return;
+    }
+    ctx.ui.setStatus(STATUS_KEY, `${watching.size} durable task${watching.size === 1 ? "" : "s"} running`);
+  };
+
+  async function poll(ctx: ExtensionContext) {
+    const { client } = await connect();
+    for (const [id, task] of [...watching]) {
+      let state: TurnState;
+      try {
+        state = await client.workflow.getHandle(workflowId(task.sessionId)).query<TurnState, []>(QUERIES.turnState);
+      } catch {
+        // The session retires when it goes idle, so a missing workflow means the turn is over
+        // and its answer is in the session file. Stop watching rather than reporting a failure.
+        watching.delete(id);
+        continue;
+      }
+      if (state.finished?.promptId !== task.promptId) continue;
+
+      watching.delete(id);
+      const { outcome, finalText } = state.finished;
+      if (outcome === "answered") {
+        // nextTurn, so the answer is context for whatever the user asks next and nothing is
+        // interrupted to deliver it.
+        await pi.sendMessage(
+          {
+            customType: "pi-temporal",
+            content: `Durable task "${task.text}" finished on a worker. It answered:\n\n${finalText}`,
+            display: true,
+            details: { sessionId: task.sessionId, promptId: task.promptId },
+          },
+          { deliverAs: "nextTurn" },
+        );
+        ctx.ui.notify(`durable task done: ${task.sessionId}`, "info");
+      } else {
+        ctx.ui.notify(`durable task ${outcome}: ${task.sessionId}`, "warning");
+      }
+    }
+
+    showStatus(ctx);
+    if (watching.size === 0 && watcher) {
+      clearInterval(watcher);
+      watcher = undefined;
+    }
+  }
+
+  const watch = (ctx: ExtensionContext) => {
+    showStatus(ctx);
+    watcher ??= setInterval(() => {
+      poll(ctx).catch(() => {
+        // A server that went away is not worth interrupting the user for; the next tick retries.
+      });
+    }, POLL_MS);
+    watcher.unref?.();
+  };
+
+  pi.registerCommand("durable", {
+    description: "Run a task on the durable executor, and bring the answer back here",
+    handler: async (args, ctx) => {
+      const text = args.trim();
+      if (!text) {
+        ctx.ui.notify("usage: /durable <task>", "warning");
+        return;
+      }
+
+      const task: Task = {
+        sessionId: `pi-${randomUUID().slice(0, 8)}`,
+        promptId: randomUUID(),
+        text,
+      };
+      const prompt: PromptInput = { promptId: task.promptId, text };
+      const options: SessionTurnOptions = { idleTimeout: cfg.idleTimeout };
+
+      try {
+        const { client } = await connect();
+        await client.workflow.signalWithStart(WORKFLOW_TYPE, {
+          taskQueue: cfg.taskQueue,
+          workflowId: workflowId(task.sessionId),
+          args: [task.sessionId, `${cfg.sessionDir}/${task.sessionId}.jsonl`, options],
+          signal: SIGNALS.submitPrompt,
+          signalArgs: [prompt],
+        });
+      } catch (err) {
+        ctx.ui.notify(`could not reach Temporal at ${cfg.address}: ${String(err)}`, "error");
+        return;
+      }
+
+      watching.set(task.promptId, task);
+      watch(ctx);
+      ctx.ui.notify(`durable task started: ${task.sessionId}`, "info");
+    },
+  });
+
+  pi.registerCommand("durable-status", {
+    description: "Show the durable tasks this session is waiting on",
+    handler: async (_args, ctx) => {
+      if (watching.size === 0) {
+        ctx.ui.notify("no durable tasks running", "info");
+        return;
+      }
+      ctx.ui.notify(describe(), "info");
+    },
+  });
+
+  pi.registerCommand("durable-stop", {
+    description: "Interrupt the durable tasks this session is waiting on",
+    handler: async (_args, ctx) => {
+      const { client } = await connect();
+      for (const task of watching.values()) {
+        try {
+          await client.workflow.getHandle(workflowId(task.sessionId)).signal(SIGNALS.interrupt);
+        } catch {
+          // Already gone; poll() clears it.
+        }
+      }
+      ctx.ui.notify(`interrupted ${watching.size} durable task(s)`, "info");
+    },
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (watcher) {
+      clearInterval(watcher);
+      watcher = undefined;
+    }
+    if (connecting) {
+      const { connection } = await connecting;
+      connecting = undefined;
+      await connection.close();
+    }
+  });
+}

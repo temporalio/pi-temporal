@@ -4,6 +4,10 @@
   "private": true,
   "description": "Temporal-backed durable executor for the Pi coding agent",
   "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
   "scripts": {
     "setup-fork": "scripts/setup-fork.sh",
     "typecheck": "tsc --noEmit",
@@ -15,6 +19,14 @@
     "@temporalio/client": "^1.11.0",
     "@temporalio/worker": "^1.11.0",
     "@temporalio/workflow": "^1.11.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "tsx": "^4.19.0",
