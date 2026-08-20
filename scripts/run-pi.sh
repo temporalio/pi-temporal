@@ -39,4 +39,4 @@ if [ -z "${OPENAI_API_KEY:-}" ]; then
   export OPENAI_API_KEY
 fi
 
-exec node "$cli" -e "$root/extensions/durable.ts" "$@"
+exec node "$cli" -e "$root/extensions/temporal.ts" "$@"

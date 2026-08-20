@@ -1,13 +1,16 @@
-// Hands a task to the durable executor from inside pi, and brings the answer back.
+// Puts the session's turns under Temporal, and adds a way to send a task off to a worker.
 //
-// It does not make the session you are typing in durable. A pi extension gets a read-only
-// session manager and no handle on the running AgentSession, so it cannot drive the local loop.
-// What it can do is give a task its own durable session that a worker owns: the answer lands in
-// this conversation when it is ready, and a crash part way through does not lose the work.
+// Every turn is durable, with nothing to type and nothing to launch: the first turn registers an
+// executor and starts a worker in this process, so each turn becomes a workflow, and a turn a
+// crash cut in half is finished when the session is opened again. PI_TEMPORAL_DURABLE_TURNS=0
+// turns that off.
 //
-// It also runs a worker inside pi, so a task starts moving with nothing else launched. That
-// worker calls step(), which only the fork build has, so it needs pi to be the fork. The
-// Temporal side does not, which is why the commands still work on stock pi with a worker
+// /background is the other half, and a different thing: it gives a task its own session that a
+// worker owns, so it carries on after pi exits. That is offloading, not durability, which is why
+// it is a command rather than the default.
+//
+// The worker calls step(), which only the fork build has, so this needs pi to be the fork. The
+// Temporal side does not, which is why /background still works on stock pi against a worker
 // running elsewhere. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet worker owns the queue.
 
 import type { ExtensionAPI, ExtensionContext, TurnExecutorContext } from "@earendil-works/pi-coding-agent";
@@ -42,7 +45,7 @@ const env = (): Env => ({
   sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
   idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
-  durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS === "1",
+  durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS !== "0",
   provider: process.env.PI_TEMPORAL_PROVIDER,
   modelHint: process.env.PI_MODEL,
 });
@@ -63,6 +66,7 @@ export default function (pi: ExtensionAPI) {
   let watcher: NodeJS.Timeout | undefined;
   // The turn executor is handed a turn, not a context, so it borrows the session's for messages.
   let uiCtx: ExtensionContext | undefined;
+  let warnedNoTemporal = false;
 
   const connect = () => {
     connecting ??= (async () => {
@@ -80,13 +84,13 @@ export default function (pi: ExtensionAPI) {
         address: cfg.address,
         namespace: cfg.namespace,
         taskQueue: cfg.taskQueue,
-        // Tools run where you are, so a durable task sees the project you asked from.
+        // Tools run where you are, so a background task sees the project you asked from.
         projectDir: ctx.cwd,
         provider: cfg.provider ?? ctx.model?.provider,
         modelHint: cfg.modelHint ?? ctx.model?.id,
       });
       worker.run().catch((err) => {
-        ctx.ui.notify(`durable worker stopped: ${String(err)}`, "warning");
+        ctx.ui.notify(`background worker stopped: ${String(err)}`, "warning");
       });
       return worker;
     })();
@@ -101,7 +105,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus(STATUS_KEY, "");
       return;
     }
-    ctx.ui.setStatus(STATUS_KEY, `${watching.size} durable task${watching.size === 1 ? "" : "s"} running`);
+    ctx.ui.setStatus(STATUS_KEY, `${watching.size} background task${watching.size === 1 ? "" : "s"} running`);
   };
 
   async function poll(ctx: ExtensionContext) {
@@ -126,15 +130,15 @@ export default function (pi: ExtensionAPI) {
         await pi.sendMessage(
           {
             customType: "pi-temporal",
-            content: `Durable task "${task.text}" finished on a worker. It answered:\n\n${finalText}`,
+            content: `Background task "${task.text}" finished on a worker. It answered:\n\n${finalText}`,
             display: true,
             details: { sessionId: task.sessionId, promptId: task.promptId },
           },
           { deliverAs: "nextTurn" },
         );
-        ctx.ui.notify(`durable task done: ${task.sessionId}`, "info");
+        ctx.ui.notify(`background task done: ${task.sessionId}`, "info");
       } else {
-        ctx.ui.notify(`durable task ${outcome}: ${task.sessionId}`, "warning");
+        ctx.ui.notify(`background task ${outcome}: ${task.sessionId}`, "warning");
       }
     }
 
@@ -205,7 +209,11 @@ export default function (pi: ExtensionAPI) {
       // Durability is not worth losing a turn over. Temporal being unreachable means no record of
       // this turn, so run it the way pi would have, and say so rather than failing the turn.
       await turn.run();
-      uiCtx?.ui.notify(`durable turns unavailable, ran this turn locally: ${String(err)}`, "warning");
+      // Once. A session with no Temporal to reach would otherwise say it on every turn.
+      if (!warnedNoTemporal) {
+        warnedNoTemporal = true;
+        uiCtx?.ui.notify(`turns are not durable, Temporal is unreachable at ${cfg.address}`, "warning");
+      }
     } finally {
       liveTurns.delete(turnId);
     }
@@ -215,12 +223,12 @@ export default function (pi: ExtensionAPI) {
     pi.registerTurnExecutor(runTurnDurably, { resumeOnStart: true });
   }
 
-  pi.registerCommand("durable", {
-    description: "Run a task on the durable executor, and bring the answer back here",
+  pi.registerCommand("background", {
+    description: "Send a task to a worker that keeps going after pi exits, and bring the answer back",
     handler: async (args, ctx) => {
       const text = args.trim();
       if (!text) {
-        ctx.ui.notify("usage: /durable <task>", "warning");
+        ctx.ui.notify("usage: /background <task>", "warning");
         return;
       }
 
@@ -249,24 +257,24 @@ export default function (pi: ExtensionAPI) {
 
       watching.set(task.promptId, task);
       watch(ctx);
-      ctx.ui.notify(`durable task started: ${task.sessionId}`, "info");
+      ctx.ui.notify(`background task started: ${task.sessionId}`, "info");
     },
   });
 
-  pi.registerCommand("durable-status", {
-    description: "Show the durable tasks this session is waiting on",
+  pi.registerCommand("background-status", {
+    description: "Show the background tasks this session is waiting on",
     handler: async (_args, ctx) => {
       const worker = embedding ? "worker: in this pi" : "worker: external";
       if (watching.size === 0) {
-        ctx.ui.notify(`no durable tasks running (${worker})`, "info");
+        ctx.ui.notify(`no background tasks running (${worker})`, "info");
         return;
       }
       ctx.ui.notify(`${describe()}\n${worker}`, "info");
     },
   });
 
-  pi.registerCommand("durable-stop", {
-    description: "Interrupt the durable tasks this session is waiting on",
+  pi.registerCommand("background-stop", {
+    description: "Interrupt the background tasks this session is waiting on",
     handler: async (_args, ctx) => {
       const { client } = await connect();
       for (const task of watching.values()) {
@@ -276,7 +284,7 @@ export default function (pi: ExtensionAPI) {
           // Already gone; poll() clears it.
         }
       }
-      ctx.ui.notify(`interrupted ${watching.size} durable task(s)`, "info");
+      ctx.ui.notify(`interrupted ${watching.size} background task(s)`, "info");
     },
   });
 

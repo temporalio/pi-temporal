@@ -38,31 +38,52 @@ pi install /path/to/pi-temporal      # a local checkout
 pi install -l /path/to/pi-temporal   # this project only
 ```
 
-That adds three commands:
+Once it is installed, every turn of every session is durable. There is nothing to type and nothing
+to launch: the first turn registers a turn executor and starts a worker in this process, so each
+turn becomes a `piLocalTurn` workflow, and a turn a crash cut in half is finished when the session
+is opened again. `PI_TEMPORAL_DURABLE_TURNS=0` turns it off.
 
-- `/durable <task>` runs the task on the durable executor and brings the answer back here.
-- `/durable-status` shows what this session is waiting on.
-- `/durable-stop` interrupts it.
+Be clear about what that is and is not. The turn runs in your pi process, against the live session,
+so the transcript and the streaming are pi's own. It does not run somewhere else, and it cannot:
+the session it belongs to is in memory here. So the workflow is a record of the turn and a retry
+policy around it, and the recovery is "the next pi to open this session finishes the turn", not
+"the turn carries on without you".
 
-`/durable` gives the task its own durable session, and returns straight away. When the turn finishes, the answer arrives as context for your next prompt, so you can just ask about it.
+A crash test shows the part that matters: kill pi during a tool call, reopen with `pi -c`, and the
+unanswered call is settled as "the outcome of this tool call is unknown", the turn runs on, and the
+model checks the state rather than blindly running the command again.
 
-Nothing else to launch: the first `/durable` starts a worker inside pi. Quitting pi stops that worker, but not the task. The workflow keeps it, and the next worker to poll the queue picks the step up, which can be the one your next pi starts. Steps that already finished are not run again.
+If Temporal cannot be reached, the turn runs the way pi would have run it, and the session says so
+once. Durability is not worth losing a turn over.
 
-That worker calls `step()`, so this needs pi to be the fork build. The Temporal side does not, so on stock pi the commands still work against a worker running elsewhere: set `PI_TEMPORAL_EMBEDDED_WORKER=0` and run `npm run worker` from a clone. Do the same when a fleet worker owns the queue, or when you want tasks to keep moving with no pi open.
+## Sending a task away: /background
 
-## Every turn durable, without typing /durable
+Durability is not the same as offloading, so that has its own command:
 
-`PI_TEMPORAL_DURABLE_TURNS=1` puts the session's own turns under Temporal. Every prompt you type becomes a `piLocalTurn` workflow, and reopening a session finishes a turn an earlier run left half done. It needs [temporalio/pi#3](https://github.com/temporalio/pi/pull/3), which adds `pi.registerTurnExecutor`.
+- `/background <task>` gives a task its own session that a worker owns, and returns straight away.
+- `/background-status` shows what this session is waiting on.
+- `/background-stop` interrupts it.
 
-Be clear about what this is and is not. The turn still runs in your pi process, against the live session, so the transcript and the streaming are pi's own. It does not run somewhere else, and it cannot: the session it belongs to is in memory here. So the workflow is a record of the turn and a retry policy around it, and the recovery is "the next pi to open this session finishes the turn", not "the turn carries on without you". For work that should carry on without you, use `/durable`, where a worker owns the session from the start.
+The difference from an ordinary turn is who owns the session. A background task belongs to the
+worker from the start, so it carries on after pi exits, and the durable unit is one step rather
+than one turn: a worker dying loses the step in flight and nothing before it. When the task
+finishes, the answer arrives as context for your next prompt, so you can just ask about it.
 
-What that buys, concretely: every turn is visible in Temporal with its outcome, and a turn cut in half by a crash is finished when you reopen the session instead of sitting there forever. That last part is the interesting one, and it is what a crash test shows: kill pi during a tool call, reopen with `pi -c`, and the call is settled as "the outcome of this tool call is unknown", the turn runs on, and the model checks the state rather than blindly running the command again.
+Quitting pi stops the worker inside it, but not the task. The workflow keeps it, and the next
+worker to poll the queue picks the step up, which can be the one your next pi starts.
 
-If Temporal cannot be reached, the turn runs the way pi would have run it and says so. Durability is not worth losing a turn over.
+The worker calls `step()`, so this needs pi to be the fork build. The Temporal side does not, so on
+stock pi the commands still work against a worker running elsewhere: set
+`PI_TEMPORAL_EMBEDDED_WORKER=0` and run `npm run worker` from a clone. Do the same when a fleet
+worker owns the queue, or when you want tasks to keep moving with no pi open.
 
-## Why the typing session cannot be handed to a worker
+## Why the session you type in cannot be handed to a worker
 
-An extension gets a read-only session manager and no handle on the running `AgentSession`, so it cannot drive the local loop itself. `registerTurnExecutor` is the way in, and it hands the turn over in this process. Moving the turn to a worker would mean a second `AgentSession` writing the same session file, which is two writers on one JSONL. That is why `/durable` gives a task its own session instead.
+An extension gets a read-only session manager and no handle on the running `AgentSession`, so it
+cannot drive the local loop itself. `registerTurnExecutor` is the way in, and it hands the turn
+over in this process. Moving the turn to a worker instead would mean a second `AgentSession`
+writing the same session file, which is two writers on one JSONL. That is why `/background` gives
+a task its own session rather than borrowing yours.
 
 ## Try it
 
@@ -79,18 +100,26 @@ cd /path/to/your/project
 "$PI_TEMPORAL"/scripts/run-pi.sh
 ```
 
-Type `/durable Use the bash tool to write hello into note.txt, then reply DONE.` It returns straight away and the worker inside pi takes it from there. When it finishes you get a notification, and the answer is context for your next prompt, so `what did the durable task do?` works. The tools run in the directory you launched pi from, so `note.txt` lands there.
+Then just type. Every turn is a workflow: `temporal workflow list --address 127.0.0.1:7233` shows one
+`piLocalTurn` per prompt. To see the recovery, kill pi during a tool call (`Use the bash tool to run:
+sleep 45; echo late`), reopen with `scripts/run-pi.sh -c`, and watch the interrupted call get settled.
 
-`run-pi.sh` needs `OPENAI_API_KEY`, or `OPENAI_API_KEY_FILE` pointing at a file with one, and it pins the durable task to `gpt-4o-mini` so the test does not depend on which model the TUI has selected. It runs the fork build from `.fork/pi`, so `npm ci && npm run setup-fork` has to have happened.
+For the other half, type `/background Use the bash tool to write hello into note.txt, then reply DONE.`
+It returns straight away and a worker takes it from there. The tools run in the directory you launched
+pi from, so `note.txt` lands there.
+
+`run-pi.sh` needs `OPENAI_API_KEY`, or `OPENAI_API_KEY_FILE` pointing at a file with one, and it pins
+the model to `gpt-4o-mini` so a test does not depend on which model the TUI has selected. It runs the
+fork build from `.fork/pi`, so `npm ci && npm run setup-fork` has to have happened.
 
 To check the whole path without typing:
 
 ```
-./scripts/durable-smoke.sh         # starts a worker, submits a turn, waits, exits non-zero on failure
+./scripts/background-smoke.sh         # starts a worker, submits a turn, waits, exits non-zero on failure
 npx tsx step-loop-check.mts        # one activity per step, and interrupts; no model key needed
 ```
 
-`durable-smoke.sh` drives the standalone worker rather than the one inside pi, because print mode exits the moment the command returns and takes that worker with it.
+`background-smoke.sh` drives the standalone worker rather than the one inside pi, because print mode exits the moment the command returns and takes that worker with it.
 
 ## The idea
 
@@ -130,7 +159,7 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 
 ## Layout
 
-- `extensions/durable.ts` — the pi extension: `/durable`, `/durable-status`, `/durable-stop`.
+- `extensions/temporal.ts` — the pi extension: the turn executor, and `/background`.
 - `src/config.ts` — Temporal + Pi wiring from env.
 - `src/protocol.ts` — workflow ids, signal/query names, shared types.
 - `src/local-turn-workflow.ts` — `piLocalTurn`: one workflow per turn of a live session.
@@ -155,9 +184,9 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - [x] Added `recordPrompt` and `prepareStep` to the fork, so a driver can step without ever running a whole turn.
 - [x] A step per activity, checked against Temporal with a stubbed activity (`step-loop-check.mts`).
 - [x] Live crash test on the stepped executor: step 1 not re-run, step 2 on attempt 2, tool balance intact, no duplicate prompt.
-- [x] Packaged as a pi package: `pi install` registers `/durable`, and a task submitted from the TUI came back as context for the next prompt.
-- [x] A worker inside pi, so `/durable` works with nothing else launched (verified with no worker process anywhere).
-- [x] Every turn durable via `registerTurnExecutor`, with a crash mid tool call finished on reopen.
+- [x] Packaged as a pi package: `pi install` registers the commands, and a task submitted from the TUI came back as context for the next prompt.
+- [x] A worker inside pi, so a task runs with nothing else launched (verified with no worker process anywhere).
+- [x] Every turn durable by default via `registerTurnExecutor`, with a crash mid tool call finished on reopen.
 
 ## Prior art
 
