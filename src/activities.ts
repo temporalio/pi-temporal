@@ -37,7 +37,19 @@ const lastAssistantText = (messages: Msg[]) => {
   return answer ? textOf(answer.content) : "";
 };
 
-export function makeActivities(opts: { projectDir: string; openaiKey?: string; modelHint?: string }) {
+export interface ActivityOptions {
+  // Where the agent's tools run. The embedded worker points this at the pi session's own cwd.
+  readonly projectDir: string;
+  readonly provider?: string;
+  // Matched as a substring of the model id, so "mini" picks the first mini the provider offers.
+  readonly modelHint?: string;
+  // Only needed when the key is not already in Pi's auth store.
+  readonly apiKey?: string;
+}
+
+export function makeActivities(opts: ActivityOptions) {
+  const provider = opts.provider ?? "openai";
+
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
@@ -45,11 +57,11 @@ export function makeActivities(opts: { projectDir: string; openaiKey?: string; m
       const sessionManager = SessionManager.open(input.sessionFile);
 
       const modelRuntime = await ModelRuntime.create();
-      if (opts.openaiKey) await modelRuntime.setRuntimeApiKey("openai", opts.openaiKey);
-      const available = await modelRuntime.getAvailable("openai");
+      if (opts.apiKey) await modelRuntime.setRuntimeApiKey(provider, opts.apiKey);
+      const available = await modelRuntime.getAvailable(provider);
       const hint = opts.modelHint ?? "mini";
       const model = available.find((m) => m.id.includes(hint)) ?? available[0];
-      if (!model) throw new Error("no OpenAI model available; check the key and provider support");
+      if (!model) throw new Error(`no ${provider} model available; check the key and provider support`);
 
       const { session } = await createAgentSession({
         sessionManager,

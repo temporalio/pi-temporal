@@ -2,17 +2,20 @@
 //
 // It does not make the session you are typing in durable. A pi extension gets a read-only
 // session manager and no handle on the running AgentSession, so it cannot drive the local loop.
-// What it can do is give a task its own durable session that a worker owns: close the laptop,
-// the worker carries on, and the answer lands in this conversation when it is ready.
+// What it can do is give a task its own durable session that a worker owns: the answer lands in
+// this conversation when it is ready, and a crash part way through does not lose the work.
 //
-// The extension only talks to Temporal, so it runs on stock pi. The worker needs the fork build
-// (see the README): it is the side that calls step().
+// It also runs a worker inside pi, so a task starts moving with nothing else launched. That
+// worker calls step(), which only the fork build has, so it needs pi to be the fork. The
+// Temporal side does not, which is why the commands still work on stock pi with a worker
+// running elsewhere. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet worker owns the queue.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { Client, Connection } from "@temporalio/client";
 import { QUERIES, SIGNALS, WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
 import type { PromptInput, SessionTurnOptions, TurnState } from "../src/protocol.js";
+import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 
 const STATUS_KEY = "pi-temporal";
 const POLL_MS = 2000;
@@ -23,6 +26,9 @@ interface Env {
   readonly taskQueue: string;
   readonly sessionDir: string;
   readonly idleTimeout: string;
+  readonly embeddedWorker: boolean;
+  readonly provider?: string;
+  readonly modelHint?: string;
 }
 
 // Read here rather than importing src/config.ts: that one is the worker's, and an extension has
@@ -33,6 +39,9 @@ const env = (): Env => ({
   taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
   sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
   idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
+  embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
+  provider: process.env.PI_TEMPORAL_PROVIDER,
+  modelHint: process.env.PI_MODEL,
 });
 
 interface Task {
@@ -46,6 +55,7 @@ export default function (pi: ExtensionAPI) {
   // Started on first use, not in the factory: an invocation that never runs a task should not
   // open a connection.
   let connecting: Promise<{ client: Client; connection: Connection }> | undefined;
+  let embedding: Promise<SessionWorker> | undefined;
   const watching = new Map<string, Task>();
   let watcher: NodeJS.Timeout | undefined;
 
@@ -55,6 +65,27 @@ export default function (pi: ExtensionAPI) {
       return { client: new Client({ connection, namespace: cfg.namespace }), connection };
     })();
     return connecting;
+  };
+
+  // The worker takes a second to build its workflow bundle, so start it with the first task
+  // rather than at startup, and let it keep polling for the rest of the session.
+  const startWorker = (ctx: ExtensionContext) => {
+    embedding ??= (async () => {
+      const worker = await createSessionWorker({
+        address: cfg.address,
+        namespace: cfg.namespace,
+        taskQueue: cfg.taskQueue,
+        // Tools run where you are, so a durable task sees the project you asked from.
+        projectDir: ctx.cwd,
+        provider: cfg.provider ?? ctx.model?.provider,
+        modelHint: cfg.modelHint ?? ctx.model?.id,
+      });
+      worker.run().catch((err) => {
+        ctx.ui.notify(`durable worker stopped: ${String(err)}`, "warning");
+      });
+      return worker;
+    })();
+    return embedding;
   };
 
   const describe = () =>
@@ -137,6 +168,7 @@ export default function (pi: ExtensionAPI) {
       const options: SessionTurnOptions = { idleTimeout: cfg.idleTimeout };
 
       try {
+        if (cfg.embeddedWorker) await startWorker(ctx);
         const { client } = await connect();
         await client.workflow.signalWithStart(WORKFLOW_TYPE, {
           taskQueue: cfg.taskQueue,
@@ -159,11 +191,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("durable-status", {
     description: "Show the durable tasks this session is waiting on",
     handler: async (_args, ctx) => {
+      const worker = embedding ? "worker: in this pi" : "worker: external";
       if (watching.size === 0) {
-        ctx.ui.notify("no durable tasks running", "info");
+        ctx.ui.notify(`no durable tasks running (${worker})`, "info");
         return;
       }
-      ctx.ui.notify(describe(), "info");
+      ctx.ui.notify(`${describe()}\n${worker}`, "info");
     },
   });
 
@@ -186,6 +219,13 @@ export default function (pi: ExtensionAPI) {
     if (watcher) {
       clearInterval(watcher);
       watcher = undefined;
+    }
+    if (embedding) {
+      const worker = await embedding;
+      embedding = undefined;
+      // A task in flight is not lost: the workflow keeps it, and the next worker to poll the
+      // queue picks the step up, which may be the one this pi starts next time.
+      await worker.stop();
     }
     if (connecting) {
       const { connection } = await connecting;

@@ -42,11 +42,13 @@ That adds three commands:
 - `/durable-status` shows what this session is waiting on.
 - `/durable-stop` interrupts it.
 
-`/durable` gives the task its own durable session that a worker owns, and returns straight away. Close the laptop and the worker carries on. When the turn finishes, the answer arrives as context for your next prompt, so you can just ask about it.
+`/durable` gives the task its own durable session, and returns straight away. When the turn finishes, the answer arrives as context for your next prompt, so you can just ask about it.
+
+Nothing else to launch: the first `/durable` starts a worker inside pi. Quitting pi stops that worker, but not the task. The workflow keeps it, and the next worker to poll the queue picks the step up, which can be the one your next pi starts. Steps that already finished are not run again.
+
+That worker calls `step()`, so this needs pi to be the fork build. The Temporal side does not, so on stock pi the commands still work against a worker running elsewhere: set `PI_TEMPORAL_EMBEDDED_WORKER=0` and run `npm run worker` from a clone. Do the same when a fleet worker owns the queue, or when you want tasks to keep moving with no pi open.
 
 It does not make the session you are typing in durable, and that is pi's extension API rather than a choice: an extension gets a read-only session manager and no handle on the running `AgentSession`, so it cannot drive the local loop. Driving a session takes the SDK, which is what the worker uses.
-
-So the two halves need different builds. The extension only talks to Temporal, so it runs on stock pi. The worker calls `step()`, so it needs the fork: clone this repo, run `npm ci && npm run setup-fork`, then `npm run worker`.
 
 ## The idea
 
@@ -91,7 +93,8 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - `src/protocol.ts` — workflow id, signal/update names, shared types.
 - `src/activities.ts` — `runStep`: advances one Pi turn by one step via `@earendil-works/pi-coding-agent`, session file as the log.
 - `src/workflow.ts` — `piSession`: per-session durable executor (submit prompt, step to the end of the turn, interrupt, idle-terminate).
-- `src/worker.ts` — worker hosting the workflow + activity.
+- `src/session-worker.ts` — builds the worker; used by the standalone process and by the extension.
+- `src/worker.ts` — the standalone worker process.
 - `src/client.ts` — helpers to submit a prompt / interrupt a session.
 - `src/demo.ts` — end-to-end smoke once a model key is set.
 
@@ -109,7 +112,7 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - [x] A step per activity, checked against Temporal with a stubbed activity (`step-loop-check.mts`).
 - [x] Live crash test on the stepped executor: step 1 not re-run, step 2 on attempt 2, tool balance intact, no duplicate prompt.
 - [x] Packaged as a pi package: `pi install` registers `/durable`, and a task submitted from the TUI came back as context for the next prompt.
-- [ ] A worker that pi can start for you, so `/durable` works without a separately launched worker.
+- [x] A worker inside pi, so `/durable` works with nothing else launched (verified with no worker process anywhere).
 
 ## Prior art
 
