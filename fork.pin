@@ -1,10 +1,14 @@
 # The Pi build this executor depends on.
 #
-# temporalio/pi PR #2 (branch moe/step-and-resume) adds the four calls a stepped driver needs:
-# recordPrompt, prepareStep, step, and resumeInterruptedTurn on AgentSession. None of them is in
-# the published @earendil-works/pi-coding-agent, so the dependency is a build of the fork.
+# temporalio/pi PR #3 (branch moe/turn-executor), which stacks on PR #2:
+#   #2 adds recordPrompt, prepareStep, step and resumeInterruptedTurn on AgentSession, which the
+#      worker needs to drive a session one step at a time.
+#   #3 adds pi.registerTurnExecutor, which the extension needs to make a session's own turns
+#      durable.
+# None of it is in the published @earendil-works/pi-coding-agent, so the dependency is a build of
+# the fork.
 #
 # Bump PI_FORK_REF when the PR moves, then re-run scripts/setup-fork.sh.
 
 PI_FORK_REPO=https://github.com/temporalio/pi.git
-PI_FORK_REF=989c52f34fac4db7f1facc0d50774346130abe86
+PI_FORK_REF=6e9cfb7853cfcccc7b1b8c32ff1aa821fbeebe2d

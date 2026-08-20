@@ -12,6 +12,9 @@ export interface SessionWorkerOptions extends ActivityOptions {
   readonly address: string;
   readonly namespace: string;
   readonly taskQueue: string;
+  // Activities beyond runStep. The turn executor adds runLocalTurn, which needs the live turns of
+  // the process it runs in and so cannot come from here.
+  readonly activities?: Record<string, unknown>;
 }
 
 export interface SessionWorker {
@@ -27,8 +30,8 @@ export async function createSessionWorker(opts: SessionWorkerOptions): Promise<S
     connection,
     namespace: opts.namespace,
     taskQueue: opts.taskQueue,
-    workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),
-    activities: makeActivities(opts),
+    workflowsPath: fileURLToPath(new URL("./workflows.ts", import.meta.url)),
+    activities: { ...makeActivities(opts), ...opts.activities },
   });
 
   let running: Promise<void> | undefined;

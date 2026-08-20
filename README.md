@@ -8,12 +8,14 @@ Status: verified end to end against a live Pi (SDK 0.84.2 fork). A turn that too
 
 ## Depends on the Pi fork
 
-Stepping calls four things the published `@earendil-works/pi-coding-agent` does not have. They come from [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) (branch `moe/step-and-resume`):
+This needs two pull requests on the fork, neither of which is in the published `@earendil-works/pi-coding-agent`. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
 
 - `recordPrompt(text)` puts a prompt in the transcript without running it.
 - `step()` runs one model call and its tools, and reports whether the turn is done.
 - `prepareStep()` settles what a stopped turn left behind, without running to the end of it.
 - `resumeInterruptedTurn()` is `prepareStep()` plus a run to the end of the turn, for a caller that wants the whole turn back in one call.
+
+[temporalio/pi#3](https://github.com/temporalio/pi/pull/3), stacked on it, adds `pi.registerTurnExecutor`, which lets an extension take over when a session's own turns run.
 
 So the dependency is a build of the fork, pinned by commit in `fork.pin`:
 
@@ -48,7 +50,19 @@ Nothing else to launch: the first `/durable` starts a worker inside pi. Quitting
 
 That worker calls `step()`, so this needs pi to be the fork build. The Temporal side does not, so on stock pi the commands still work against a worker running elsewhere: set `PI_TEMPORAL_EMBEDDED_WORKER=0` and run `npm run worker` from a clone. Do the same when a fleet worker owns the queue, or when you want tasks to keep moving with no pi open.
 
-It does not make the session you are typing in durable, and that is pi's extension API rather than a choice: an extension gets a read-only session manager and no handle on the running `AgentSession`, so it cannot drive the local loop. Driving a session takes the SDK, which is what the worker uses.
+## Every turn durable, without typing /durable
+
+`PI_TEMPORAL_DURABLE_TURNS=1` puts the session's own turns under Temporal. Every prompt you type becomes a `piLocalTurn` workflow, and reopening a session finishes a turn an earlier run left half done. It needs [temporalio/pi#3](https://github.com/temporalio/pi/pull/3), which adds `pi.registerTurnExecutor`.
+
+Be clear about what this is and is not. The turn still runs in your pi process, against the live session, so the transcript and the streaming are pi's own. It does not run somewhere else, and it cannot: the session it belongs to is in memory here. So the workflow is a record of the turn and a retry policy around it, and the recovery is "the next pi to open this session finishes the turn", not "the turn carries on without you". For work that should carry on without you, use `/durable`, where a worker owns the session from the start.
+
+What that buys, concretely: every turn is visible in Temporal with its outcome, and a turn cut in half by a crash is finished when you reopen the session instead of sitting there forever. That last part is the interesting one, and it is what a crash test shows: kill pi during a tool call, reopen with `pi -c`, and the call is settled as "the outcome of this tool call is unknown", the turn runs on, and the model checks the state rather than blindly running the command again.
+
+If Temporal cannot be reached, the turn runs the way pi would have run it and says so. Durability is not worth losing a turn over.
+
+## Why the typing session cannot be handed to a worker
+
+An extension gets a read-only session manager and no handle on the running `AgentSession`, so it cannot drive the local loop itself. `registerTurnExecutor` is the way in, and it hands the turn over in this process. Moving the turn to a worker would mean a second `AgentSession` writing the same session file, which is two writers on one JSONL. That is why `/durable` gives a task its own session instead.
 
 ## Try it
 
@@ -118,7 +132,9 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 
 - `extensions/durable.ts` — the pi extension: `/durable`, `/durable-status`, `/durable-stop`.
 - `src/config.ts` — Temporal + Pi wiring from env.
-- `src/protocol.ts` — workflow id, signal/update names, shared types.
+- `src/protocol.ts` — workflow ids, signal/query names, shared types.
+- `src/local-turn-workflow.ts` — `piLocalTurn`: one workflow per turn of a live session.
+- `src/local-turn-activity.ts` — runs the turn the pi process is holding.
 - `src/activities.ts` — `runStep`: advances one Pi turn by one step via `@earendil-works/pi-coding-agent`, session file as the log.
 - `src/workflow.ts` — `piSession`: per-session durable executor (submit prompt, step to the end of the turn, interrupt, idle-terminate).
 - `src/session-worker.ts` — builds the worker; used by the standalone process and by the extension.
@@ -141,6 +157,7 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - [x] Live crash test on the stepped executor: step 1 not re-run, step 2 on attempt 2, tool balance intact, no duplicate prompt.
 - [x] Packaged as a pi package: `pi install` registers `/durable`, and a task submitted from the TUI came back as context for the next prompt.
 - [x] A worker inside pi, so `/durable` works with nothing else launched (verified with no worker process anywhere).
+- [x] Every turn durable via `registerTurnExecutor`, with a crash mid tool call finished on reopen.
 
 ## Prior art
 

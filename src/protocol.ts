@@ -65,3 +65,17 @@ export interface SessionTurnOptions {
 // A turn that never stops stepping is a bug (a model looping on the same tool, say), and the
 // workflow is the only place that can see it. High enough that real work never reaches it.
 export const MAX_STEPS_PER_TURN = 200;
+
+// One workflow per turn of a live pi session, for the turn executor. The turn runs in the pi
+// process that owns it, so this is a record and a retry policy around that turn, not a way to
+// move it somewhere else.
+export const LOCAL_TURN_WORKFLOW = "piLocalTurn";
+
+export interface LocalTurnInput {
+  readonly sessionId: string;
+  // Identifies the live turn inside the process that owns it.
+  readonly turnId: string;
+  // The queue that process is polling. One queue per process, because only that process can run
+  // this turn.
+  readonly taskQueue: string;
+}

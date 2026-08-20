@@ -10,11 +10,12 @@
 // Temporal side does not, which is why the commands still work on stock pi with a worker
 // running elsewhere. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet worker owns the queue.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, TurnExecutorContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { Client, Connection } from "@temporalio/client";
-import { QUERIES, SIGNALS, WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
-import type { PromptInput, SessionTurnOptions, TurnState } from "../src/protocol.js";
+import { LOCAL_TURN_WORKFLOW, QUERIES, SIGNALS, WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
+import type { LocalTurnInput, PromptInput, SessionTurnOptions, TurnState } from "../src/protocol.js";
+import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 
 const STATUS_KEY = "pi-temporal";
@@ -27,6 +28,7 @@ interface Env {
   readonly sessionDir: string;
   readonly idleTimeout: string;
   readonly embeddedWorker: boolean;
+  readonly durableTurns: boolean;
   readonly provider?: string;
   readonly modelHint?: string;
 }
@@ -40,6 +42,7 @@ const env = (): Env => ({
   sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
   idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
+  durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS === "1",
   provider: process.env.PI_TEMPORAL_PROVIDER,
   modelHint: process.env.PI_MODEL,
 });
@@ -58,6 +61,8 @@ export default function (pi: ExtensionAPI) {
   let embedding: Promise<SessionWorker> | undefined;
   const watching = new Map<string, Task>();
   let watcher: NodeJS.Timeout | undefined;
+  // The turn executor is handed a turn, not a context, so it borrows the session's for messages.
+  let uiCtx: ExtensionContext | undefined;
 
   const connect = () => {
     connecting ??= (async () => {
@@ -150,6 +155,66 @@ export default function (pi: ExtensionAPI) {
     watcher.unref?.();
   };
 
+  // Every turn of this session, wrapped in a workflow. The turn still runs here, so the queue is
+  // this process alone: no other worker could find the session it belongs to.
+  const turnQueue = `${cfg.taskQueue}-local-${randomUUID().slice(0, 8)}`;
+  const liveTurns: LiveTurns = new Map();
+  let turnWorker: Promise<SessionWorker> | undefined;
+
+  const startTurnWorker = () => {
+    turnWorker ??= (async () => {
+      const worker = await createSessionWorker({
+        address: cfg.address,
+        namespace: cfg.namespace,
+        taskQueue: turnQueue,
+        projectDir: process.cwd(),
+        activities: makeLocalTurnActivities(liveTurns),
+      });
+      worker.run().catch(() => {
+        // Reported by the turn that fails; a dead worker means turns run locally from here on.
+      });
+      return worker;
+    })();
+    return turnWorker;
+  };
+
+  const runTurnDurably = async (turn: TurnExecutorContext) => {
+    const turnId = randomUUID();
+    const input: LocalTurnInput = { sessionId: turn.sessionId, turnId, taskQueue: turnQueue };
+    let ran = false;
+    liveTurns.set(turnId, {
+      run: async () => {
+        ran = true;
+        await turn.run();
+      },
+    });
+
+    try {
+      await startTurnWorker();
+      const { client } = await connect();
+      await client.workflow.execute(LOCAL_TURN_WORKFLOW, {
+        taskQueue: turnQueue,
+        workflowId: `pi-turn-${turn.sessionId}-${turnId}`,
+        args: [input],
+      });
+    } catch (err) {
+      // If the turn itself failed, that is pi's error to report, not ours to retry.
+      if (ran) {
+        throw err;
+      }
+      // Durability is not worth losing a turn over. Temporal being unreachable means no record of
+      // this turn, so run it the way pi would have, and say so rather than failing the turn.
+      await turn.run();
+      uiCtx?.ui.notify(`durable turns unavailable, ran this turn locally: ${String(err)}`, "warning");
+    } finally {
+      liveTurns.delete(turnId);
+    }
+  };
+
+  if (cfg.durableTurns) {
+    pi.registerTurnExecutor(runTurnDurably, { resumeOnStart: true });
+  }
+
   pi.registerCommand("durable", {
     description: "Run a task on the durable executor, and bring the answer back here",
     handler: async (args, ctx) => {
@@ -215,7 +280,16 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.on("session_start", async (_event, ctx) => {
+    uiCtx = ctx;
+  });
+
   pi.on("session_shutdown", async () => {
+    if (turnWorker) {
+      const worker = await turnWorker;
+      turnWorker = undefined;
+      await worker.stop();
+    }
     if (watcher) {
       clearInterval(watcher);
       watcher = undefined;
