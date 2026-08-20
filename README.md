@@ -58,11 +58,11 @@ Two terminals. First the server:
 ./scripts/temporal-dev.sh          # 127.0.0.1:7233, UI on 8233
 ```
 
-Then pi, launched in whatever project you want the task to work on:
+Then pi, launched in whatever project you want the task to work on. `$PI_TEMPORAL` is wherever you cloned this:
 
 ```
-cd ~/some/project
-~/repos/pi-temporal/scripts/run-pi.sh
+cd /path/to/your/project
+"$PI_TEMPORAL"/scripts/run-pi.sh
 ```
 
 Type `/durable Use the bash tool to write hello into note.txt, then reply DONE.` It returns straight away and the worker inside pi takes it from there. When it finishes you get a notification, and the answer is context for your next prompt, so `what did the durable task do?` works. The tools run in the directory you launched pi from, so `note.txt` lands there.
