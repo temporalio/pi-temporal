@@ -50,6 +50,34 @@ That worker calls `step()`, so this needs pi to be the fork build. The Temporal 
 
 It does not make the session you are typing in durable, and that is pi's extension API rather than a choice: an extension gets a read-only session manager and no handle on the running `AgentSession`, so it cannot drive the local loop. Driving a session takes the SDK, which is what the worker uses.
 
+## Try it
+
+Two terminals. First the server:
+
+```
+./scripts/temporal-dev.sh          # 127.0.0.1:7233, UI on 8233
+```
+
+Then pi, launched in whatever project you want the task to work on:
+
+```
+cd ~/some/project
+~/repos/pi-temporal/scripts/run-pi.sh
+```
+
+Type `/durable Use the bash tool to write hello into note.txt, then reply DONE.` It returns straight away and the worker inside pi takes it from there. When it finishes you get a notification, and the answer is context for your next prompt, so `what did the durable task do?` works. The tools run in the directory you launched pi from, so `note.txt` lands there.
+
+`run-pi.sh` needs `OPENAI_API_KEY`, or `OPENAI_API_KEY_FILE` pointing at a file with one, and it pins the durable task to `gpt-4o-mini` so the test does not depend on which model the TUI has selected. It runs the fork build from `.fork/pi`, so `npm ci && npm run setup-fork` has to have happened.
+
+To check the whole path without typing:
+
+```
+./scripts/durable-smoke.sh         # starts a worker, submits a turn, waits, exits non-zero on failure
+npx tsx step-loop-check.mts        # one activity per step, and interrupts; no model key needed
+```
+
+`durable-smoke.sh` drives the standalone worker rather than the one inside pi, because print mode exits the moment the command returns and takes that worker with it.
+
 ## The idea
 
 Two parts of the state, two systems:
