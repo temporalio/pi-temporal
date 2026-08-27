@@ -152,10 +152,12 @@ That makes a retry cheap and safe for a reason worth spelling out. A step that f
 `PI_TEMPORAL_STEPPED=1` splits the step into three:
 
 ```
-runModelCall  ->  runToolCall (one per call, concurrent)  ->  sealStep
+runModelCall  ->  runToolCall (one per call)  ->  sealStep
 ```
 
 Off by default. It applies to both halves: a `/background` task on a worker, and every turn of the session you are typing in.
+
+The calls of a step overlap on the worker half, where each activity opens a session of its own. They do not on the live half: those calls all reach the one agent that pi process holds, and it admits a single unit of work at a time, so a second call arriving while the first runs would be refused and reported as an unknown outcome for a tool that never ran.
 
 The point is what can now sit between the model asking for a tool and the tool running. A per-tool retry policy, a per-tool timeout, an approval, a budget: under the whole-step mode there was nowhere to put any of them, because one activity covered the model call and the whole batch. It also makes a turn legible: history shows the tools by name, and a tool that hangs no longer holds the model call under the same timeout.
 
@@ -163,9 +165,13 @@ Two things are load-bearing and were easy to get wrong.
 
 **The seal is the step's only writer.** Pi's session file is a tree, and every entry takes its parent from the leaf the writer last saw. Two calls settling at once would each parent off the leaf they saw and branch the transcript, and Pi's own parallel path appends results in call order after the batch, which per-call activities would lose. So a call reports its result and the seal records the step's results together, in the order the model asked. The transcript ends up the one Pi would have written, which its own tests pin.
 
+Read that as one writer per successful attempt, not one writer full stop. A seal whose heartbeat stalls long enough for Temporal to start a second attempt has two of them appending, and on shared storage a large append is not one atomic write. Nothing in the tree stops it; a lock beside the session file is what would.
+
 **A call that already started is not silently repeated.** A dispatch writes a note beside the session file before the tool can have any effect, and keeps the result there when it comes back. A second dispatch that finds a result returns it; one that finds only the note reports the outcome as unknown rather than running a `git push` that may already have landed. The attempt number would answer the same question far less precisely: it counts every way a dispatch can die, including the ones that never reached the tool.
 
-The kept results live in `<session>.jsonl.pending/` and the seal drops them once they are in the transcript. They stay out of Temporal's history on purpose: tool output is capped at 50KB by Pi, but a step's worth of it per activity result, per step, for the life of a session, is a history nobody wants to read.
+The kept results live in `<session>.jsonl.pending/`, and the next model call drops the ones the transcript now answers. The seal deliberately does not drop its own: a seal whose answer never reached Temporal runs again, and a batch it reads as empty is a batch it reads as wanting another step, even when a tool asked the turn to stop.
+
+They stay out of Temporal's history on purpose: tool output is capped at 50KB by Pi, but a step's worth of it per activity result, per step, for the life of a session, is a history nobody wants to read.
 
 What it costs: each activity opens the session file and builds an `AgentSession` of its own, so a step with four calls pays six session opens instead of one. Against a model call that takes seconds, the boundaries measure in milliseconds (see below), but the cost is real and it grows with the transcript.
 
@@ -174,7 +180,7 @@ What it costs: each activity opens the session file and builds an `AgentSession`
 - **Between turns: clean.** A worker dying between turns loses nothing. The next prompt drives on any worker from the session file. A fresh worker that never saw the session serves it correctly.
 - **Between steps: clean.** Each step is its own activity, so a worker dying loses at most the step in flight. The steps before it are on disk and are not re-run.
 - **Mid-step: the tool is reported as unknown, not re-run.** A crash between a tool starting and its result landing leaves a tool call with no result. `prepareStep` settles it with "the outcome of this tool call is unknown", and the model decides whether to try again. Blindly re-running it is the wrong default for a coding agent: the `git push` may already have happened.
-- **A step is not atomic.** Pi runs the tools of one step as a batch, so a crash part way through that batch leaves some tools run and some not. The settled ones keep their results; only the unsettled one is reported as unknown.
+- **A step is not atomic.** Pi runs the tools of one step as a batch, so a crash part way through that batch leaves some tools run and some not. Under the whole-step mode none of the batch is in the transcript until the step ends, so a crash costs the work of every tool that had finished. The stepped mode is where the finished ones keep their results.
 - **Stepped mode keeps what a call produced.** A crash between a tool finishing and its result reaching Temporal loses the work under the whole-step mode: nothing recorded it. With a tool call per activity the result is kept beside the session file the moment the tool returns, so the retry finds it and the tool is not asked again. What is still lost is a tool that was inside its own execution when the process died, which is what an unknown outcome is for.
 
 ## Reproducing
@@ -183,8 +189,9 @@ Helpers are at the repo root, none of which needs a model key:
 
 - `submit.mts` submits one prompt, `inspect.mts` summarizes a session file.
 - `step-loop-check.mts` runs the executor against a Temporal server with the activities stubbed, in both modes: one step at a time and in order, an interrupt that ends the turn and not the session.
-- `local-turn-check.mts` does the same for a turn of a live session, with the turn itself faked: handed over once in whole-turn mode, and a model call, its calls and a seal per step in stepped mode.
+- `local-turn-check.mts` does the same for a turn of a live session, with the turn itself faked: handed over once in whole-turn mode, and a model call, its calls and a seal per step in stepped mode. It also holds the two rules that half depends on: the calls of a step do not overlap there, and an interrupt stops the loop instead of buying another model call.
 - `l2-step-check.mts` needs no server either. It drives the stepped step body against fake activities: calls overlap unless the batch says otherwise, a failed tool still lets the step close, and an interrupt is not swallowed.
+- `pending-check.mts` needs neither a server nor a key. It covers the files a step keeps about its calls, which is what "a call that already started is not silently repeated" rests on: a fresh call looks fresh, scratch never reads as a result, and a sweep drops what the transcript answers and keeps what it does not.
 
 To see what a session is doing without reading its file, ask the workflow: `temporal workflow query --workflow-id pi-session-<id> --name turnState` reports the queue, the step in flight, and how the last turn ended.
 
