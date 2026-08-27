@@ -13,4 +13,4 @@
 # Bump PI_FORK_REF when the PR moves, then re-run scripts/setup-fork.sh.
 
 PI_FORK_REPO=https://github.com/temporalio/pi.git
-PI_FORK_REF=746dce773b9a5536147f0f586b75882c1ed6a5bb
+PI_FORK_REF=01c1f6be224e7c71ec127348ec5517f67475bf69

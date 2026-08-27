@@ -59,7 +59,8 @@ export async function keepResult(
     await writeFile(scratch, JSON.stringify(outcome), "utf8");
     await rename(scratch, target);
   } finally {
-    await rm(scratch, { force: true });
+    // Whatever went wrong above is what the caller needs to see, not what went wrong tidying up.
+    await rm(scratch, { force: true }).catch(() => {});
   }
 }
 

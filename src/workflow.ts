@@ -45,12 +45,9 @@ const { runToolCall } = proxyActivities<SteppedActivities>({
   scheduleToCloseTimeout: "2 hours",
   retry: { maximumAttempts: 20 },
 });
-// Reading what the calls produced and writing them into the transcript. It should not inherit a
-// step-sized backstop.
-const { sealStep } = proxyActivities<SteppedActivities>({
-  ...activityOptions,
-  startToCloseTimeout: "5 minutes",
-});
+// The seal also runs what answers for a step that went wrong: a provider retry, and a compaction
+// that is itself a model call over the whole context. So it keeps the step-sized backstop.
+const { sealStep } = proxyActivities<SteppedActivities>(activityOptions);
 
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);

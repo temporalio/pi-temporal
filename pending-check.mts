@@ -40,6 +40,30 @@ async function main() {
   await writeFile(`${file}.pending/c2.json.abandoned.writing`, "{ not json", "utf8");
   check("scratch is not a result", (await pending.readResult(file, "c2")) === undefined);
 
+  // Two writers for one call is a real case: an attempt whose startToClose expired is still
+  // running while its retry writes. One scratch path between them publishes a document that is
+  // neither, and the seal then reads a tool that succeeded as an unknown outcome.
+  const big = (id: string, size: number) => {
+    const kept = outcome(id);
+    const content = [{ type: "text", text: "x".repeat(size) }];
+    return { ...kept, message: { ...kept.message, content } };
+  };
+  let overlapped: Awaited<ReturnType<typeof pending.readResult>>;
+  let wrote = true;
+  try {
+    await Promise.all([
+      pending.keepResult(file, "c3", big("c3", 400_000)),
+      pending.keepResult(file, "c3", big("c3", 400_001)),
+    ]);
+    overlapped = await pending.readResult(file, "c3");
+  } catch (err) {
+    wrote = false;
+    overlapped = undefined;
+    console.log(`  (a writer threw: ${String(err)})`);
+  }
+  const whole = wrote && overlapped?.message.toolCallId === "c3";
+  check("two writers for one call publish a whole result", whole, overlapped);
+
   // The seal keeps its results so a retry of the seal can read them again. The next step sweeps
   // what the transcript now answers, and nothing else.
   await pending.noteDispatch(file, "c2");
