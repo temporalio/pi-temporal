@@ -129,4 +129,27 @@ export interface LocalTurnInput {
   // The queue that process is polling. One queue per process, because only that process can run
   // this turn.
   readonly taskQueue: string;
+  // Drive the turn a step at a time, so a tool call of a live session is its own unit of work.
+  readonly stepped?: boolean;
+}
+
+// The turn a live process holds, addressed by the turn rather than by a session file: the
+// transcript is in memory over there, and only that process can reach it.
+export interface LocalStepInput {
+  readonly turnId: string;
+  readonly step: number;
+}
+
+export interface LocalToolCallInput extends LocalStepInput {
+  readonly call: DeferredToolCall;
+}
+
+export interface LocalSealInput extends LocalStepInput {
+  readonly calls: readonly DeferredToolCall[];
+}
+
+export interface LocalModelCallResult {
+  readonly calls: readonly DeferredToolCall[];
+  readonly sequential: boolean;
+  readonly ended: boolean;
 }

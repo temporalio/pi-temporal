@@ -186,12 +186,26 @@ export default function (pi: ExtensionAPI) {
 
   const runTurnDurably = async (turn: TurnExecutorContext) => {
     const turnId = randomUUID();
-    const input: LocalTurnInput = { sessionId: turn.sessionId, turnId, taskQueue: turnQueue };
+    const input: LocalTurnInput = {
+      sessionId: turn.sessionId,
+      turnId,
+      taskQueue: turnQueue,
+      stepped: cfg.stepped,
+    };
     let ran = false;
+    const ranHere = <T>(body: () => Promise<T>) => {
+      ran = true;
+      return body();
+    };
     liveTurns.set(turnId, {
-      run: async () => {
-        ran = true;
-        await turn.run();
+      run: () => ranHere(() => turn.run()),
+      // The same turn, a step at a time. Wrapped the same way, because a turn that got as far as
+      // its model call is one the fallback below must not run a second time.
+      steps: {
+        record: () => ranHere(() => turn.steps.record()),
+        modelCall: () => ranHere(() => turn.steps.modelCall()),
+        runToolCall: (id) => ranHere(() => turn.steps.runToolCall(id)),
+        sealStep: (results) => ranHere(() => turn.steps.sealStep(results)),
       },
     });
 

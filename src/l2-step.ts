@@ -42,6 +42,67 @@ interface Dispatched {
   readonly error?: unknown;
 }
 
+/** What a model call reported, whichever activity made it. */
+export interface StepCalls {
+  readonly calls: readonly DeferredToolCall[];
+  readonly sequential: boolean;
+  readonly ended: boolean;
+}
+
+/**
+ * Run the calls of one step, and report what could not be settled. Shared by the worker-owned
+ * path and the turn a live pi process holds, because how a step's calls are fanned out and how an
+ * interrupt reaches them is the same question in both.
+ */
+export async function dispatchStepCalls(
+  step: number,
+  model: StepCalls,
+  runToolCall: (call: DeferredToolCall) => Promise<ToolCallResult>,
+  deps: Pick<SteppedStepDeps, "isCancellation" | "log">,
+): Promise<void> {
+  // Errors are carried rather than thrown, so one call that ran out of retries does not leave its
+  // siblings' promises rejecting with nobody to catch them.
+  const dispatch = async (call: DeferredToolCall): Promise<Dispatched> => {
+    try {
+      const { outcome } = await runToolCall(call);
+      return { call, outcome };
+    } catch (error) {
+      return { call, error };
+    }
+  };
+
+  const dispatched: Dispatched[] = [];
+  if (!model.ended) {
+    if (model.sequential) {
+      // A tool of this step says the batch runs in order, and an interrupt stops the rest of it.
+      for (const call of model.calls) {
+        const outcome = await dispatch(call);
+        dispatched.push(outcome);
+        if (outcome.error !== undefined && deps.isCancellation(outcome.error)) break;
+      }
+    } else {
+      dispatched.push(...(await Promise.all(model.calls.map(dispatch))));
+    }
+  }
+
+  // An interrupt is not a failed tool. Sealing after one would close a step the user stopped, and
+  // settle calls whose dispatch is the thing that was cancelled.
+  const stopped = dispatched.find((d) => d.error !== undefined && deps.isCancellation(d.error));
+  if (stopped) throw stopped.error;
+
+  const unsettled = dispatched.filter((d) => d.outcome !== "settled" && d.outcome !== "already-settled");
+  if (unsettled.length > 0) {
+    deps.log?.("step did not settle every call it dispatched", {
+      step,
+      calls: unsettled.map((d) => ({
+        call: d.call.id,
+        tool: d.call.name,
+        outcome: d.outcome ?? "failed",
+      })),
+    });
+  }
+}
+
 export function makeSteppedStep(deps: SteppedStepDeps): (input: RunStepInput) => Promise<RunStepResult> {
   const { runModelCall, runToolCall, sealStep } = deps.activities;
 
@@ -53,53 +114,20 @@ export function makeSteppedStep(deps: SteppedStepDeps): (input: RunStepInput) =>
       return model.settled;
     }
 
-    // Errors are carried rather than thrown, so one call that ran out of retries does not leave
-    // its siblings' promises rejecting with nobody to catch them.
-    const dispatch = async (call: DeferredToolCall): Promise<Dispatched> => {
-      const toolInput: ToolCallInput = {
-        sessionId: input.sessionId,
-        sessionFile: input.sessionFile,
-        step: input.step,
-        call,
-      };
-      try {
-        const { outcome } = await runToolCall(toolInput);
-        return { call, outcome };
-      } catch (error) {
-        return { call, error };
-      }
-    };
-
-    const dispatched: Dispatched[] = [];
-    if (!model.ended) {
-      if (model.sequential) {
-        // A tool of this step says the batch runs in order, and an interrupt stops the rest of it.
-        for (const call of model.calls) {
-          const outcome = await dispatch(call);
-          dispatched.push(outcome);
-          if (outcome.error !== undefined && deps.isCancellation(outcome.error)) break;
-        }
-      } else {
-        dispatched.push(...(await Promise.all(model.calls.map(dispatch))));
-      }
-    }
-
-    // An interrupt is not a failed tool. Sealing here would close a step the user stopped, and
-    // settle calls whose dispatch is the thing that was cancelled.
-    const stopped = dispatched.find((d) => d.error !== undefined && deps.isCancellation(d.error));
-    if (stopped) throw stopped.error;
-
-    const unsettled = dispatched.filter((d) => d.outcome !== "settled" && d.outcome !== "already-settled");
-    if (unsettled.length > 0) {
-      deps.log?.("step did not settle every call it dispatched", {
-        step: input.step,
-        calls: unsettled.map((d) => ({
-          call: d.call.id,
-          tool: d.call.name,
-          outcome: d.outcome ?? "failed",
-        })),
-      });
-    }
+    await dispatchStepCalls(
+      input.step,
+      model,
+      (call) => {
+        const toolInput: ToolCallInput = {
+          sessionId: input.sessionId,
+          sessionFile: input.sessionFile,
+          step: input.step,
+          call,
+        };
+        return runToolCall(toolInput);
+      },
+      deps,
+    );
 
     // Every call of the step is sealed, including the ones no dispatch answered for. A step that
     // leaves one open leaves a transcript the next model call cannot be made from.
