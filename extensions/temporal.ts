@@ -30,6 +30,7 @@ interface Env {
   readonly taskQueue: string;
   readonly sessionDir: string;
   readonly idleTimeout: string;
+  readonly stepped: boolean;
   readonly embeddedWorker: boolean;
   readonly durableTurns: boolean;
   readonly provider?: string;
@@ -44,6 +45,7 @@ const env = (): Env => ({
   taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
   sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
   idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
+  stepped: process.env.PI_TEMPORAL_STEPPED === "1",
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
   durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS !== "0",
   provider: process.env.PI_TEMPORAL_PROVIDER,
@@ -238,7 +240,7 @@ export default function (pi: ExtensionAPI) {
         text,
       };
       const prompt: PromptInput = { promptId: task.promptId, text };
-      const options: SessionTurnOptions = { idleTimeout: cfg.idleTimeout };
+      const options: SessionTurnOptions = { idleTimeout: cfg.idleTimeout, stepped: cfg.stepped };
 
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);

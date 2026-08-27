@@ -17,15 +17,29 @@ import {
 } from "@temporalio/workflow";
 import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS } from "./protocol.js";
 import type { PromptInput, RunStepInput, RunStepResult, SessionTurnOptions, TurnState } from "./protocol.js";
+import { makeSteppedStep, type SteppedActivities } from "./l2-step.js";
 
-const { runStep } = proxyActivities<{
-  runStep(input: RunStepInput): Promise<RunStepResult>;
-}>({
+const activityOptions = {
   // One step is a single model call plus the tools it asks for, so minutes, not hours. The
   // heartbeat is the real liveness bound and re-drives within seconds of a worker death.
   startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
   retry: { maximumAttempts: 100 },
+} as const;
+
+const { runStep } = proxyActivities<{
+  runStep(input: RunStepInput): Promise<RunStepResult>;
+}>(activityOptions);
+
+// Separate proxies are the point of the split, not an accident of it: a tool that hangs no longer
+// holds the model call and every other tool of the same step under one shared timeout.
+const { runModelCall } = proxyActivities<SteppedActivities>(activityOptions);
+const { runToolCall } = proxyActivities<SteppedActivities>(activityOptions);
+// Reading what the calls produced and writing them into the transcript. It should not inherit a
+// step-sized backstop.
+const { sealStep } = proxyActivities<SteppedActivities>({
+  ...activityOptions,
+  startToCloseTimeout: "5 minutes",
 });
 
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
@@ -38,6 +52,16 @@ export async function piSession(
   options?: SessionTurnOptions,
 ): Promise<void> {
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
+  // Same loop either way. Only what "one step" means differs, so wake, interrupt, the step
+  // ceiling and idle retirement are unchanged.
+  const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
+    ? makeSteppedStep({
+        activities: { runModelCall, runToolCall, sealStep },
+        isCancellation,
+        // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
+        log: (message, attributes) => log.info(message, attributes),
+      })
+    : runStep;
   const queue: PromptInput[] = [];
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
@@ -64,7 +88,7 @@ export async function piSession(
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
           const input: RunStepInput = { sessionId, sessionFile, step, ...prompt };
-          const result = await runStep(input);
+          const result = await runTurnStep(input);
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;
