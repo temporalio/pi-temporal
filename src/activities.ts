@@ -96,15 +96,22 @@ export function makeActivities(opts: ActivityOptions) {
   /** Put the prompt in the transcript, or settle what an earlier attempt left behind. Returns the
    * turn's answer when there is nothing left to run. */
   async function readyForStep(session: AgentSession, input: RunStepInput): Promise<RunStepResult | undefined> {
-    if (!markerPresent(session.state.messages as Msg[], input.promptId)) {
-      // A fresh turn. Record the prompt without running it, so the first step is a step like any
-      // other and the crash window before it is one Temporal already covers.
+    const fresh = !markerPresent(session.state.messages as Msg[], input.promptId);
+
+    // Before anything else, including a prompt that has nothing to do with the turn that stopped.
+    // A call with no result is a payload no provider accepts, so a prompt recorded behind one
+    // makes every later turn of the session fail rather than just the interrupted one.
+    const hasWork = session.prepareStep();
+
+    if (fresh) {
+      // Record the prompt without running it, so the first step is a step like any other and the
+      // crash window before it is one Temporal already covers.
       if (!(await session.recordPrompt(`${input.text}${marker(input.promptId)}`))) {
         throw new Error("Pi did not record the prompt; an extension may have taken the text");
       }
       return undefined;
     }
-    if (!session.prepareStep()) {
+    if (!hasWork) {
       // The prompt is recorded and the turn already has its answer. That is a retry landing after
       // the last step finished but before its result reached Temporal.
       return { done: true, finalText: lastAssistantText(session.state.messages as Msg[]) };
