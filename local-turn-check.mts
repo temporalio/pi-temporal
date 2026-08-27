@@ -161,6 +161,24 @@ async function main() {
   check("stepped: a stop before the first call still records the prompt", kept, early.seen);
   check("stepped: and asks the model nothing", !early.seen.includes("model:1"), early.seen);
 
+  // Straight at the activities, because a retry of one is not something the workflow script can
+  // ask for. An interrupted model call whose answer never reached Temporal comes back, and what
+  // it must not do is record the turn's prompt a second time.
+  {
+    const turnId = randomUUID();
+    const { turn, seen } = fakeTurn({ interruptAfter: 0 });
+    live.set(turnId, turn);
+    const activities = makeLocalTurnActivities(live);
+    try {
+      await activities.runLocalModelCall({ turnId, step: 1 });
+      await activities.runLocalModelCall({ turnId, step: 1 });
+    } finally {
+      live.delete(turnId);
+    }
+    const records = seen.filter((s) => s === "record").length;
+    check("a retried model call does not record the prompt twice", records === 1, seen);
+  }
+
   worker.shutdown();
   await running;
   await connection.close();

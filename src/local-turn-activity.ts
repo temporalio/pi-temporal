@@ -96,9 +96,10 @@ export function makeLocalTurnActivities(live: LiveTurns) {
       // An abort reaches the unit that was running and nothing else, so the loop has to stop
       // asking. Without this the next model call starts with a fresh signal and runs work the
       // user stopped.
+      // What this turn kept is dropped when the process lets go of it, not here. Dropping it here
+      // takes `recorded` with it, and a retry of this activity then records the prompt a second
+      // time, which leaves the turn's own text sitting after all of its tool results.
       if (turn.steps.interrupted()) {
-        // Nothing else will run for this turn, and what it kept is whole tool outputs.
-        progress.delete(input.turnId);
         return { calls: [], sequential: false, ended: true, interrupted: true };
       }
 
