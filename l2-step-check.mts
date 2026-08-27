@@ -89,25 +89,30 @@ async function main() {
     const run = await drive({ settled, calls: [], sequential: false, ended: true });
     check("a settled step dispatches nothing", run.dispatched.length === 0, run.dispatched);
     check("a settled step is not sealed again", run.seals.length === 0, run.seals);
-    check("a settled step reports the answer it found", run.result?.finalText === "already answered", run.result);
+    const found = run.result?.finalText === "already answered";
+    check("a settled step reports the answer it found", found, run.result);
   }
 
   // Every call reaches the seal, in the order the model asked, and they overlap by default.
   {
     // The tool waits, so two of them running at once is observable.
-    const run = await drive({ calls: [call("c1"), call("c2")], sequential: false, ended: false }, async () => {
+    const batch = { calls: [call("c1"), call("c2")], sequential: false, ended: false };
+    const run = await drive(batch, async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       return { outcome: "settled" };
     });
-    check("every call is dispatched", run.dispatched.map((d) => d.call.id).join(",") === "c1,c2", run.dispatched);
+    const ids = run.dispatched.map((d) => d.call.id).join(",");
+    check("every call is dispatched", ids === "c1,c2", run.dispatched);
     check("calls overlap unless the batch says otherwise", run.overlapped, run.overlapped);
-    check("the seal is handed the step's calls in order", JSON.stringify(run.seals[0]?.calls.map((c) => c.id)) === '["c1","c2"]', run.seals[0]);
+    const sealed = JSON.stringify(run.seals[0]?.calls.map((c) => c.id));
+    check("the seal is handed the step's calls in order", sealed === '["c1","c2"]', run.seals[0]);
     check("nothing is said about a step that settled", run.lines.length === 0, run.lines);
   }
 
   // A tool of the batch declares itself sequential, so the workflow runs them one at a time.
   {
-    const run = await drive({ calls: [call("c1"), call("c2")], sequential: true, ended: false }, async () => {
+    const batch = { calls: [call("c1"), call("c2")], sequential: true, ended: false };
+    const run = await drive(batch, async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       return { outcome: "settled" };
     });
@@ -118,13 +123,18 @@ async function main() {
   // One tool that ran out of retries must not take the turn with it: the seal settles it as an
   // unknown outcome and the model gets to react.
   {
-    const run = await drive({ calls: [call("c1"), call("c2")], sequential: false, ended: false }, async (input) => {
+    const batch = { calls: [call("c1"), call("c2")], sequential: false, ended: false };
+    const run = await drive(batch, async (input) => {
       if (input.call.id === "c1") throw new Error("activity exhausted its retries");
       return { outcome: "settled" };
     });
     check("a failed call still lets the step close", run.seals.length === 1, run.seals);
-    check("the failed call is still sealed", JSON.stringify(run.seals[0]?.calls.map((c) => c.id)) === '["c1","c2"]', run.seals[0]);
-    check("the failure is reported where the turn is read", run.lines.length === 1 && JSON.stringify(run.lines[0].attributes) === '{"step":2,"calls":[{"call":"c1","tool":"bash","outcome":"failed"}]}', run.lines);
+    const sealed = JSON.stringify(run.seals[0]?.calls.map((c) => c.id));
+    check("the failed call is still sealed", sealed === '["c1","c2"]', run.seals[0]);
+    const said = JSON.stringify(run.lines[0]?.attributes);
+    const failed = '{"step":2,"calls":[{"call":"c1","tool":"bash","outcome":"failed"}]}';
+    const told = run.lines.length === 1 && said === failed;
+    check("the failure is reported where the turn is read", told, run.lines);
   }
 
   // An interrupt is not a failed tool. Sealing would close a step the user stopped.
@@ -138,10 +148,12 @@ async function main() {
 
   // A sequential batch stops dispatching once one call is cancelled.
   {
-    const run = await drive({ calls: [call("c1"), call("c2")], sequential: true, ended: false }, async () => {
+    const batch = { calls: [call("c1"), call("c2")], sequential: true, ended: false };
+    const run = await drive(batch, async () => {
       throw new FakeCancel("interrupted");
     });
-    check("an interrupt stops the rest of a sequential batch", run.dispatched.length === 1, run.dispatched);
+    const stopped = run.dispatched.length === 1;
+    check("an interrupt stops the rest of a sequential batch", stopped, run.dispatched);
   }
 
   // A model call that ended the run dispatches nothing, and still seals: what answers for a
@@ -157,11 +169,14 @@ async function main() {
     const run = await drive({ calls: [call("c1")], sequential: false, ended: false }, async () => ({
       outcome: "unknown",
     }));
-    check("an unknown outcome is reported", run.lines.length === 1 && JSON.stringify(run.lines[0].attributes) === '{"step":2,"calls":[{"call":"c1","tool":"bash","outcome":"unknown"}]}', run.lines);
+    const said = JSON.stringify(run.lines[0]?.attributes);
+    const unknown = '{"step":2,"calls":[{"call":"c1","tool":"bash","outcome":"unknown"}]}';
+    check("an unknown outcome is reported", run.lines.length === 1 && said === unknown, run.lines);
     check("an unknown outcome still seals", run.seals.length === 1, run.seals);
   }
 
-  console.log(failures.length === 0 ? "l2-step-check: OK" : `l2-step-check: ${failures.length} failed`);
+  const bad = failures.length;
+  console.log(bad === 0 ? "l2-step-check: OK" : `l2-step-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

@@ -90,7 +90,9 @@ export async function dispatchStepCalls(
   const stopped = dispatched.find((d) => d.error !== undefined && deps.isCancellation(d.error));
   if (stopped) throw stopped.error;
 
-  const unsettled = dispatched.filter((d) => d.outcome !== "settled" && d.outcome !== "already-settled");
+  const unsettled = dispatched.filter(
+    (d) => d.outcome !== "settled" && d.outcome !== "already-settled",
+  );
   if (unsettled.length > 0) {
     deps.log?.("step did not settle every call it dispatched", {
       step,
@@ -103,7 +105,9 @@ export async function dispatchStepCalls(
   }
 }
 
-export function makeSteppedStep(deps: SteppedStepDeps): (input: RunStepInput) => Promise<RunStepResult> {
+type SteppedStep = (input: RunStepInput) => Promise<RunStepResult>;
+
+export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
   const { runModelCall, runToolCall, sealStep } = deps.activities;
 
   return async (input: RunStepInput): Promise<RunStepResult> => {

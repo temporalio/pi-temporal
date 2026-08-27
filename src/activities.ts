@@ -10,9 +10,10 @@
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { Context } from "@temporalio/activity";
+import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
   createAgentSession,
+  findDanglingToolCalls,
   SessionManager,
   ModelRuntime,
   unknownToolCallOutcome,
@@ -52,13 +53,47 @@ type Msg = { role?: string; content?: unknown; toolCallId?: string };
 const markerPresent = (messages: Msg[], promptId: string) =>
   messages.some((m) => textOf(m.content).includes(marker(promptId)));
 
+// The turn's own last word, which is empty when it ended on a provider error. Reaching further
+// back for something non-empty reports a previous turn's answer as this one's.
 const lastAssistantText = (messages: Msg[]) => {
-  const answer = [...messages].reverse().find((m) => m.role === "assistant" && textOf(m.content).trim() !== "");
+  const answer = [...messages].reverse().find((m) => m.role === "assistant");
   return answer ? textOf(answer.content) : "";
 };
 
 const answeredInTranscript = (messages: Msg[], callId: string) =>
   messages.some((m) => m.role === "toolResult" && m.toolCallId === callId);
+
+type Block = { type?: string; id?: string };
+
+const blocksOf = (content: unknown) => (Array.isArray(content) ? (content as Block[]) : []);
+
+const recordedInTranscript = (messages: Msg[], callId: string) =>
+  messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      blocksOf(m.content).some((b) => b.type === "toolCall" && b.id === callId),
+  );
+
+const answeredCalls = (messages: Msg[]) =>
+  new Set(
+    messages
+      .filter((m) => m.role === "toolResult" && m.toolCallId)
+      .map((m) => m.toolCallId as string),
+  );
+
+/** The calls of the trailing assistant message, which is what prepareStep would settle. */
+const danglingCallIds = (messages: Msg[]) =>
+  findDanglingToolCalls(messages as unknown as Parameters<typeof findDanglingToolCalls>[0]).map(
+    (call) => call.id,
+  );
+
+const noDispatchStarted = async (sessionFile: string, callIds: readonly string[]) => {
+  if (callIds.length === 0) return false;
+  for (const callId of callIds) {
+    if (await pending.wasDispatched(sessionFile, callId)) return false;
+  }
+  return true;
+};
 
 export interface ActivityOptions {
   // Where the agent's tools run. The embedded worker points this at the pi session's own cwd.
@@ -82,7 +117,9 @@ export function makeActivities(opts: ActivityOptions) {
     const available = await modelRuntime.getAvailable(provider);
     const hint = opts.modelHint ?? "mini";
     const model = available.find((m) => m.id.includes(hint)) ?? available[0];
-    if (!model) throw new Error(`no ${provider} model available; check the key and provider support`);
+    if (!model) {
+      throw new Error(`no ${provider} model available; check the key and provider support`);
+    }
 
     const { session } = await createAgentSession({
       sessionManager,
@@ -94,16 +131,21 @@ export function makeActivities(opts: ActivityOptions) {
   }
 
   /** Put the prompt in the transcript, or settle what an earlier attempt left behind. Returns the
-   * turn's answer when there is nothing left to run. */
-  async function readyForStep(session: AgentSession, input: RunStepInput): Promise<RunStepResult | undefined> {
-    const fresh = !markerPresent(session.state.messages as Msg[], input.promptId);
+   * turn's answer when there is nothing left to run. Only the stepped mode keeps dispatch notes,
+   * so only it can tell an interrupted call from one nothing has run yet. */
+  async function readyForStep(
+    session: AgentSession,
+    input: RunStepInput,
+    stepped: boolean,
+  ): Promise<RunStepResult | undefined> {
+    const messages = () => session.state.messages as Msg[];
+    if (stepped) await pending.sweep(input.sessionFile, answeredCalls(messages()));
 
-    // Before anything else, including a prompt that has nothing to do with the turn that stopped.
-    // A call with no result is a payload no provider accepts, so a prompt recorded behind one
-    // makes every later turn of the session fail rather than just the interrupted one.
-    const hasWork = session.prepareStep();
-
-    if (fresh) {
+    if (!markerPresent(messages(), input.promptId)) {
+      // Settle what the turn that stopped left behind first. A call with no result is a payload no
+      // provider accepts, so a prompt recorded behind one makes every later turn of the session
+      // fail rather than just the interrupted one.
+      session.prepareStep();
       // Record the prompt without running it, so the first step is a step like any other and the
       // crash window before it is one Temporal already covers.
       if (!(await session.recordPrompt(`${input.text}${marker(input.promptId)}`))) {
@@ -111,10 +153,19 @@ export function makeActivities(opts: ActivityOptions) {
       }
       return undefined;
     }
-    if (!hasWork) {
+
+    // A retry of this turn. Calls the model recorded but no dispatch ever started are not
+    // interrupted work, so leave them for the model call to hand back. Settling them here would
+    // tell the model that tools which never ran may have taken effect, and pay for a second
+    // response on top.
+    if (stepped && (await noDispatchStarted(input.sessionFile, danglingCallIds(messages())))) {
+      return undefined;
+    }
+
+    if (!session.prepareStep()) {
       // The prompt is recorded and the turn already has its answer. That is a retry landing after
       // the last step finished but before its result reached Temporal.
-      return { done: true, finalText: lastAssistantText(session.state.messages as Msg[]) };
+      return { done: true, finalText: lastAssistantText(messages()) };
     }
     return undefined;
   }
@@ -124,7 +175,7 @@ export function makeActivities(opts: ActivityOptions) {
     try {
       const session = await openSession(input.sessionFile);
       try {
-        const settled = await readyForStep(session, input);
+        const settled = await readyForStep(session, input, false);
         if (settled) return settled;
 
         // prepareStep settled anything the crash left dangling, so this is a plain step: a tool
@@ -148,7 +199,7 @@ export function makeActivities(opts: ActivityOptions) {
     try {
       const session = await openSession(input.sessionFile);
       try {
-        const settled = await readyForStep(session, input);
+        const settled = await readyForStep(session, input, true);
         if (settled) return { settled, calls: [], sequential: false, ended: true };
 
         const outcome = await session.modelCall();
@@ -183,11 +234,22 @@ export function makeActivities(opts: ActivityOptions) {
           return { outcome: "already-settled" };
         }
 
+        // The transcript decides which calls exist and does not change between attempts, so a call
+        // it does not hold is not one a retry will find. Retrying it holds the step, the turn and
+        // the session's queue behind it for hours.
+        if (!recordedInTranscript(session.state.messages as Msg[], input.call.id)) {
+          throw ApplicationFailure.nonRetryable(
+            `no recorded tool call ${input.call.id} in ${input.sessionId}`,
+            "ToolCallNotRecorded",
+          );
+        }
+
         if (await pending.wasDispatched(input.sessionFile, input.call.id)) {
           // A dispatch was inside this tool when it stopped, so the tool can have taken effect.
           // Re-running a push or a delete that already happened is the worse failure, so the
           // model is told the outcome instead of the tool being asked again.
-          await pending.keepResult(input.sessionFile, input.call.id, unknownToolCallOutcome(input.call));
+          const unknown = unknownToolCallOutcome(input.call);
+          await pending.keepResult(input.sessionFile, input.call.id, unknown);
           return { outcome: "unknown" };
         }
 
@@ -219,15 +281,15 @@ export function makeActivities(opts: ActivityOptions) {
           // A call with nothing kept for it is one whose dispatch never came back. Sealing
           // without it would leave the transcript holding a call no result answers, which is a
           // payload no provider accepts.
-          results.push((await pending.readResult(input.sessionFile, call.id)) ?? unknownToolCallOutcome(call));
+          const kept = await pending.readResult(input.sessionFile, call.id);
+          results.push(kept ?? unknownToolCallOutcome(call));
         }
 
         const { done } = await session.sealStep(results);
         await session.waitForIdle();
-        await pending.forget(
-          input.sessionFile,
-          input.calls.map((call) => call.id),
-        );
+        // What is kept stays until the next step sweeps it. A seal that dropped its own results
+        // would leave a retry of that seal reading an empty batch, and an empty batch reads as one
+        // that wants another step even when a tool asked the turn to stop.
         return { done, finalText: done ? lastAssistantText(session.state.messages as Msg[]) : "" };
       } finally {
         session.dispose();

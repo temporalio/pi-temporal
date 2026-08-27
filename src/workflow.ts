@@ -16,7 +16,13 @@ import {
   log,
 } from "@temporalio/workflow";
 import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS } from "./protocol.js";
-import type { PromptInput, RunStepInput, RunStepResult, SessionTurnOptions, TurnState } from "./protocol.js";
+import type {
+  PromptInput,
+  RunStepInput,
+  RunStepResult,
+  SessionTurnOptions,
+  TurnState,
+} from "./protocol.js";
 import { makeSteppedStep, type SteppedActivities } from "./l2-step.js";
 
 const activityOptions = {
@@ -31,10 +37,14 @@ const { runStep } = proxyActivities<{
   runStep(input: RunStepInput): Promise<RunStepResult>;
 }>(activityOptions);
 
-// Separate proxies are the point of the split, not an accident of it: a tool that hangs no longer
-// holds the model call and every other tool of the same step under one shared timeout.
 const { runModelCall } = proxyActivities<SteppedActivities>(activityOptions);
-const { runToolCall } = proxyActivities<SteppedActivities>(activityOptions);
+// A call that fails for a reason no retry fixes must not hold the step, the turn and the session's
+// queue behind it. The step waits for every call, so the ceiling here is the ceiling on all of it.
+const { runToolCall } = proxyActivities<SteppedActivities>({
+  ...activityOptions,
+  scheduleToCloseTimeout: "2 hours",
+  retry: { maximumAttempts: 20 },
+});
 // Reading what the calls produced and writing them into the transcript. It should not inherit a
 // step-sized backstop.
 const { sealStep } = proxyActivities<SteppedActivities>({
