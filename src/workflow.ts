@@ -37,17 +37,20 @@ const { runStep } = proxyActivities<{
   runStep(input: RunStepInput): Promise<RunStepResult>;
 }>(activityOptions);
 
-const { runModelCall } = proxyActivities<SteppedActivities>(activityOptions);
+// A total cap on top of the per-attempt one, so a unit that keeps timing out cannot hold the turn
+// and the session's queue for days.
+const cappedOptions = { ...activityOptions, scheduleToCloseTimeout: "2 hours" } as const;
+
+const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
 // A call that fails for a reason no retry fixes must not hold the step, the turn and the session's
 // queue behind it. The step waits for every call, so the ceiling here is the ceiling on all of it.
 const { runToolCall } = proxyActivities<SteppedActivities>({
-  ...activityOptions,
-  scheduleToCloseTimeout: "2 hours",
+  ...cappedOptions,
   retry: { maximumAttempts: 20 },
 });
 // The seal also runs what answers for a step that went wrong: a provider retry, and a compaction
 // that is itself a model call over the whole context. So it keeps the step-sized backstop.
-const { sealStep } = proxyActivities<SteppedActivities>(activityOptions);
+const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
