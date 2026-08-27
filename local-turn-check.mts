@@ -10,7 +10,11 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { unknownToolCallOutcome } from "@earendil-works/pi-coding-agent";
 import { fromEnv } from "./src/config.js";
-import { type LiveTurn, type LiveTurns, makeLocalTurnActivities } from "./src/local-turn-activity.js";
+import {
+  type LiveTurn,
+  type LiveTurns,
+  makeLocalTurnActivities,
+} from "./src/local-turn-activity.js";
 import { LOCAL_TURN_WORKFLOW } from "./src/protocol.js";
 import type { LocalTurnInput } from "./src/protocol.js";
 
@@ -23,10 +27,16 @@ const check = (what: string, ok: boolean, detail: unknown) => {
   if (!ok) failures.push(what);
 };
 
-/** A turn that asks for one tool per step and answers on the last one. */
-function fakeTurn() {
+/**
+ * A turn that asks for two tools per step and answers on the last one. Two matters: the calls all
+ * reach the one live agent this process holds, which admits a single unit of work at a time, so a
+ * second call arriving while the first runs is refused.
+ */
+function fakeTurn(options: { interruptAfter?: number } = {}) {
   const seen: string[] = [];
   let step = 0;
+  let inFlight = 0;
+  let overlapped = false;
   const turn: LiveTurn = {
     run: async () => {
       seen.push("run");
@@ -35,13 +45,19 @@ function fakeTurn() {
       record: async () => {
         seen.push("record");
       },
+      interrupted: () => options.interruptAfter !== undefined && step >= options.interruptAfter,
       modelCall: async () => {
         step++;
         seen.push(`model:${step}`);
-        const asksForTool = step < STEPS_TO_ANSWER;
+        const asksForTools = step < STEPS_TO_ANSWER;
         return {
-          toolCalls: asksForTool
-            ? [{ type: "toolCall" as const, id: `c${step}`, name: "probe", arguments: {} }]
+          toolCalls: asksForTools
+            ? [`c${step}a`, `c${step}b`].map((id) => ({
+                type: "toolCall" as const,
+                id,
+                name: "probe",
+                arguments: {},
+              }))
             : [],
           sequential: false,
           ended: false,
@@ -50,6 +66,11 @@ function fakeTurn() {
       },
       runToolCall: async (toolCallId) => {
         seen.push(`tool:${toolCallId}`);
+        inFlight++;
+        if (inFlight > 1) overlapped = true;
+        // Long enough that a second call dispatched at the same time would be seen here.
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        inFlight--;
         return unknownToolCallOutcome({ id: toolCallId, name: "probe" });
       },
       sealStep: async (results) => {
@@ -58,7 +79,7 @@ function fakeTurn() {
       },
     },
   };
-  return { turn, seen };
+  return { turn, seen, didOverlap: () => overlapped };
 }
 
 async function main() {
@@ -78,9 +99,9 @@ async function main() {
   const connection = await Connection.connect({ address: cfg.address });
   const client = new Client({ connection, namespace: cfg.namespace });
 
-  const drive = async (stepped: boolean) => {
+  const drive = async (stepped: boolean, options: { interruptAfter?: number } = {}) => {
     const turnId = randomUUID();
-    const { turn, seen } = fakeTurn();
+    const { turn, seen, didOverlap } = fakeTurn(options);
     live.set(turnId, turn);
     const input: LocalTurnInput = { sessionId: "ses_1", turnId, taskQueue, stepped };
     try {
@@ -92,36 +113,54 @@ async function main() {
     } finally {
       live.delete(turnId);
     }
-    return seen;
+    return { seen, didOverlap };
   };
 
   // The whole turn is handed over once, and pi runs it the way it always did.
   const whole = await drive(false);
-  check("whole-turn: the turn is handed over once", JSON.stringify(whole) === '["run"]', whole);
+  const handed = JSON.stringify(whole.seen) === '["run"]';
+  check("whole-turn: the turn is handed over once", handed, whole.seen);
 
   // The stepped mode records the turn once, then one model call, its calls and a seal per step.
   const stepped = await drive(true);
   const expected = [
     "record",
     "model:1",
-    "tool:c1",
-    "seal:1:1",
+    "tool:c1a",
+    "tool:c1b",
+    "seal:1:2",
     "model:2",
-    "tool:c2",
-    "seal:2:1",
+    "tool:c2a",
+    "tool:c2b",
+    "seal:2:2",
     "model:3",
     "seal:3:0",
   ];
-  check("stepped: the prompt is recorded once", stepped.filter((s) => s === "record").length === 1, stepped);
-  check("stepped: a model call, its calls and a seal per step", JSON.stringify(stepped) === JSON.stringify(expected), stepped);
-  check("stepped: the turn was not also run whole", !stepped.includes("run"), stepped);
+  const recorded = stepped.seen.filter((s) => s === "record").length === 1;
+  check("stepped: the prompt is recorded once", recorded, stepped.seen);
+  check(
+    "stepped: a model call, its calls and a seal per step",
+    JSON.stringify(stepped.seen) === JSON.stringify(expected),
+    stepped.seen,
+  );
+  check("stepped: the turn was not also run whole", !stepped.seen.includes("run"), stepped.seen);
+  // The live agent admits one unit of work at a time. A second call arriving while the first runs
+  // is refused, and the step reports a tool that never ran as an unknown outcome.
+  check("stepped: the calls of a step do not overlap", !stepped.didOverlap(), stepped.seen);
+
+  // An abort reaches the unit that is running and nothing else, so the loop has to stop asking.
+  const stopped = await drive(true, { interruptAfter: 1 });
+  check("stepped: an interrupt stops the loop", !stopped.seen.includes("model:2"), stopped.seen);
+  const resealed = stopped.seen.includes("seal:2:0");
+  check("stepped: an interrupted turn is not sealed again", !resealed, stopped.seen);
 
   worker.shutdown();
   await running;
   await connection.close();
   await nativeConnection.close();
 
-  console.log(failures.length === 0 ? "local-turn-check: OK" : `local-turn-check: ${failures.length} failed`);
+  const bad = failures.length;
+  console.log(bad === 0 ? "local-turn-check: OK" : `local-turn-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

@@ -152,4 +152,7 @@ export interface LocalModelCallResult {
   readonly calls: readonly DeferredToolCall[];
   readonly sequential: boolean;
   readonly ended: boolean;
+  // The user stopped the turn. Nothing was asked of the model, and the step must not be sealed:
+  // the last one already closed, and closing it again ends a turn that is over twice.
+  readonly interrupted?: boolean;
 }

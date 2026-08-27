@@ -46,17 +46,24 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
     return;
   }
 
-  // Separate proxies are the point of the split: a tool that hangs no longer holds the model call
-  // and every other tool of the same step under one shared timeout.
   const { runLocalModelCall } = proxyActivities<LocalActivities>(options);
   const { runLocalToolCall } = proxyActivities<LocalActivities>(options);
-  const { runLocalSeal } = proxyActivities<LocalActivities>({ ...options, startToCloseTimeout: "5 minutes" });
+  const { runLocalSeal } = proxyActivities<LocalActivities>({
+    ...options,
+    startToCloseTimeout: "5 minutes",
+  });
 
   for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
     const model = await runLocalModelCall({ turnId: input.turnId, step });
+    if (model.interrupted) return;
+
     await dispatchStepCalls(
       step,
-      model,
+      // One at a time whatever the batch says. These calls all reach the one live agent this
+      // process holds, and it admits a single unit of work at a time, so a second call that
+      // arrived while the first was running would be refused and reported as an unknown outcome
+      // for a tool that never ran. The worker half opens a session per activity and does overlap.
+      { ...model, sequential: true },
       (call) => runLocalToolCall({ turnId: input.turnId, step, call }),
       { isCancellation, log: (message, attributes) => log.info(message, attributes) },
     );

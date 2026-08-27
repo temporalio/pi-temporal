@@ -84,6 +84,14 @@ export function makeLocalTurnActivities(live: LiveTurns) {
     const turn = turnFor(input.turnId);
     const state = progressFor(input.turnId);
     return heartbeating(async () => {
+      // An abort reaches the unit that was running and nothing else, so the loop has to stop
+      // asking. Without this the next model call starts with a fresh signal and runs work the
+      // user stopped.
+      if (turn.steps.interrupted()) {
+        // Nothing else will run for this turn, and what it kept is whole tool outputs.
+        progress.delete(input.turnId);
+        return { calls: [], sequential: false, ended: true, interrupted: true };
+      }
       if (!state.recorded) {
         // Once. A retry that recorded again would put the prompt in the transcript twice.
         await turn.steps.record();

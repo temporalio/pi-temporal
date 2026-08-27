@@ -131,7 +131,8 @@ async function runMode(stepped: boolean) {
   await send(looping);
   await waitFor("the turn to answer", () => stepsFor(looping.promptId).length >= STEPS_TO_ANSWER);
   await sleep(1000); // a fourth step would land in this window
-  check(`${label}: one step at a time, in order`, JSON.stringify(stepsFor(looping.promptId)) === "[1,2,3]", stepsFor(looping.promptId));
+  const looped = JSON.stringify(stepsFor(looping.promptId)) === "[1,2,3]";
+  check(`${label}: one step at a time, in order`, looped, stepsFor(looping.promptId));
 
   // An interrupt ends the turn, not the session.
   hangingCalls.add(sessionId);
@@ -140,13 +141,17 @@ async function runMode(stepped: boolean) {
   await waitFor("the hanging step to start", () => stepsFor(hanging.promptId).length === 1);
   await client.workflow.getHandle(workflowId(sessionId)).signal("interrupt");
   await sleep(1000);
-  check(`${label}: the interrupt stopped the turn`, stepsFor(hanging.promptId).length === 1, stepsFor(hanging.promptId));
+  const held = stepsFor(hanging.promptId).length === 1;
+  check(`${label}: the interrupt stopped the turn`, held, stepsFor(hanging.promptId));
   hangingCalls.delete(sessionId);
 
   const after = { promptId: randomUUID(), text: "loop" };
   await send(after);
-  await waitFor("the session to serve a later prompt", () => stepsFor(after.promptId).length >= STEPS_TO_ANSWER);
-  check(`${label}: the session survived the interrupt`, JSON.stringify(stepsFor(after.promptId)) === "[1,2,3]", stepsFor(after.promptId));
+  await waitFor("the session to serve a later prompt", () => {
+    return stepsFor(after.promptId).length >= STEPS_TO_ANSWER;
+  });
+  const served = JSON.stringify(stepsFor(after.promptId)) === "[1,2,3]";
+  check(`${label}: the session survived the interrupt`, served, stepsFor(after.promptId));
 
   await client.workflow.getHandle(workflowId(sessionId)).terminate("step-loop-check done");
   worker.shutdown();
@@ -159,7 +164,8 @@ async function main() {
   await runMode(false);
   await runMode(true);
 
-  console.log(failures.length === 0 ? "\nstep-loop-check: OK" : `\nstep-loop-check: ${failures.length} failed`);
+  const bad = failures.length;
+  console.log(bad === 0 ? "\nstep-loop-check: OK" : `\nstep-loop-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

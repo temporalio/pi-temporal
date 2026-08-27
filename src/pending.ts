@@ -8,13 +8,19 @@
 // fresh, and a missing result makes a call look unrun. Both are the safe direction for a caller
 // that checks the transcript first.
 
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
 
+const RESULT = ".json";
+const STARTED = ".started";
+
 const dirFor = (sessionFile: string) => `${sessionFile}.pending`;
-const resultPath = (sessionFile: string, callId: string) => join(dirFor(sessionFile), `${callId}.json`);
-const dispatchPath = (sessionFile: string, callId: string) => join(dirFor(sessionFile), `${callId}.started`);
+const resultPath = (sessionFile: string, callId: string) =>
+  join(dirFor(sessionFile), `${callId}${RESULT}`);
+const dispatchPath = (sessionFile: string, callId: string) =>
+  join(dirFor(sessionFile), `${callId}${STARTED}`);
 
 /** Record that a dispatch is about to run the tool, before it can have any effect. */
 export async function noteDispatch(sessionFile: string, callId: string): Promise<void> {
@@ -46,9 +52,15 @@ export async function keepResult(
 ): Promise<void> {
   await mkdir(dirFor(sessionFile), { recursive: true });
   const target = resultPath(sessionFile, callId);
-  const scratch = `${target}.writing`;
-  await writeFile(scratch, JSON.stringify(outcome), "utf8");
-  await rename(scratch, target);
+  // Unique per writer. An attempt whose startToClose expired is still running while its retry
+  // writes, and one scratch path between them publishes a document that is neither.
+  const scratch = `${target}.${randomUUID()}.writing`;
+  try {
+    await writeFile(scratch, JSON.stringify(outcome), "utf8");
+    await rename(scratch, target);
+  } finally {
+    await rm(scratch, { force: true });
+  }
 }
 
 /** What a call produced, or undefined when nothing kept a result for it. */
@@ -57,16 +69,46 @@ export async function readResult(
   callId: string,
 ): Promise<TurnToolCallOutcome | undefined> {
   try {
-    return JSON.parse(await readFile(resultPath(sessionFile, callId), "utf8")) as TurnToolCallOutcome;
+    const kept = await readFile(resultPath(sessionFile, callId), "utf8");
+    return JSON.parse(kept) as TurnToolCallOutcome;
   } catch {
     return undefined;
   }
 }
 
-/** Drop what is kept for calls the step has recorded. */
+/** Drop what is kept for the given calls. */
 export async function forget(sessionFile: string, callIds: readonly string[]): Promise<void> {
   for (const callId of callIds) {
     await rm(resultPath(sessionFile, callId), { force: true });
     await rm(dispatchPath(sessionFile, callId), { force: true });
+  }
+}
+
+/**
+ * Drop what is kept for every call the transcript now answers, and any scratch file a writer died
+ * on. A seal that dropped its own results as it recorded them would leave a retry of that seal
+ * with nothing to read, and a retry reads a batch with no results as a batch that wants another
+ * step, even when a tool asked the turn to stop.
+ */
+export async function sweep(sessionFile: string, answered: ReadonlySet<string>): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dirFor(sessionFile));
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name.endsWith(".writing")) {
+      await rm(join(dirFor(sessionFile), name), { force: true });
+      continue;
+    }
+    const callId = name.endsWith(RESULT)
+      ? name.slice(0, -RESULT.length)
+      : name.endsWith(STARTED)
+        ? name.slice(0, -STARTED.length)
+        : undefined;
+    if (callId !== undefined && answered.has(callId)) {
+      await rm(join(dirFor(sessionFile), name), { force: true });
+    }
   }
 }
