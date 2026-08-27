@@ -10,7 +10,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { ApplicationFailure, Context } from "@temporalio/activity";
+import { Context } from "@temporalio/activity";
 import {
   createAgentSession,
   findDanglingToolCalls,
@@ -234,14 +234,12 @@ export function makeActivities(opts: ActivityOptions) {
           return { outcome: "already-settled" };
         }
 
-        // The transcript decides which calls exist and does not change between attempts, so a call
-        // it does not hold is not one a retry will find. Retrying it holds the step, the turn and
-        // the session's queue behind it for hours.
+        // A call the transcript does not hold is one this attempt cannot run. Retryable on
+        // purpose, and capped by the proxy: on shared storage the message that records it may not
+        // have reached this host yet, and answering a stale read with a permanent failure tells
+        // the model a tool that never ran may have taken effect.
         if (!recordedInTranscript(session.state.messages as Msg[], input.call.id)) {
-          throw ApplicationFailure.nonRetryable(
-            `no recorded tool call ${input.call.id} in ${input.sessionId}`,
-            "ToolCallNotRecorded",
-          );
+          throw new Error(`no recorded tool call ${input.call.id} in ${input.sessionId}`);
         }
 
         if (await pending.wasDispatched(input.sessionFile, input.call.id)) {

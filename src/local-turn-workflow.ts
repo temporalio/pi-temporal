@@ -48,10 +48,8 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
 
   const { runLocalModelCall } = proxyActivities<LocalActivities>(options);
   const { runLocalToolCall } = proxyActivities<LocalActivities>(options);
-  const { runLocalSeal } = proxyActivities<LocalActivities>({
-    ...options,
-    startToCloseTimeout: "5 minutes",
-  });
+  // The seal also runs a provider retry and a compaction, so it keeps the turn-sized backstop.
+  const { runLocalSeal } = proxyActivities<LocalActivities>(options);
 
   for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
     const model = await runLocalModelCall({ turnId: input.turnId, step });

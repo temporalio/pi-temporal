@@ -84,6 +84,15 @@ export function makeLocalTurnActivities(live: LiveTurns) {
     const turn = turnFor(input.turnId);
     const state = progressFor(input.turnId);
     return heartbeating(async () => {
+      // Record before asking about the stop. A turn stopped between here and the executor being
+      // handed it has a prompt the user typed and nothing holding it, and dropping it loses the
+      // text with no error to show for it. Recorded and unanswered is a state resume handles.
+      if (!state.recorded) {
+        // Once. A retry that recorded again would put the prompt in the transcript twice.
+        await turn.steps.record();
+        state.recorded = true;
+      }
+
       // An abort reaches the unit that was running and nothing else, so the loop has to stop
       // asking. Without this the next model call starts with a fresh signal and runs work the
       // user stopped.
@@ -92,11 +101,7 @@ export function makeLocalTurnActivities(live: LiveTurns) {
         progress.delete(input.turnId);
         return { calls: [], sequential: false, ended: true, interrupted: true };
       }
-      if (!state.recorded) {
-        // Once. A retry that recorded again would put the prompt in the transcript twice.
-        await turn.steps.record();
-        state.recorded = true;
-      }
+
       const model = await turn.steps.modelCall();
       return {
         calls: model.toolCalls.map((call) => ({ id: call.id, name: call.name })),

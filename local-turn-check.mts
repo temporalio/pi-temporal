@@ -154,6 +154,13 @@ async function main() {
   const resealed = stopped.seen.includes("seal:2:0");
   check("stepped: an interrupted turn is not sealed again", !resealed, stopped.seen);
 
+  // A stop between the executor being handed the turn and the first model call still has to leave
+  // the prompt somewhere. Dropped, the user's text is gone with no error to show for it.
+  const early = await drive(true, { interruptAfter: 0 });
+  const kept = early.seen[0] === "record";
+  check("stepped: a stop before the first call still records the prompt", kept, early.seen);
+  check("stepped: and asks the model nothing", !early.seen.includes("model:1"), early.seen);
+
   worker.shutdown();
   await running;
   await connection.close();
