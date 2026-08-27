@@ -10,7 +10,7 @@ Status: verified end to end against a live Pi (SDK 0.84.2 fork). A turn that too
 
 ## Depends on the Pi fork
 
-This needs three fork branches, none of which is in the published `@earendil-works/pi-coding-agent`. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
+This needs three pull requests on the fork, none of which is in the published `@earendil-works/pi-coding-agent`. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
 
 - `recordPrompt(text)` puts a prompt in the transcript without running it.
 - `step()` runs one model call and its tools, and reports whether the turn is done.
@@ -19,7 +19,7 @@ This needs three fork branches, none of which is in the published `@earendil-wor
 
 [temporalio/pi#3](https://github.com/temporalio/pi/pull/3), stacked on it, adds `pi.registerTurnExecutor`, which lets an extension take over when a session's own turns run.
 
-[`moe/turn-steps`](https://github.com/temporalio/pi/tree/moe/turn-steps), stacked on that, splits a step into `modelCall`, `runToolCall` and `sealStep`, and hands the same three to a registered executor as `turn.steps`. It has no pull request yet, because the two below it are still open.
+[temporalio/pi#4](https://github.com/temporalio/pi/pull/4), stacked on that, splits a step into `modelCall`, `runToolCall` and `sealStep`, and hands the same three to a registered executor as `turn.steps`.
 
 So the dependency is a build of the fork, pinned by commit in `fork.pin`:
 
