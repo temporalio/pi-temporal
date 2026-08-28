@@ -30,6 +30,9 @@ export interface SteppedActivities {
 export interface SteppedStepDeps {
   readonly activities: SteppedActivities;
   readonly isCancellation: (err: unknown) => boolean;
+  // Run the seal even though the turn was cancelled. Calls that finished have real results kept
+  // for them, and abandoning the step tells the model they may have taken effect instead.
+  readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
   // The workflow's logger, so what a step could not settle is said where an operator reads about
   // the turn. History records an activity that succeeded; only the dispatch knows what it decided.
   readonly log?: (message: string, attributes: Record<string, unknown>) => void;
@@ -59,7 +62,7 @@ export async function dispatchStepCalls(
   model: StepCalls,
   runToolCall: (call: DeferredToolCall) => Promise<ToolCallResult>,
   deps: Pick<SteppedStepDeps, "isCancellation" | "log">,
-): Promise<void> {
+): Promise<unknown | undefined> {
   // Errors are carried rather than thrown, so one call that ran out of retries does not leave its
   // siblings' promises rejecting with nobody to catch them.
   const dispatch = async (call: DeferredToolCall): Promise<Dispatched> => {
@@ -85,11 +88,6 @@ export async function dispatchStepCalls(
     }
   }
 
-  // An interrupt is not a failed tool. Sealing after one would close a step the user stopped, and
-  // settle calls whose dispatch is the thing that was cancelled.
-  const stopped = dispatched.find((d) => d.error !== undefined && deps.isCancellation(d.error));
-  if (stopped) throw stopped.error;
-
   const unsettled = dispatched.filter(
     (d) => d.outcome !== "settled" && d.outcome !== "already-settled",
   );
@@ -103,6 +101,10 @@ export async function dispatchStepCalls(
       })),
     });
   }
+
+  // Handed back rather than thrown. The step still has to be closed, because the calls that
+  // finished before the stop have results and the seal is what records them.
+  return dispatched.find((d) => d.error !== undefined && deps.isCancellation(d.error))?.error;
 }
 
 type SteppedStep = (input: RunStepInput) => Promise<RunStepResult>;
@@ -118,7 +120,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       return model.settled;
     }
 
-    await dispatchStepCalls(
+    const stopped = await dispatchStepCalls(
       input.step,
       model,
       (call) => {
@@ -135,11 +137,22 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
 
     // Every call of the step is sealed, including the ones no dispatch answered for. A step that
     // leaves one open leaves a transcript the next model call cannot be made from.
-    return sealStep({
-      sessionId: input.sessionId,
-      sessionFile: input.sessionFile,
-      step: input.step,
-      calls: model.calls,
-    });
+    const seal = (): Promise<RunStepResult> =>
+      sealStep({
+        sessionId: input.sessionId,
+        sessionFile: input.sessionFile,
+        step: input.step,
+        calls: model.calls,
+        retryAttempt: input.retryAttempt,
+      });
+
+    if (stopped) {
+      // The user stopped the turn, so close the step and then let the stop through. Skipping the
+      // seal would throw away the calls that finished, and the next prompt would be told their
+      // outcome is unknown.
+      await deps.nonCancellable(seal);
+      throw stopped;
+    }
+    return seal();
   };
 }

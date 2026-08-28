@@ -66,6 +66,8 @@ async function drive(
       },
     },
     isCancellation,
+    // Straight through: what matters here is that the seal still runs after a stop.
+    nonCancellable: (fn) => fn(),
     log: (message, attributes) => lines.push({ message, attributes }),
   });
 
@@ -143,7 +145,9 @@ async function main() {
       throw new FakeCancel("interrupted");
     });
     check("an interrupt ends the turn", run.error instanceof FakeCancel, String(run.error));
-    check("an interrupted step is not sealed", run.seals.length === 0, run.seals);
+    // Sealed on the way out, so a call that finished before the stop keeps its result. Skipping it
+    // would have the next prompt told the outcome is unknown for work that is on disk.
+    check("an interrupted step is still closed", run.seals.length === 1, run.seals);
   }
 
   // A sequential batch stops dispatching once one call is cancelled.

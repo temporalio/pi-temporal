@@ -9,7 +9,7 @@
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
-import { isCancellation, log, proxyActivities } from "@temporalio/workflow";
+import { CancellationScope, isCancellation, log, proxyActivities } from "@temporalio/workflow";
 import { dispatchStepCalls } from "./l2-step.js";
 import { MAX_STEPS_PER_TURN } from "./protocol.js";
 import type {
@@ -55,7 +55,7 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
     const model = await runLocalModelCall({ turnId: input.turnId, step });
     if (model.interrupted) return;
 
-    await dispatchStepCalls(
+    const stopped = await dispatchStepCalls(
       step,
       // One at a time whatever the batch says. These calls all reach the one live agent this
       // process holds, and it admits a single unit of work at a time, so a second call that
@@ -65,7 +65,14 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
       (call) => runLocalToolCall({ turnId: input.turnId, step, call }),
       { isCancellation, log: (message, attributes) => log.info(message, attributes) },
     );
-    const { done } = await runLocalSeal({ turnId: input.turnId, step, calls: model.calls });
+    const seal = () => runLocalSeal({ turnId: input.turnId, step, calls: model.calls });
+    if (stopped) {
+      // Close the step before letting the stop through, so the calls that finished keep their
+      // results instead of reaching the model as unknown outcomes.
+      await CancellationScope.nonCancellable(seal);
+      throw stopped;
+    }
+    const { done } = await seal();
     if (done) return;
   }
 

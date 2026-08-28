@@ -40,6 +40,10 @@ export interface PromptInput {
 }
 
 export interface RunStepInput extends PromptInput {
+  // How many attempts of this step already failed. The workflow keeps it because the session that
+  // would otherwise count it is rebuilt per activity, and the transcript it could be read off is
+  // something a compaction rewrites.
+  readonly retryAttempt?: number;
   readonly sessionId: string;
   // Absolute path to the Pi session JSONL. This file is the durable log; the activity opens it,
   // appends what the step produced, and it survives across workers on shared storage.
@@ -52,6 +56,8 @@ export interface RunStepInput extends PromptInput {
 export interface RunStepResult {
   // Whether the turn is finished. False means the workflow schedules another step.
   readonly done: boolean;
+  // What the step's own retry budget is up to, for the workflow to carry into the next one.
+  readonly retryAttempt?: number;
   // The assistant's final text, once the turn is done (the log is the truth; this is a courtesy).
   readonly finalText: string;
 }
@@ -107,6 +113,7 @@ export interface SealStepInput {
   readonly sessionId: string;
   readonly sessionFile: string;
   readonly step: number;
+  readonly retryAttempt?: number;
   // The step's calls, in the order the model asked for them. A call with no result is settled as
   // an unknown outcome, because a step that leaves one unanswered leaves a transcript no
   // provider accepts.

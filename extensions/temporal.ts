@@ -226,7 +226,8 @@ export default function (pi: ExtensionAPI) {
         interrupted: () => turn.steps.interrupted(),
         modelCall: () => ranHere(() => turn.steps.modelCall()),
         runToolCall: (id) => ranHere(() => turn.steps.runToolCall(id)),
-        sealStep: (results) => ranHere(() => turn.steps.sealStep(results)),
+        sealStep: (results, options) => ranHere(() => turn.steps.sealStep(results, options)),
+        abandonStep: () => turn.steps.abandonStep(),
       },
     });
 
