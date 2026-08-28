@@ -63,6 +63,17 @@ async function main() {
   });
   check("a live holder's lock is not stolen", refused);
 
+  // The first activity of a session takes the lock before anything has created the directory the
+  // session file lives in, so the lock has to make it rather than sit there failing.
+  const fresh = join(dir, "not-yet", "session.jsonl");
+  const started = Date.now();
+  let made = false;
+  await withSessionLock(fresh, async () => {
+    made = true;
+  }, 3000).catch(() => {});
+  check("a session whose directory does not exist yet can be locked", made);
+  check("and it does not wait to find that out", Date.now() - started < 1000, Date.now() - started);
+
   const bad = failures.length;
   console.log(bad === 0 ? "session-lock-check: OK" : `session-lock-check: ${bad} failed`);
   process.exit(bad === 0 ? 0 : 1);

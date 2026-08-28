@@ -6,9 +6,10 @@
 // Advisory, and beside the session file, so it works wherever the session file works. A holder
 // that dies is reclaimed on age, which is why the lock is refreshed while it is held.
 
-import { readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
+import { dirname } from "node:path";
 
 // Comfortably longer than the refresh, so a slow filesystem does not look like a dead holder.
 const STALE_MS = 20_000;
@@ -45,15 +46,23 @@ export async function withSessionLock<T>(
   const token = randomUUID();
   const deadline = Date.now() + waitMs;
 
+  // The session directory may not exist yet. The first activity of a session is what creates it,
+  // and it does that inside the lock.
+  await mkdir(dirname(path), { recursive: true });
+
   for (;;) {
     try {
       await writeFile(path, held(token), { flag: "wx" });
       break;
-    } catch {
-      if (!(await taken(path)) && Date.now() < deadline) continue;
+    } catch (err) {
+      const contended = await taken(path);
       if (Date.now() >= deadline) {
-        throw new Error(`another writer has held ${path} for ${waitMs}ms`);
+        // Only call it contention when it was. Anything else is the real error, and reporting a
+        // writer that does not exist sends the next reader looking for one.
+        throw contended ? new Error(`another writer has held ${path} for ${waitMs}ms`) : err;
       }
+      // Always wait, including after clearing a stale lock. A failure that will not fix itself
+      // would otherwise spin here for the whole deadline.
       await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
     }
   }
