@@ -16,25 +16,37 @@ import type { TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
 const RESULT = ".json";
 const STARTED = ".started";
 
-const dirFor = (sessionFile: string) => `${sessionFile}.pending`;
-const resultPath = (sessionFile: string, callId: string) =>
-  join(dirFor(sessionFile), `${callId}${RESULT}`);
-const dispatchPath = (sessionFile: string, callId: string) =>
-  join(dirFor(sessionFile), `${callId}${STARTED}`);
+// Scoped by step, because a call id is only unique within the message that asked for it. A
+// provider that reuses one across a session would otherwise have a later call find an earlier
+// step's result and skip the tool.
+const rootFor = (sessionFile: string) => `${sessionFile}.pending`;
+const dirFor = (sessionFile: string, step: number) => join(rootFor(sessionFile), String(step));
+const resultPath = (sessionFile: string, step: number, callId: string) =>
+  join(dirFor(sessionFile, step), `${callId}${RESULT}`);
+const dispatchPath = (sessionFile: string, step: number, callId: string) =>
+  join(dirFor(sessionFile, step), `${callId}${STARTED}`);
 
 /** Record that a dispatch is about to run the tool, before it can have any effect. */
-export async function noteDispatch(sessionFile: string, callId: string): Promise<void> {
-  await mkdir(dirFor(sessionFile), { recursive: true });
-  await writeFile(dispatchPath(sessionFile, callId), "", "utf8");
+export async function noteDispatch(
+  sessionFile: string,
+  step: number,
+  callId: string,
+): Promise<void> {
+  await mkdir(dirFor(sessionFile, step), { recursive: true });
+  await writeFile(dispatchPath(sessionFile, step, callId), "", "utf8");
 }
 
 /**
  * Whether a dispatch had already started this call. A second dispatch that finds this must not
  * run the tool again: the first one can have pushed, written or deleted before it died.
  */
-export async function wasDispatched(sessionFile: string, callId: string): Promise<boolean> {
+export async function wasDispatched(
+  sessionFile: string,
+  step: number,
+  callId: string,
+): Promise<boolean> {
   try {
-    await readFile(dispatchPath(sessionFile, callId), "utf8");
+    await readFile(dispatchPath(sessionFile, step, callId), "utf8");
     return true;
   } catch {
     return false;
@@ -47,11 +59,12 @@ export async function wasDispatched(sessionFile: string, callId: string): Promis
  */
 export async function keepResult(
   sessionFile: string,
+  step: number,
   callId: string,
   outcome: TurnToolCallOutcome,
 ): Promise<void> {
-  await mkdir(dirFor(sessionFile), { recursive: true });
-  const target = resultPath(sessionFile, callId);
+  await mkdir(dirFor(sessionFile, step), { recursive: true });
+  const target = resultPath(sessionFile, step, callId);
   // Unique per writer. An attempt whose startToClose expired is still running while its retry
   // writes, and one scratch path between them publishes a document that is neither.
   const scratch = `${target}.${randomUUID()}.writing`;
@@ -67,49 +80,45 @@ export async function keepResult(
 /** What a call produced, or undefined when nothing kept a result for it. */
 export async function readResult(
   sessionFile: string,
+  step: number,
   callId: string,
 ): Promise<TurnToolCallOutcome | undefined> {
   try {
-    const kept = await readFile(resultPath(sessionFile, callId), "utf8");
+    const kept = await readFile(resultPath(sessionFile, step, callId), "utf8");
     return JSON.parse(kept) as TurnToolCallOutcome;
   } catch {
     return undefined;
   }
 }
 
-/** Drop what is kept for the given calls. */
-export async function forget(sessionFile: string, callIds: readonly string[]): Promise<void> {
+/** Drop what is kept for the given calls of one step. */
+export async function forget(
+  sessionFile: string,
+  step: number,
+  callIds: readonly string[],
+): Promise<void> {
   for (const callId of callIds) {
-    await rm(resultPath(sessionFile, callId), { force: true });
-    await rm(dispatchPath(sessionFile, callId), { force: true });
+    await rm(resultPath(sessionFile, step, callId), { force: true });
+    await rm(dispatchPath(sessionFile, step, callId), { force: true });
   }
 }
 
 /**
- * Drop what is kept for every call the transcript now answers, and any scratch file a writer died
- * on. A seal that dropped its own results as it recorded them would leave a retry of that seal
- * with nothing to read, and a retry reads a batch with no results as a batch that wants another
- * step, even when a tool asked the turn to stop.
+ * Drop what earlier steps kept. A step keeps its own results until the step after it, because a
+ * seal that dropped them as it recorded them would leave a retry of that seal with nothing to
+ * read, and a batch with no results reads as one that wants another step even when a tool asked
+ * the turn to stop.
  */
-export async function sweep(sessionFile: string, answered: ReadonlySet<string>): Promise<void> {
-  let names: string[];
+export async function sweep(sessionFile: string, before: number): Promise<void> {
+  let steps: string[];
   try {
-    names = await readdir(dirFor(sessionFile));
+    steps = await readdir(rootFor(sessionFile));
   } catch {
     return;
   }
-  for (const name of names) {
-    if (name.endsWith(".writing")) {
-      await rm(join(dirFor(sessionFile), name), { force: true });
-      continue;
-    }
-    const callId = name.endsWith(RESULT)
-      ? name.slice(0, -RESULT.length)
-      : name.endsWith(STARTED)
-        ? name.slice(0, -STARTED.length)
-        : undefined;
-    if (callId !== undefined && answered.has(callId)) {
-      await rm(join(dirFor(sessionFile), name), { force: true });
-    }
+  for (const name of steps) {
+    const step = Number(name);
+    if (!Number.isInteger(step) || step >= before) continue;
+    await rm(join(rootFor(sessionFile), name), { recursive: true, force: true });
   }
 }

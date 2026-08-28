@@ -24,21 +24,21 @@ async function main() {
 
   // Nothing kept yet: a fresh dispatch has to look fresh, or a first attempt reports its own
   // tool as an unknown outcome and never runs it.
-  check("an untouched call has no note", (await pending.wasDispatched(file, "c1")) === false);
-  check("an untouched call has no result", (await pending.readResult(file, "c1")) === undefined);
+  check("an untouched call has no note", (await pending.wasDispatched(file, 1, "c1")) === false);
+  check("an untouched call has no result", (await pending.readResult(file, 1, "c1")) === undefined);
 
-  await pending.noteDispatch(file, "c1");
-  check("a dispatch leaves a note", (await pending.wasDispatched(file, "c1")) === true);
-  check("the note is not a result", (await pending.readResult(file, "c1")) === undefined);
+  await pending.noteDispatch(file, 1, "c1");
+  check("a dispatch leaves a note", (await pending.wasDispatched(file, 1, "c1")) === true);
+  check("the note is not a result", (await pending.readResult(file, 1, "c1")) === undefined);
 
-  await pending.keepResult(file, "c1", outcome("c1"));
-  const kept = await pending.readResult(file, "c1");
+  await pending.keepResult(file, 1, "c1", outcome("c1"));
+  const kept = await pending.readResult(file, 1, "c1");
   check("a kept result round-trips", kept?.message.toolCallId === "c1", kept);
   check("a kept result keeps its terminate flag", kept?.terminate === false, kept);
 
   // A writer that died leaves scratch behind. It must never read as a result.
-  await writeFile(`${file}.pending/c2.json.abandoned.writing`, "{ not json", "utf8");
-  check("scratch is not a result", (await pending.readResult(file, "c2")) === undefined);
+  await writeFile(`${file}.pending/1/c2.json.abandoned.writing`, "{ not json", "utf8");
+  check("scratch is not a result", (await pending.readResult(file, 1, "c2")) === undefined);
 
   // Two writers for one call is a real case: an attempt whose startToClose expired is still
   // running while its retry writes. One scratch path between them publishes a document that is
@@ -52,10 +52,10 @@ async function main() {
   let wrote = true;
   try {
     await Promise.all([
-      pending.keepResult(file, "c3", big("c3", 400_000)),
-      pending.keepResult(file, "c3", big("c3", 400_001)),
+      pending.keepResult(file, 1, "c3", big("c3", 400_000)),
+      pending.keepResult(file, 1, "c3", big("c3", 400_001)),
     ]);
-    overlapped = await pending.readResult(file, "c3");
+    overlapped = await pending.readResult(file, 1, "c3");
   } catch (err) {
     wrote = false;
     overlapped = undefined;
@@ -64,26 +64,27 @@ async function main() {
   const whole = wrote && overlapped?.message.toolCallId === "c3";
   check("two writers for one call publish a whole result", whole, overlapped);
 
-  // The seal keeps its results so a retry of the seal can read them again. The next step sweeps
-  // what the transcript now answers, and nothing else.
-  await pending.noteDispatch(file, "c2");
-  await pending.keepResult(file, "c2", outcome("c2"));
-  await pending.sweep(file, new Set(["c1"]));
-  check("a swept call is forgotten", (await pending.readResult(file, "c1")) === undefined);
-  check("its note goes too", (await pending.wasDispatched(file, "c1")) === false);
-  const stillThere = (await pending.readResult(file, "c2"))?.message.toolCallId === "c2";
-  check("an unanswered call is kept", stillThere);
-  check("its note is kept", (await pending.wasDispatched(file, "c2")) === true);
+  // A step keeps its own results so a retry of its seal can read them again; only earlier steps
+  // are swept. The scoping is what stops a reused call id finding a previous step's result.
+  await pending.noteDispatch(file, 1, "c2");
+  await pending.keepResult(file, 1, "c2", outcome("c2"));
+  await pending.keepResult(file, 2, "c1", outcome("c1"));
+  await pending.sweep(file, 2);
+  check("an earlier step is forgotten", (await pending.readResult(file, 1, "c1")) === undefined);
+  check("its note goes too", (await pending.wasDispatched(file, 1, "c1")) === false);
+  const reused = (await pending.readResult(file, 2, "c1"))?.message.toolCallId === "c1";
+  check("the same id in this step is its own", reused);
+  check("the whole earlier step goes", (await pending.readResult(file, 1, "c2")) === undefined);
 
-  const left = await readdir(`${file}.pending`);
-  check("scratch is swept", left.every((name) => !name.endsWith(".writing")), left);
+  const left = await readdir(`${file}.pending/2`);
+  check("no scratch is left behind", left.every((name) => !name.endsWith(".writing")), left);
 
-  await pending.forget(file, ["c2"]);
-  check("forget drops the result", (await pending.readResult(file, "c2")) === undefined);
-  check("forget drops the note", (await pending.wasDispatched(file, "c2")) === false);
+  await pending.forget(file, 2, ["c1"]);
+  check("forget drops the result", (await pending.readResult(file, 2, "c1")) === undefined);
+  check("forget drops the note", (await pending.wasDispatched(file, 2, "c1")) === false);
 
   // A session that never dispatched anything has no directory, and sweeping it must not throw.
-  await pending.sweep(join(dir, "never-used.jsonl"), new Set(["c1"]));
+  await pending.sweep(join(dir, "never-used.jsonl"), 1);
   check("sweeping a session with no calls is quiet", true);
 
   const bad = failures.length;

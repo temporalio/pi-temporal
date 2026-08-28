@@ -68,6 +68,7 @@ export async function piSession(
     ? makeSteppedStep({
         activities: { runModelCall, runToolCall, sealStep },
         isCancellation,
+        nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
         // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
         log: (message, attributes) => log.info(message, attributes),
       })
@@ -92,13 +93,17 @@ export async function piSession(
     const prompt = queue.shift()!;
     let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
     let finalText = "";
+    // The step's retry budget, kept here because the session that would count it is rebuilt per
+    // activity and the transcript it could be read off is something a compaction rewrites.
+    let retryAttempt = 0;
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
-          const input: RunStepInput = { sessionId, sessionFile, step, ...prompt };
+          const input: RunStepInput = { sessionId, sessionFile, step, retryAttempt, ...prompt };
           const result = await runTurnStep(input);
+          retryAttempt = result.retryAttempt ?? 0;
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;
