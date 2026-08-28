@@ -68,6 +68,7 @@ async function main() {
   // are swept. The scoping is what stops a reused call id finding a previous step's result.
   await pending.noteDispatch(file, 1, "c2");
   await pending.keepResult(file, 1, "c2", outcome("c2"));
+  await pending.noteDispatch(file, 2, "c1");
   await pending.keepResult(file, 2, "c1", outcome("c1"));
   await pending.sweep(file, 2);
   check("an earlier step is forgotten", (await pending.readResult(file, 1, "c1")) === undefined);
@@ -82,6 +83,13 @@ async function main() {
   await pending.forget(file, 2, ["c1"]);
   check("forget drops the result", (await pending.readResult(file, 2, "c1")) === undefined);
   check("forget drops the note", (await pending.wasDispatched(file, 2, "c1")) === false);
+
+  // A turn that ended leaves stragglers behind. One writing its result back would put it where a
+  // later turn looks, and a call id is only unique within the message that asked for it.
+  await pending.sweepAll(file);
+  await pending.keepResult(file, 2, "c9", outcome("c9"));
+  const rebuilt = await pending.readResult(file, 2, "c9");
+  check("a straggler cannot rebuild a swept turn", rebuilt === undefined);
 
   // A session that never dispatched anything has no directory, and sweeping it must not throw.
   await pending.sweep(join(dir, "never-used.jsonl"), 1);

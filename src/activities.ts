@@ -194,8 +194,9 @@ export function makeActivities(opts: ActivityOptions) {
           const { done } = await session.step();
           await session.waitForIdle();
           const messages = session.state.messages as Msg[];
-          // Whole-step mode keeps its counter in the one session that runs the step, so there is
-          // nothing for the workflow to carry.
+          // Whole-step mode has no carry. Its session is rebuilt per activity too, so its retry
+          // budget starts at zero on every step and only the step ceiling bounds it. That is how
+          // it has always been; giving it the carry means giving step() the seal's post-run pass.
           return { done, retryAttempt: 0, finalText: done ? lastAssistantText(messages) : "" };
         } finally {
           session.dispose();

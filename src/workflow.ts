@@ -103,7 +103,7 @@ export async function piSession(
           running = { promptId: prompt.promptId, step };
           const input: RunStepInput = { sessionId, sessionFile, step, retryAttempt, ...prompt };
           const result = await runTurnStep(input);
-          retryAttempt = result.retryAttempt ?? 0;
+          retryAttempt = result.retryAttempt;
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;

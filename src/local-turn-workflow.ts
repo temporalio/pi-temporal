@@ -71,7 +71,9 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
       // Close the step before letting the stop through, so the calls that finished keep their
       // results instead of reaching the model as unknown outcomes. The stop is what the caller
       // hears about, so a seal that fails on the way out does not replace it.
-      await CancellationScope.nonCancellable(() => seal(true)).catch(() => {});
+      await CancellationScope.nonCancellable(() => seal(true)).catch((err: unknown) => {
+        log.warn("could not close a stopped step", { step, error: String(err) });
+      });
       throw stopped;
     }
     const { done } = await seal(false);

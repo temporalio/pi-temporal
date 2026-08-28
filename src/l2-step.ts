@@ -152,7 +152,12 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       // seal would throw away the calls that finished, and the next prompt would be told their
       // outcome is unknown. The stop is what the caller hears about either way: a seal that fails
       // on the way out is not the thing worth reporting.
-      await deps.nonCancellable(() => seal(true)).catch(() => {});
+      await deps.nonCancellable(() => seal(true)).catch((err: unknown) => {
+        // The stop is what the caller asked about, so it is what propagates. But the results of
+        // every call that finished are lost with this, and the next prompt will tell the model
+        // their outcome is unknown, so it does not go unsaid.
+        deps.log?.("could not close a stopped step", { step: input.step, error: String(err) });
+      });
       throw stopped;
     }
     return seal(false);

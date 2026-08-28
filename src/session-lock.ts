@@ -78,17 +78,22 @@ export async function withSessionLock<T>(
   // otherwise keep the next holder's lock alive long after that one died.
   const refresh = setInterval(() => {
     void (async () => {
+      let owner: { token?: string };
       try {
-        const owner = JSON.parse(await readFile(path, "utf8")) as { token?: string };
-        if (owner.token !== token) {
-          clearInterval(refresh);
-          return;
-        }
-        const now = new Date();
-        await utimes(path, now, now);
-      } catch {
-        clearInterval(refresh);
+        owner = JSON.parse(await readFile(path, "utf8")) as { token?: string };
+      } catch (err) {
+        // Gone means reclaimed. Anything else is one read that failed, and the shared storage this
+        // exists for is exactly where that happens. Stopping on it would let the lock age out from
+        // under a holder that is still writing.
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") clearInterval(refresh);
+        return;
       }
+      if (owner.token !== token) {
+        clearInterval(refresh);
+        return;
+      }
+      const now = new Date();
+      await utimes(path, now, now).catch(() => {});
     })();
   }, REFRESH_MS);
   refresh.unref?.();
