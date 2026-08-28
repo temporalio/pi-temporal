@@ -57,7 +57,8 @@ export interface RunStepResult {
   // Whether the turn is finished. False means the workflow schedules another step.
   readonly done: boolean;
   // What the step's own retry budget is up to, for the workflow to carry into the next one.
-  readonly retryAttempt?: number;
+  // Required, because a step that quietly forgets to report it takes the cap with it.
+  readonly retryAttempt: number;
   // The assistant's final text, once the turn is done (the log is the truth; this is a courtesy).
   readonly finalText: string;
 }
@@ -114,6 +115,9 @@ export interface SealStepInput {
   readonly sessionFile: string;
   readonly step: number;
   readonly retryAttempt?: number;
+  // The turn was stopped, so record the results and nothing else. A provider retry or a
+  // compaction on the way out is work nobody asked for, and the interrupt waits for it.
+  readonly interrupted?: boolean;
   // The step's calls, in the order the model asked for them. A call with no result is settled as
   // an unknown outcome, because a step that leaves one unanswered leaves a transcript no
   // provider accepts.
@@ -153,6 +157,7 @@ export interface LocalToolCallInput extends LocalStepInput {
 
 export interface LocalSealInput extends LocalStepInput {
   readonly calls: readonly DeferredToolCall[];
+  readonly interrupted?: boolean;
 }
 
 export interface LocalModelCallResult {

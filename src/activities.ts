@@ -148,6 +148,9 @@ export function makeActivities(opts: ActivityOptions) {
     if (stepped) await pending.sweep(input.sessionFile, input.step);
 
     if (!markerPresent(messages(), input.promptId)) {
+      // Everything the last turn left. Steps are numbered per turn, so sweeping by step number
+      // alone never reaches a turn that ran further than this one will.
+      if (stepped) await pending.sweepAll(input.sessionFile);
       // Settle what the turn that stopped left behind first. A call with no result is a payload no
       // provider accepts, so a prompt recorded behind one makes every later turn of the session
       // fail rather than just the interrupted one.
@@ -172,7 +175,7 @@ export function makeActivities(opts: ActivityOptions) {
     if (!session.prepareStep()) {
       // The prompt is recorded and the turn already has its answer. That is a retry landing after
       // the last step finished but before its result reached Temporal.
-      return { done: true, finalText: lastAssistantText(messages()) };
+      return { done: true, retryAttempt: 0, finalText: lastAssistantText(messages()) };
     }
     return undefined;
   }
@@ -191,7 +194,9 @@ export function makeActivities(opts: ActivityOptions) {
           const { done } = await session.step();
           await session.waitForIdle();
           const messages = session.state.messages as Msg[];
-          return { done, finalText: done ? lastAssistantText(messages) : "" };
+          // Whole-step mode keeps its counter in the one session that runs the step, so there is
+          // nothing for the workflow to carry.
+          return { done, retryAttempt: 0, finalText: done ? lastAssistantText(messages) : "" };
         } finally {
           session.dispose();
         }
@@ -297,16 +302,20 @@ export function makeActivities(opts: ActivityOptions) {
 
           // Named, so a message something else appended between the model call and here cannot
           // be the one these results are attributed to.
-          const { done } = await session.sealStep(results, {
+          const sealed = await session.sealStep(results, {
             expectCalls: input.calls.map((call) => call.id),
             retryAttempt: input.retryAttempt,
+            // A stopped turn wants its results written down and nothing else. Deciding whether to
+            // retry or compact is work nobody asked for, and a compaction is a whole model call.
+            postRun: !input.interrupted,
           });
+          const { done } = sealed;
           await session.waitForIdle();
           // What is kept stays until the next step sweeps it. A seal that dropped its own
           // results would leave a retry of that seal reading an empty batch, and an empty batch
           // reads as one that wants another step even when a tool asked the turn to stop.
           const answer = lastAssistantText(session.state.messages as Msg[]);
-          return { done, finalText: done ? answer : "" };
+          return { done, retryAttempt: sealed.retryAttempt, finalText: done ? answer : "" };
         } finally {
           session.dispose();
         }

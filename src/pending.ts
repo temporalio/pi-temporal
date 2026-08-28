@@ -109,6 +109,11 @@ export async function forget(
  * read, and a batch with no results reads as one that wants another step even when a tool asked
  * the turn to stop.
  */
+/** Drop everything a session kept. A new turn numbers its steps from one again. */
+export async function sweepAll(sessionFile: string): Promise<void> {
+  await rm(rootFor(sessionFile), { recursive: true, force: true });
+}
+
 export async function sweep(sessionFile: string, before: number): Promise<void> {
   let steps: string[];
   try {

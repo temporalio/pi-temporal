@@ -11,10 +11,17 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 
-// Comfortably longer than the refresh, so a slow filesystem does not look like a dead holder.
-const STALE_MS = 20_000;
+// Longer than the activity heartbeat timeout, on purpose. A holder whose event loop is blocked
+// cannot refresh, and the writes this lock protects are the synchronous ones most likely to block
+// it. Anything reclaimable here has to be something Temporal has already given up on, or two
+// attempts of one activity end up writing at once, which is what the lock is for.
+const STALE_MS = 60_000;
 const REFRESH_MS = 3_000;
 const RETRY_MS = 250;
+
+// mtime comes from whichever host last touched the file, so a skewed clock reads a live lock as
+// dead. The exclusive create is what actually excludes, which needs a filesystem where O_EXCL is
+// atomic: local disk, NFSv4, SMB. It is not reliable on NFSv3.
 
 const lockPath = (sessionFile: string) => `${sessionFile}.lock`;
 
@@ -67,9 +74,22 @@ export async function withSessionLock<T>(
     }
   }
 
+  // Stops as soon as the lock is not ours. A holder reclaimed while it was blocked would
+  // otherwise keep the next holder's lock alive long after that one died.
   const refresh = setInterval(() => {
-    const now = new Date();
-    void utimes(path, now, now).catch(() => {});
+    void (async () => {
+      try {
+        const owner = JSON.parse(await readFile(path, "utf8")) as { token?: string };
+        if (owner.token !== token) {
+          clearInterval(refresh);
+          return;
+        }
+        const now = new Date();
+        await utimes(path, now, now);
+      } catch {
+        clearInterval(refresh);
+      }
+    })();
   }, REFRESH_MS);
   refresh.unref?.();
 

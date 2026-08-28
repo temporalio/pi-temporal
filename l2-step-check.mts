@@ -26,7 +26,7 @@ const INPUT: RunStepInput = {
   promptId: "p1",
   text: "go",
 };
-const SEALED: RunStepResult = { done: false, finalText: "" };
+const SEALED: RunStepResult = { done: false, retryAttempt: 0, finalText: "" };
 const call = (id: string, name = "bash"): DeferredToolCall => ({ id, name });
 
 interface Recorded {
@@ -87,7 +87,7 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 async function main() {
   // A step the model call reports as over dispatches nothing and closes nothing.
   {
-    const settled: RunStepResult = { done: true, finalText: "already answered" };
+    const settled: RunStepResult = { done: true, retryAttempt: 0, finalText: "already answered" };
     const run = await drive({ settled, calls: [], sequential: false, ended: true });
     check("a settled step dispatches nothing", run.dispatched.length === 0, run.dispatched);
     check("a settled step is not sealed again", run.seals.length === 0, run.seals);
@@ -166,6 +166,28 @@ async function main() {
     const run = await drive({ calls: [], sequential: false, ended: true });
     check("an ended model call dispatches nothing", run.dispatched.length === 0, run.dispatched);
     check("an ended model call is still sealed", run.seals.length === 1, run.seals);
+  }
+
+  // The retry budget rides the workflow, so what the seal reports has to reach the next step.
+  // Dropping it on the way through is silent: the field is optional to the compiler and zero
+  // reads as "no failures yet", so a failing provider is asked again on every step.
+  {
+    const seals: SealStepInput[] = [];
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({ calls: [], sequential: false, ended: true }),
+        runToolCall: async () => ({ outcome: "settled" }),
+        sealStep: async (input) => {
+          seals.push(input);
+          return { done: false, retryAttempt: 2, finalText: "" };
+        },
+      },
+      isCancellation,
+      nonCancellable: (fn) => fn(),
+    });
+    const result = await step({ ...INPUT, retryAttempt: 1 });
+    check("the seal is told what the last step spent", seals[0]?.retryAttempt === 1, seals[0]);
+    check("and what it spends comes back", result.retryAttempt === 2, result);
   }
 
   // A call reported as unknown is one nothing ran twice, and it is said out loud.
