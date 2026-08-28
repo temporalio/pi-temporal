@@ -4,7 +4,7 @@
 //
 // Usage: npx tsx session-lock-check.mts
 
-import { mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withSessionLock } from "./src/session-lock.js";
@@ -18,7 +18,10 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Older than the refresh interval, so a tick that did touch the file is visible as a fresh mtime.
-const STALE_ENOUGH = 30_000;
+const STALE_ENOUGH = 120_000;
+
+// The lock refreshes every 3 seconds; waiting past one tick is how a refresh is observed.
+const REFRESH_TICK = 3_000;
 
 async function main() {
   const dir = await mkdtemp(join(tmpdir(), "pi-lock-"));
@@ -92,6 +95,25 @@ async function main() {
     released = Date.now() - info.mtimeMs > 3000;
   });
   check("a holder that lost the lock stops refreshing it", released);
+
+  // One read that fails is not the lock being taken away. Stopping on it lets the lock age out
+  // from under a holder that is still writing, which is the case the whole thing exists for, and
+  // a transient read error on shared storage is likelier than a minute-long stall.
+  const flaky = join(dir, "flaky.jsonl");
+  let kept = false;
+  await withSessionLock(flaky, async () => {
+    const lock = `${flaky}.lock`;
+    const saved = await readFile(lock, "utf8");
+    // Unreadable for one tick, then fine again.
+    await rm(lock, { force: true });
+    await writeFile(lock, "{ not json", "utf8");
+    await sleep(REFRESH_TICK + 500);
+    await writeFile(lock, saved, "utf8");
+    const before = (await stat(lock)).mtimeMs;
+    await sleep(REFRESH_TICK + 500);
+    kept = (await stat(lock)).mtimeMs > before;
+  });
+  check("a refresher survives one bad read", kept);
 
   const bad = failures.length;
   console.log(bad === 0 ? "session-lock-check: OK" : `session-lock-check: ${bad} failed`);
