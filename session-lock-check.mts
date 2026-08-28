@@ -4,7 +4,7 @@
 //
 // Usage: npx tsx session-lock-check.mts
 
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withSessionLock } from "./src/session-lock.js";
@@ -16,6 +16,9 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Older than the refresh interval, so a tick that did touch the file is visible as a fresh mtime.
+const STALE_ENOUGH = 30_000;
 
 async function main() {
   const dir = await mkdtemp(join(tmpdir(), "pi-lock-"));
@@ -45,8 +48,7 @@ async function main() {
   // A holder that died leaves the file behind. Reclaiming it on age is what stops one crashed
   // worker from taking the session with it.
   await writeFile(`${file}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
-  const stale = new Date(Date.now() - 60_000);
-  const { utimes } = await import("node:fs/promises");
+  const stale = new Date(Date.now() - 120_000);
   await utimes(`${file}.lock`, stale, stale);
   let reclaimed = false;
   await withSessionLock(file, async () => {
@@ -73,6 +75,23 @@ async function main() {
   }, 3000).catch(() => {});
   check("a session whose directory does not exist yet can be locked", made);
   check("and it does not wait to find that out", Date.now() - started < 1000, Date.now() - started);
+
+  // A holder that was reclaimed while it was blocked must stop touching the lock. Otherwise it
+  // keeps the next holder's lock alive long after that one is gone, and nobody can take it.
+  const contested = join(dir, "contested.jsonl");
+  let released = false;
+  await withSessionLock(contested, async () => {
+    // Reclaim it out from under the holder, the way a stalled holder is reclaimed on age.
+    await rm(`${contested}.lock`, { force: true });
+    await writeFile(`${contested}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
+    const stolen = new Date(Date.now() - STALE_ENOUGH);
+    await utimes(`${contested}.lock`, stolen, stolen);
+    // Long enough for at least one refresh tick to notice.
+    await sleep(4000);
+    const info = await stat(`${contested}.lock`);
+    released = Date.now() - info.mtimeMs > 3000;
+  });
+  check("a holder that lost the lock stops refreshing it", released);
 
   const bad = failures.length;
   console.log(bad === 0 ? "session-lock-check: OK" : `session-lock-check: ${bad} failed`);

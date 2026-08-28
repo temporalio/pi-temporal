@@ -135,7 +135,12 @@ export function makeLocalTurnActivities(live: LiveTurns) {
         // it would leave a call no result answers, which the next model call cannot be made from.
         (call) => state.results.get(call.id) ?? unknownToolCallOutcome(call),
       );
-      const sealed = await turn.steps.sealStep(results);
+      // Named here too. The live half is where an extension can append between the model call and
+      // the seal, so it is the half with the exposure.
+      const sealed = await turn.steps.sealStep(results, {
+        expectCalls: input.calls.map((call) => call.id),
+        postRun: !input.interrupted,
+      });
       for (const call of input.calls) state.results.delete(call.id);
       if (sealed.done) progress.delete(input.turnId);
       return sealed;

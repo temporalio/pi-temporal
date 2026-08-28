@@ -65,14 +65,16 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
       (call) => runLocalToolCall({ turnId: input.turnId, step, call }),
       { isCancellation, log: (message, attributes) => log.info(message, attributes) },
     );
-    const seal = () => runLocalSeal({ turnId: input.turnId, step, calls: model.calls });
+    const seal = (interrupted: boolean) =>
+      runLocalSeal({ turnId: input.turnId, step, calls: model.calls, interrupted });
     if (stopped) {
       // Close the step before letting the stop through, so the calls that finished keep their
-      // results instead of reaching the model as unknown outcomes.
-      await CancellationScope.nonCancellable(seal);
+      // results instead of reaching the model as unknown outcomes. The stop is what the caller
+      // hears about, so a seal that fails on the way out does not replace it.
+      await CancellationScope.nonCancellable(() => seal(true)).catch(() => {});
       throw stopped;
     }
-    const { done } = await seal();
+    const { done } = await seal(false);
     if (done) return;
   }
 

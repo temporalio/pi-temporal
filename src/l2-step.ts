@@ -62,7 +62,7 @@ export async function dispatchStepCalls(
   model: StepCalls,
   runToolCall: (call: DeferredToolCall) => Promise<ToolCallResult>,
   deps: Pick<SteppedStepDeps, "isCancellation" | "log">,
-): Promise<unknown | undefined> {
+): Promise<unknown> {
   // Errors are carried rather than thrown, so one call that ran out of retries does not leave its
   // siblings' promises rejecting with nobody to catch them.
   const dispatch = async (call: DeferredToolCall): Promise<Dispatched> => {
@@ -102,8 +102,8 @@ export async function dispatchStepCalls(
     });
   }
 
-  // Handed back rather than thrown. The step still has to be closed, because the calls that
-  // finished before the stop have results and the seal is what records them.
+  // Handed back rather than thrown, and undefined when nothing stopped. The step still has to be
+  // closed: the calls that finished before the stop have results and the seal records them.
   return dispatched.find((d) => d.error !== undefined && deps.isCancellation(d.error))?.error;
 }
 
@@ -137,22 +137,24 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
 
     // Every call of the step is sealed, including the ones no dispatch answered for. A step that
     // leaves one open leaves a transcript the next model call cannot be made from.
-    const seal = (): Promise<RunStepResult> =>
+    const seal = (interrupted: boolean): Promise<RunStepResult> =>
       sealStep({
         sessionId: input.sessionId,
         sessionFile: input.sessionFile,
         step: input.step,
         calls: model.calls,
         retryAttempt: input.retryAttempt,
+        interrupted,
       });
 
     if (stopped) {
       // The user stopped the turn, so close the step and then let the stop through. Skipping the
       // seal would throw away the calls that finished, and the next prompt would be told their
-      // outcome is unknown.
-      await deps.nonCancellable(seal);
+      // outcome is unknown. The stop is what the caller hears about either way: a seal that fails
+      // on the way out is not the thing worth reporting.
+      await deps.nonCancellable(() => seal(true)).catch(() => {});
       throw stopped;
     }
-    return seal();
+    return seal(false);
   };
 }
