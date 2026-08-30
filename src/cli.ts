@@ -15,6 +15,7 @@ import { open, stat } from "node:fs/promises";
 import { connect, interrupt, submitPrompt } from "./client.js";
 import { sessionFileFor } from "./config.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
+import { ScheduleOverlapPolicy } from "@temporalio/client";
 import type { TurnState } from "./protocol.js";
 import { textOf } from "./messages.js";
 
@@ -71,6 +72,55 @@ async function start(args: string[]) {
   await submitPrompt(sessionId, text);
   emit(sessionId);
   say(`  follow it with: pi-temporal watch ${sessionId}`);
+}
+
+// A task with no client at all. `start` still needs something to run it; a schedule does not, and
+// the session is created by the workflow rather than by whoever asked for it.
+async function schedule(args: string[]) {
+  const text = args.find((a) => !a.startsWith("--"));
+  const flag = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
+  const every = flag("every");
+  const cron = flag("cron");
+  const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
+  if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
+  if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
+
+  const { cfg, client, connection } = await connect();
+  try {
+    await client.schedule.create({
+      scheduleId: id,
+      spec: cron ? { cronExpressions: [cron] } : { intervals: [{ every: every! }] },
+      // A run that is still going when the next one is due keeps going, and the next one is
+      // skipped. An agent task is not a metrics scrape: two of them on one repo is a bad day.
+      policies: { overlap: ScheduleOverlapPolicy.SKIP },
+      action: {
+        type: "startWorkflow",
+        workflowType: WORKFLOW_TYPE,
+        taskQueue: cfg.taskQueue,
+        // Named the way a session's workflow is always named, because Temporal appends the firing
+        // time to it. Without this a scheduled run lands on an id that `running` and `watch` do
+        // not recognise as a session, and the only sessions you could see would be the ones a
+        // client started.
+        workflowId: workflowId(id),
+        // No session id and no file: each firing derives its own from the workflow id it is given,
+        // so two runs of the same schedule are two sessions rather than one confused one.
+        args: [
+          "",
+          "",
+          {
+            idleTimeout: cfg.idleTimeout,
+            stepped: cfg.stepped,
+            sessionDir: cfg.sessionDir,
+            initialPrompt: { promptId: `scheduled-${id}`, text },
+          },
+        ],
+      },
+    });
+    emit(id);
+    say(`  every firing starts its own session; see them with: pi-temporal running`);
+  } finally {
+    await connection.close();
+  }
 }
 
 async function running() {
@@ -197,6 +247,20 @@ async function main() {
   switch (command) {
     case "start":
       return start(rest);
+    case "schedule":
+      return schedule(rest);
+    case "unschedule": {
+      const id = rest.find((a) => !a.startsWith("--"));
+      if (!id) throw new Error("unschedule wants a schedule id");
+      const { client, connection } = await connect();
+      try {
+        await client.schedule.getHandle(id).delete();
+        say(`deleted ${id}`);
+      } finally {
+        await connection.close();
+      }
+      return;
+    }
     case "running":
       return running();
     case "watch":
@@ -214,6 +278,8 @@ async function main() {
       say("  running                          what this deployment is running");
       say("  watch <sessionId>                follow one until its turn ends");
       say("  stop <sessionId>                 interrupt the turn in flight");
+    say('  schedule "<task>" --every=1h     run it on a schedule, with no client at all');
+    say("  unschedule <scheduleId>          stop that schedule");
       process.exitCode = command ? 1 : 0;
   }
 }
