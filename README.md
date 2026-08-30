@@ -232,6 +232,37 @@ past the end of the turn and then no handover happens at all. And it runs the wo
 single processes (`node --import tsx`), because `npx` spawns `tsx` spawns node, so killing the
 process you hold leaves the one that matters running.
 
+### Across two machines
+
+On one host "another worker" is another process reading the same disk, which proves less than it
+looks like. `docker/cross-host-check.sh` puts each worker in its own container: its own filesystem,
+its own hostname, and no way to reach the other except through Temporal and the shared session
+directory. The evidence is Temporal's own, because the worker identity is the container's hostname:
+
+```
+06:15:49  attempt 1  1@89cc9c4fa607     <- worker A, killed mid-tool
+06:16:30  attempt 2  1@252525771cd2     <- worker B, which had never seen this session
+```
+
+`/sessions` is a local volume, so this shows separate hosts rather than a separate filesystem
+implementation. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
+
+## A turn nobody started
+
+`start` hands a task over and returns, but something still has to run it. A schedule does not:
+
+```bash
+npx tsx src/cli.ts schedule "review yesterday's merges" --cron="0 9 * * *" --id=morning
+npx tsx src/cli.ts unschedule morning
+```
+
+Each firing is its own session, because the workflow takes the task in its input and derives its
+own id from the firing it was given. Two things make that work rather than one. `initialPrompt` in
+the workflow input is the task, so nothing has to be running to send a first prompt. And the
+schedule names its workflow the way a session's workflow is always named, because Temporal appends
+the firing time to it: without that, a scheduled run lands on an id `running` and `watch` do not
+recognise, and the only sessions anyone could see would be the ones a client started.
+
 ## Reproducing
 
 Helpers are at the repo root, none of which needs a model key:
