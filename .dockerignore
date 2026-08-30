@@ -1,0 +1,8 @@
+# node_modules are resolved inside the image: @temporalio carries native bindings, so a host build
+# on macOS is not a build this container can run.
+node_modules
+.fork/pi/node_modules
+.fork/pi/**/node_modules
+.git
+.omc
+*.log
