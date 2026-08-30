@@ -100,6 +100,39 @@ retried=${rest%%|*}
 [ "$retried" = "1" ] && ok "the step came back as a retry on the second host" \
   || bad "the step came back as a retry on the second host" "$summary"
 
+# --- a turn that begins with no client at all. `start` needs something to run it; a schedule does
+# not, so the session is created by the workflow rather than by whoever asked for it.
+$COMPOSE run --rm -T client schedule \
+  "Use the bash tool to run: echo SCHEDULED-RUN. Then report it." --every=30s --id=check-nightly \
+  >/dev/null 2>&1
+scheduled=""
+for _ in $(seq 1 30); do
+  found=$($COMPOSE exec -T temporal sh -c \
+    "temporal workflow list --address 127.0.0.1:7233 --query \"WorkflowType='piSession'\"" 2>/dev/null \
+    | grep -o "check-nightly[^ ]*" | head -1)
+  [ -n "$found" ] && { scheduled="$found"; break; }
+  sleep 5
+done
+[ -n "$scheduled" ] && ok "a schedule started a session with no client running" \
+  || bad "a schedule started a session with no client running"
+
+if [ -n "$scheduled" ]; then
+  # The id has to come back through the same door a client-started one does, or the only sessions
+  # anyone can see are the ones a client started.
+  sid="${scheduled#pi-session-}"
+  listed=$($COMPOSE run --rm -T client running 2>/dev/null | tr -d '\r')
+  case "$listed" in
+    *"$sid"*) ok "the scheduled session is listed like any other" ;;
+    *) bad "the scheduled session is listed like any other" "$listed" ;;
+  esac
+  followed=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
+  case "$followed" in
+    *SCHEDULED-RUN*) ok "its turn ran, with nothing but the schedule to start it" ;;
+    *) bad "its turn ran" "$(printf '%s' "$followed" | tail -2)" ;;
+  esac
+fi
+$COMPOSE run --rm -T client unschedule check-nightly >/dev/null 2>&1
+
 echo
 [ "$fails" -eq 0 ] && echo "cross-host-check: OK" || echo "cross-host-check: $fails failed"
 exit $([ "$fails" -eq 0 ] && echo 0 || echo 1)
