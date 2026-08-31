@@ -38,7 +38,7 @@ hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
 
 # --- a client that is only ever a client hands over a task and exits
 sid=$($COMPOSE run --rm -T client start \
-  "Run this exact command with the bash tool: sleep 45 && echo CROSS-HOST. Then report it." \
+  "Run this exact command with the bash tool: sleep 45 && echo CROSS-HOST >> /sessions/ran.txt. Then report it." \
   2>/dev/null | tr -d '\r' | head -1)
 [ -n "$sid" ] && ok "a client container started the session ($sid)" \
   || { bad "client could not start a session"; exit 1; }
@@ -76,9 +76,16 @@ case "$watched" in
 esac
 case "$watched" in
   *"outcome of this tool call is unknown"*)
-    ok "the tool that may have run was reported unknown, not re-run" ;;
+    ok "the tool that may have run was reported unknown" ;;
   *) bad "the tool that may have run was reported unknown" "$(printf '%s' "$watched" | tail -2)" ;;
 esac
+
+# Counted on the shared volume rather than in the transcript. A second execution records no second
+# result (the retry throws it away), so the transcript cannot tell "did not run again" from "ran
+# again and we dropped it". The side effect can. This is the `git push` case.
+ran=$($COMPOSE exec -T worker-b sh -c 'wc -l < /sessions/ran.txt 2>/dev/null || echo 0' 2>/dev/null | tr -d '\r ')
+[ "${ran:-0}" = "1" ] && ok "the tool really ran once, not once per host" \
+  || bad "the tool really ran once" "$ran lines"
 
 # --- the part only Temporal can answer: two hosts ran this, and the second one retried
 $COMPOSE exec -T temporal sh -c \
@@ -133,8 +140,10 @@ if [ -n "$scheduled" ]; then
     *) bad "the scheduled session is listed like any other" "$listed" ;;
   esac
   followed=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
+  # The tool's own result line. `watch` prints the prompt back verbatim, and the prompt contains
+  # the sentinel, so matching it anywhere passes whether or not anything ran.
   case "$followed" in
-    *SCHEDULED-RUN*) ok "its turn ran, with nothing but the schedule to start it" ;;
+    *"tool result: SCHEDULED-RUN"*) ok "its turn ran, with nothing but the schedule to start it" ;;
     *) bad "its turn ran" "$(printf '%s' "$followed" | tail -2)" ;;
   esac
 fi

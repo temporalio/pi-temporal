@@ -73,6 +73,25 @@ async function main() {
   const left = await readdir(projectC);
   check("a working copy is left alone", left.join() === "mine.txt", left);
 
+  // A directory belongs to one session. A second one editing and resetting it would lose the
+  // first one's files, and neither would report anything wrong. Back on host A, because a claim is
+  // host-local: the case it covers is two sessions pointed at one directory on one machine.
+  asHost(root, "a");
+  const other = join(root, "sessions", "s2.jsonl");
+  const mine = await read(join(projectA, "note.txt"));
+  await worktree.capture(projectA, other);
+  const untouched = (await read(join(projectA, "note.txt"))) === mine;
+  const noTip = await readdir(`${other}.tree`).then(() => false, () => true);
+  check("a second session cannot capture another's directory", untouched && noTip);
+
+  // Local work nothing has shipped is what stops a reset, whether or not this host built the
+  // directory. Otherwise a host that captured once may be moved over its own unshipped edits.
+  await writeFile(join(projectA, "unshipped.txt"), "not yours\n");
+  await worktree.ensure(projectA, sessionFile);
+  const kept = await read(join(projectA, "unshipped.txt"));
+  check("unshipped local work stops a reset", kept === "not yours\n", kept);
+  await rm(join(projectA, "unshipped.txt"));
+
   await worktree.forget(sessionFile);
   const gone = await readdir(`${sessionFile}.tree`).then(() => false, () => true);
   check("forgetting a session drops what its tree cost", gone);

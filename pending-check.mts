@@ -45,7 +45,7 @@ async function main() {
   // neither, and the seal then reads a tool that succeeded as an unknown outcome.
   const big = (id: string, size: number) => {
     const kept = outcome(id);
-    const content = [{ type: "text", text: "x".repeat(size) }];
+    const content = [{ type: "text" as const, text: "x".repeat(size) }];
     return { ...kept, message: { ...kept.message, content } };
   };
   let overlapped: Awaited<ReturnType<typeof pending.readResult>>;

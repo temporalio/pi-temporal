@@ -188,20 +188,27 @@ async function watch(args: string[]) {
   const file = sessionFileFor(cfg.sessionDir, sessionId);
   let offset = 0;
   let carry = "";
+  let inode: number | undefined;
 
   const drain = async () => {
-    let size: number;
+    let info: Awaited<ReturnType<typeof stat>>;
     try {
-      size = (await stat(file)).size;
+      info = await stat(file);
     } catch {
       return; // the first step has not written the file yet
     }
-    if (size < offset) {
-      // The file got shorter, so it is not the one we were reading. Start again rather than
-      // decode from a byte offset into different content.
+    const size = info.size;
+    // A compaction rewrites the whole file, and the rewrite can be the same size or bigger, so
+    // watching the length alone misses it. A new inode is the part that always changes.
+    if (inode !== undefined && info.ino !== inode) {
+      offset = 0;
+      carry = "";
+    } else if (size < offset) {
+      // Shorter than what we read means it is not the file we were reading either way.
       offset = 0;
       carry = "";
     }
+    inode = info.ino;
     if (size === offset) return;
     const handle = await open(file, "r");
     try {
@@ -241,7 +248,10 @@ async function watch(args: string[]) {
       const state = reached.kind === "state" ? reached.state : undefined;
       if (!state || (!state.running && state.queued === 0)) {
         await drain();
-        if (state?.finished) say(`  ${state.finished.outcome}`);
+        if (state?.finished) {
+          const { outcome, error } = state.finished;
+          say(`  ${outcome}${error ? `: ${error}` : ""}`);
+        }
         return;
       }
       await sleep(POLL_MS);

@@ -63,10 +63,10 @@ function stubs(stepped: boolean) {
       const count = note(input);
       if (input.text === "hang") {
         await sleep(60_000);
-        return { done: true, finalText: "" };
+        return { done: true, retryAttempt: 0, finalText: "" };
       }
       const done = count === STEPS_TO_ANSWER;
-      return { done, finalText: done ? "answer" : "" };
+      return { done, retryAttempt: 0, finalText: done ? "answer" : "" };
     },
   };
 
@@ -88,7 +88,7 @@ function stubs(stepped: boolean) {
     },
     async sealStep(input: SealStepInput): Promise<RunStepResult> {
       const done = input.step === STEPS_TO_ANSWER;
-      return { done, finalText: done ? "answer" : "" };
+      return { done, retryAttempt: 0, finalText: done ? "answer" : "" };
     },
   };
 
