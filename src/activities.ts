@@ -240,6 +240,11 @@ export function makeActivities(opts: ActivityOptions) {
 
   /** The model call of one step. The calls it reports are recorded and left for the workflow to
    * dispatch, one activity each. */
+  // Tools of one step can be dispatched to different hosts, and each ships what its own directory
+  // holds. Run two at once and the second to capture publishes a tree without the first one's
+  // work. Sequential is what the moving files cost.
+  const mustSerialize = (sequential: boolean) => sequential || opts.shipTree === true;
+
   async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
     const stop = heartbeatEvery(3000);
     try {
@@ -254,7 +259,7 @@ export function makeActivities(opts: ActivityOptions) {
           const outcome = await session.modelCall();
           return {
             calls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
-            sequential: outcome.sequential,
+            sequential: mustSerialize(outcome.sequential),
             ended: outcome.ended,
           };
         } finally {
@@ -316,6 +321,10 @@ export function makeActivities(opts: ActivityOptions) {
         if (!outcome) return { outcome: "already-settled" };
 
         await pending.keepResult(input.sessionFile, input.step, input.call.id, outcome);
+        // Shipped from here, because this host ran the tool and is the only one holding what it
+        // did. The seal can land anywhere, and capturing there would ship a directory that never
+        // saw this tool.
+        await shipTree(input.sessionFile);
         return { outcome: "settled" };
       } finally {
         session.dispose();

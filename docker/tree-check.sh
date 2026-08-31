@@ -28,6 +28,8 @@ trap cleanup EXIT
 
 $COMPOSE down -v >/dev/null 2>&1
 docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null || { echo "build failed"; exit 1; }
+# One worker for the first half, so the second one is provably a host that has never seen this
+# project. The second half brings both up, which is the only way a step's activities get spread.
 $COMPOSE up -d temporal worker-a >/dev/null 2>&1 || { echo "stack failed to start"; exit 1; }
 
 hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
@@ -83,6 +85,29 @@ seed=$($COMPOSE exec -T worker-b sh -c 'cat /project/seed.txt 2>&1' 2>/dev/null 
 case "$seed" in
   seeded*) ok "the rest of the project travelled too" ;;
   *) bad "the rest of the project travelled too" "$seed" ;;
+esac
+
+# --- both hosts polling, so a step's three activities can be dispatched to different ones. The
+# model call, each tool call and the seal are separate dispatches: nothing pins them together.
+$COMPOSE up -d worker-a >/dev/null 2>&1
+sleep 8
+$COMPOSE run --rm -T client start \
+  "Use the bash tool to run exactly: echo SPREAD > /project/spread.txt. Then reply DONE." \
+  --session="$sid" >/dev/null 2>&1
+$COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
+$COMPOSE run --rm -T client start \
+  "Use the bash tool to run exactly: cat /project/spread.txt. Report what it printed." \
+  --session="$sid" >/dev/null 2>&1
+$COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
+
+# On both, because with two hosts polling the step that read it can have run on either, and the
+# claim is that whichever one it was could see what the other wrote.
+spreadA=$($COMPOSE exec -T worker-a sh -c 'cat /project/spread.txt 2>/dev/null' 2>/dev/null | tr -d '\r')
+spreadB=$($COMPOSE exec -T worker-b sh -c 'cat /project/spread.txt 2>/dev/null' 2>/dev/null | tr -d '\r')
+case "$spreadA$spreadB" in
+  *SPREAD*SPREAD*) ok "a step spread across two hosts leaves both holding the work" ;;
+  *SPREAD*) bad "a step spread across two hosts leaves both holding the work" "only one host has it" ;;
+  *) bad "a step spread across two hosts leaves both holding the work" "neither host has it" ;;
 esac
 
 echo
