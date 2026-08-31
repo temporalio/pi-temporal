@@ -268,8 +268,12 @@ Three rules bound it:
 - **It never touches the project's own `.git`.** The shadow repository is host-local and points at
   the work tree from outside, so a project that is not a git repository works the same as one that
   is, and one that is keeps its own history.
-- **It never writes over a tree this host did not build.** That is somebody's working copy. An
-  empty directory is not one, and treating it as one is how the tree ends up never travelling.
+- **It never writes over work nothing has shipped.** Before a reset it compares what is on disk
+  with what it last agreed the directory held, so a checkout it did not put there, and its own
+  edits that never made it out, both stop it. An empty directory holds nothing, and treating that
+  as a working copy is how the tree ends up never travelling.
+- **One session per directory.** The first to use it claims it, and a second is refused. Two
+  sessions editing and resetting one directory would lose each other's files quietly.
 - **It is off by default.** On a laptop the tools already run in the directory you meant, and
   shipping it there is disk spent on a problem that host does not have.
 
@@ -279,8 +283,9 @@ want an install step, the same as a fresh clone would.
 ### Verified
 
 `worktree-check.mts` covers the mechanics with two fake hosts and needs neither a server nor a key:
-a file and a nested file arrive, a deletion arrives, an unchanged capture ships nothing, and a
-directory with files this host did not build is left alone. `docker/tree-check.sh` runs it for
+a file and a nested file arrive, a deletion arrives, an unchanged capture ships nothing, a
+directory holding work nothing shipped is left alone, and a second session cannot take one that is
+already claimed. `docker/tree-check.sh` runs it for
 real: worker A writes a file, worker A's container is killed, and worker B, whose `/project` has
 never held anything, continues the same session and reads both that file and the rest of the
 project back. With `PI_TEMPORAL_SHIP_TREE=0` exactly the three tree assertions fail.

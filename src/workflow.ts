@@ -34,13 +34,13 @@ const activityOptions = {
   retry: { maximumAttempts: 100 },
 } as const;
 
-const { runStep } = proxyActivities<{
-  runStep(input: RunStepInput): Promise<RunStepResult>;
-}>(activityOptions);
-
 // A total cap on top of the per-attempt one, so a unit that keeps timing out cannot hold the turn
 // and the session's queue for days.
 const cappedOptions = { ...activityOptions, scheduleToCloseTimeout: "2 hours" } as const;
+
+const { runStep } = proxyActivities<{
+  runStep(input: RunStepInput): Promise<RunStepResult>;
+}>(cappedOptions);
 
 const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
 // A call that fails for a reason no retry fixes must not hold the step, the turn and the session's
@@ -101,6 +101,7 @@ export async function piSession(
     const prompt = queue.shift()!;
     let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
     let finalText = "";
+    let error: string | undefined;
     // The step's retry budget, kept here because the session that would count it is rebuilt per
     // activity and the transcript it could be read off is something a compaction rewrites.
     let retryAttempt = 0;
@@ -127,15 +128,19 @@ export async function piSession(
     } catch (err) {
       // An interrupt cancels the in-flight step; the session keeps serving later prompts. A real
       // run error is already recorded in the session log, so we log-and-continue rather than fail
-      // the whole session. (Surfacing typed errors to a resume caller is a follow-up.)
-      outcome = "interrupted";
-      if (!isCancellation(err)) {
-        // TODO: classify and, for genuine failures, decide retry vs surface. For now, continue.
+      // the whole session.
+      if (isCancellation(err)) {
+        outcome = "interrupted";
+      } else {
+        // A step that exhausted its retries, or blew its ceiling, is not somebody pressing stop.
+        outcome = "failed";
+        error = err instanceof Error ? err.message : String(err);
+        log.warn("turn failed", { sessionId: id, promptId: prompt.promptId, error });
       }
     } finally {
       current = undefined;
       running = undefined;
-      finished = { promptId: prompt.promptId, outcome, finalText };
+      finished = { promptId: prompt.promptId, outcome, finalText, error };
     }
   }
 }

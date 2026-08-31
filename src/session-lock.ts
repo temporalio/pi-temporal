@@ -6,15 +6,20 @@
 // Advisory, and beside the session file, so it works wherever the session file works. A holder
 // that dies is reclaimed on age, which is why the lock is refreshed while it is held.
 
-import { mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 
 // Longer than the activity heartbeat timeout, on purpose. A holder whose event loop is blocked
 // cannot refresh, and the writes this lock protects are the synchronous ones most likely to block
-// it. Anything reclaimable here has to be something Temporal has already given up on, or two
-// attempts of one activity end up writing at once, which is what the lock is for.
+// it, so a shorter window would steal the lock from a holder that is alive and working.
+//
+// It does not make the lock safe on its own. Temporal giving up on an attempt stops it being
+// waited for, not being run: an attempt blocked past this window is still inside the body when the
+// next one reclaims. That is what `owned()` is for. Whoever is about to write asks whether the
+// lock is still theirs, which narrows the hole from the whole body to the gap between that
+// question and the write.
 const STALE_MS = 60_000;
 const REFRESH_MS = 3_000;
 const RETRY_MS = 250;
@@ -27,13 +32,17 @@ const lockPath = (sessionFile: string) => `${sessionFile}.lock`;
 
 const held = (token: string) => JSON.stringify({ token, host: hostname(), pid: process.pid });
 
-async function taken(path: string): Promise<boolean> {
+// Reclaims by renaming out of the way rather than removing, because two contenders can decide the
+// same lock is stale at the same moment. A rename to a name only this caller knows succeeds for
+// exactly one of them, and the loser gets ENOENT and goes back to competing for the lock itself.
+// Removing instead lets the loser delete the winner's fresh lock, and then both run the body.
+async function taken(path: string, token: string): Promise<boolean> {
   try {
     const info = await stat(path);
     if (Date.now() - info.mtimeMs < STALE_MS) return true;
-    // The holder stopped refreshing, so it is gone. Reclaiming is safe: whatever it was writing
-    // is a lost attempt Temporal has already given up on.
-    await rm(path, { force: true });
+    const corpse = `${path}.stale.${token}`;
+    await rename(path, corpse);
+    await rm(corpse, { force: true });
     return false;
   } catch {
     return false;
@@ -43,10 +52,12 @@ async function taken(path: string): Promise<boolean> {
 /**
  * Run `body` as the only writer of this session file. Throws if the lock cannot be taken in time,
  * which is a retryable condition: the holder is another attempt that is still working.
+ *
+ * `body` is handed an `owned()` it should call immediately before it writes. See STALE_MS.
  */
 export async function withSessionLock<T>(
   sessionFile: string,
-  body: () => Promise<T>,
+  body: (owned: () => Promise<boolean>) => Promise<T>,
   waitMs = 60_000,
 ): Promise<T> {
   const path = lockPath(sessionFile);
@@ -62,7 +73,7 @@ export async function withSessionLock<T>(
       await writeFile(path, held(token), { flag: "wx" });
       break;
     } catch (err) {
-      const contended = await taken(path);
+      const contended = await taken(path, token);
       if (Date.now() >= deadline) {
         // Only call it contention when it was. Anything else is the real error, and reporting a
         // writer that does not exist sends the next reader looking for one.
@@ -98,8 +109,19 @@ export async function withSessionLock<T>(
   }, REFRESH_MS);
   refresh.unref?.();
 
+  // Read rather than trusting the refresher, which only notices on its next tick and so answers
+  // for up to REFRESH_MS ago. A caller asking this is about to write.
+  const owned = async () => {
+    try {
+      const mine = JSON.parse(await readFile(path, "utf8")) as { token?: string };
+      return mine.token === token;
+    } catch {
+      return false;
+    }
+  };
+
   try {
-    return await body();
+    return await body(owned);
   } finally {
     clearInterval(refresh);
     // Only our own. A lock reclaimed as stale belongs to whoever took it next.

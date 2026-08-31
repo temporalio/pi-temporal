@@ -123,6 +123,14 @@ export function makeActivities(opts: ActivityOptions) {
     if (!opts.shipTree) return;
     await worktree.ensure(opts.projectDir, sessionFile);
   };
+  // A lock can be reclaimed while its holder is blocked, so the holder asks again on the way to
+  // the write. Failing here is the right answer: Temporal retries, and the retry takes the lock.
+  const stillOurs = async (owned: () => Promise<boolean>, what: string) => {
+    if (!(await owned())) {
+      throw new Error(`lost the session lock before ${what}; another attempt has it`);
+    }
+  };
+
   const shipTree = async (sessionFile: string) => {
     if (!opts.shipTree) return;
     // A capture that fails must not fail the step. The work is done and recorded; what is lost is
@@ -203,8 +211,9 @@ export function makeActivities(opts: ActivityOptions) {
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async () => {
+      return await withSessionLock(input.sessionFile, async (owned) => {
         await bringTree(input.sessionFile);
+        await stillOurs(owned, "the step");
         const session = await openSession(input.sessionFile);
         try {
           const settled = await readyForStep(session, input, false);
@@ -234,11 +243,9 @@ export function makeActivities(opts: ActivityOptions) {
   async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async () => {
-        // Here rather than in the tool activity, because the model call of a step always runs
-        // before its tools do, and it holds the session lock while the tool calls do not. Two
-        // tools of one step would otherwise race each other checking the same tree out.
+      return await withSessionLock(input.sessionFile, async (owned) => {
         await bringTree(input.sessionFile);
+        await stillOurs(owned, "the model call");
         const session = await openSession(input.sessionFile);
         try {
           const settled = await readyForStep(session, input, true);
@@ -264,7 +271,14 @@ export function makeActivities(opts: ActivityOptions) {
   async function runToolCall(input: ToolCallInput): Promise<ToolCallResult> {
     const stop = heartbeatEvery(3000);
     try {
-      const session = await openSession(input.sessionFile);
+      // A tool call is its own dispatch, so it can land on a worker that ran neither the model
+      // call nor any sibling tool. Without this it runs against whatever files that host happens
+      // to have, and reports the answer as if it were the project's.
+      await bringTree(input.sessionFile);
+      // Opening a session can append to it (a first thinking-level entry), and two of these run at
+      // once. The lock covers the open and is given back before the tool runs, which is the part
+      // that has to stay parallel.
+      const session = await withSessionLock(input.sessionFile, () => openSession(input.sessionFile));
       try {
         // The transcript first: a result in it means a whole dispatch and a seal already
         // happened, and the kept files for the call are what is left behind.
@@ -315,7 +329,11 @@ export function makeActivities(opts: ActivityOptions) {
   async function sealStep(input: SealStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async () => {
+      return await withSessionLock(input.sessionFile, async (owned) => {
+        // The seal writes the step down, so it needs the tree the tools worked in. It can land on
+        // a worker that ran none of them.
+        await bringTree(input.sessionFile);
+        await stillOurs(owned, "the seal");
         const session = await openSession(input.sessionFile);
         try {
           const results: TurnToolCallOutcome[] = [];

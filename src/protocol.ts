@@ -28,7 +28,12 @@ export interface TurnState {
   // The last turn to stop, and why it stopped.
   readonly finished?: {
     readonly promptId: string;
-    readonly outcome: "answered" | "interrupted" | "ceiling";
+    // "interrupted" is the user pressing stop. A turn that died for any other reason is "failed",
+    // because reporting a crash as a stop tells whoever is watching that they did it.
+    readonly outcome: "answered" | "interrupted" | "failed" | "ceiling";
+    // What went wrong, when something did. The session log holds the detail; this is for a
+    // client that is only reading turnState.
+    readonly error?: string;
     readonly finalText: string;
   };
 }

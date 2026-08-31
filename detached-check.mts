@@ -119,6 +119,10 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs?
 async function main() {
   if (!process.env.OPENAI_API_KEY) throw new Error("set OPENAI_API_KEY");
   const sessions = await mkdtemp(join(tmpdir(), "pi-l3-"));
+  // A side effect we can count. A second execution records no second result, because the retry
+  // throws it away, so the transcript cannot tell "did not run again" from "ran again and the
+  // result was dropped". This can. It is the `git push` case in one line.
+  const ranFile = join(sessions, "ran.txt");
   const env = {
     TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7241",
     PI_SESSION_DIR: sessions,
@@ -140,7 +144,8 @@ async function main() {
       "tsx",
       "src/cli.ts",
       "start",
-      "Run this exact command with the bash tool: sleep 45 && echo HANDOVER. Then report it.",
+      `Run this exact command with the bash tool: sleep 45 && echo HANDOVER >> ${ranFile}. ` +
+        "Then report it.",
     ],
     env,
   );
@@ -214,10 +219,12 @@ async function main() {
   // The dispatch died between starting the tool and recording its result, which is exactly the case
   // a coding agent must not guess at: `sleep 45 && echo` is harmless, but `git push` is not.
   check(
-    "a tool that may have run is reported unknown, not re-run",
+    "a tool that may have run is reported unknown",
     results.length === 1 && /unknown/i.test(results[0]),
     results,
   );
+  const ran = (await readFile(ranFile, "utf8").catch(() => "")).split("\n").filter(Boolean);
+  check("the tool really ran once, not once per worker", ran.length === 1, ran);
   check("the model asked for the tool once", calls.length === 1, calls.length);
 
   console.log(failures.length === 0 ? "\ndetached-check: OK" : `\ndetached-check: ${failures.length} failed`);

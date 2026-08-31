@@ -8,10 +8,11 @@
 // one bundle into a directory beside the session log; a host that is behind unbundles the ones it
 // has not seen and checks the newest tree out.
 //
-// Two things this deliberately does not do. It never touches the project's own `.git`: the shadow
-// repository is host-local and points at the work tree from outside, so a project that is not a git
-// repository works the same as one that is, and one that is keeps its own history untouched. And it
-// never writes over a tree this host did not build, because that is somebody's working copy.
+// Three things this deliberately does not do. It never touches the project's own `.git`: the
+// shadow repository is host-local and points at the work tree from outside, so a project that is
+// not a git repository works the same as one that is, and one that is keeps its own history. It
+// never writes over work nothing has shipped, which covers both somebody's checkout and its own
+// edits that never made it out. And it never lets two sessions share one directory.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -19,17 +20,27 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { withSessionLock } from "./session-lock.js";
 
 const execFileAsync = promisify(execFile);
 
-// The ref the shadow repository keeps its newest snapshot on. A bundle has to name a ref, and this
-// is the only one, so an incremental bundle is always this ref against the previous commit.
-const SNAP = "refs/pi-temporal/snapshot";
+// A bundle has to name a ref, and the ref has to be per session: two sessions capturing the same
+// directory would otherwise overwrite each other's between `update-ref` and `bundle create`, and
+// the bundle would carry a commit its own tip does not name.
+const snapRef = (sessionFile: string) =>
+  `refs/pi-temporal/${createHash("sha256").update(sessionFile).digest("hex").slice(0, 16)}`;
 
-// What a host knows about its own copy: the tree it last checked out, which doubles as the mark
-// saying this directory is one we built rather than one a person is working in.
+// The tree this host last agreed the directory held, either because it checked it out or because
+// it shipped it. What makes a reset safe is that the directory still matches this: anything else
+// is work nothing has shipped, and moving the tree would throw it away.
 interface Held {
   readonly tree: string;
+}
+
+// Which session a directory belongs to. Two sessions in one directory would edit each other's
+// files and reset each other's trees, and neither would report anything wrong.
+interface Claim {
+  readonly session: string;
 }
 
 // What the shared directory says the newest state is. `seq` orders the bundles, because a host has
@@ -42,7 +53,9 @@ interface Tip {
 
 const shareDir = (sessionFile: string) => `${sessionFile}.tree`;
 const tipPath = (sessionFile: string) => join(shareDir(sessionFile), "tip.json");
-const bundleName = (seq: number) => `${String(seq).padStart(4, "0")}.bundle`;
+// Wide enough that the lexical sort the restore depends on cannot run out. Four digits is about
+// three hours of steps.
+const bundleName = (seq: number) => `${String(seq).padStart(8, "0")}.bundle`;
 
 // Host-local, and keyed by the path the tools run in. Two projects on one worker get a shadow
 // repository each; the same project on two workers gets one on each of them.
@@ -53,6 +66,10 @@ function hostDir(projectDir: string) {
 
 const gitDir = (projectDir: string) => join(hostDir(projectDir), "git");
 const heldPath = (projectDir: string) => join(hostDir(projectDir), "held.json");
+const claimPath = (projectDir: string) => join(hostDir(projectDir), "claim.json");
+// Host-local, because a project directory is. One worker running two steps of two sessions is the
+// case this excludes; two hosts cannot share the directory in the first place.
+const treeLockPath = (projectDir: string) => join(hostDir(projectDir), "tree");
 
 async function readJson<T>(path: string): Promise<T | undefined> {
   try {
@@ -103,44 +120,63 @@ async function isEmptyDir(dir: string) {
   }
 }
 
+// Whether this directory is this session's to touch. The first session to use it takes it, and a
+// second one is refused rather than allowed to edit and reset the first one's files.
+async function ours(projectDir: string, sessionFile: string, what: string) {
+  const claim = await readJson<Claim>(claimPath(projectDir));
+  if (!claim || claim.session === sessionFile) return true;
+  // Said out loud, because the alternative is a session quietly working on the wrong files.
+  console.warn(
+    `not ${what} ${projectDir}: it belongs to ${claim.session}, not ${sessionFile}`,
+  );
+  return false;
+}
+
 /**
  * Record the project's files against this session. Cheap when nothing changed: a tree id is
  * content-addressed, so an untouched directory produces the tree the tip already names and this
  * writes nothing.
  */
 export async function capture(projectDir: string, sessionFile: string): Promise<void> {
-  await ensureShadow(projectDir);
-  // Everything git would track, which leaves out whatever the project ignores. A rebuilt tree may
-  // still want an install step, the same as a fresh clone would.
-  await git(projectDir, ["add", "-A"]);
-  const tree = (await git(projectDir, ["write-tree"])).stdout.trim();
+  if (!(await ours(projectDir, sessionFile, "capturing"))) return;
+  // One at a time per directory. Two captures share an index and a shadow repository, so a second
+  // one collides on `index.lock` and the failure reads as a session that quietly stopped shipping.
+  await withSessionLock(treeLockPath(projectDir), async () => {
+    await ensureShadow(projectDir);
+    // Everything git would track, which leaves out whatever the project ignores. A rebuilt tree
+    // may still want an install step, the same as a fresh clone would.
+    await git(projectDir, ["add", "-A"]);
+    const tree = (await git(projectDir, ["write-tree"])).stdout.trim();
 
-  const tip = await readJson<Tip>(tipPath(sessionFile));
-  if (tip?.tree === tree) return;
+    const tip = await readJson<Tip>(tipPath(sessionFile));
+    if (tip?.tree === tree) return;
 
-  const parent = tip ? ["-p", tip.commit] : [];
-  const commit = (
-    await git(projectDir, ["commit-tree", tree, ...parent, "-m", `pi-temporal ${tree.slice(0, 8)}`])
-  ).stdout.trim();
-  await git(projectDir, ["update-ref", SNAP, commit]);
+    const parent = tip ? ["-p", tip.commit] : [];
+    const commit = (
+      await git(projectDir, [
+        "commit-tree",
+        tree,
+        ...parent,
+        "-m",
+        `pi-temporal ${tree.slice(0, 8)}`,
+      ])
+    ).stdout.trim();
+    const ref = snapRef(sessionFile);
+    await git(projectDir, ["update-ref", ref, commit]);
 
-  const seq = (tip?.seq ?? 0) + 1;
-  const dir = shareDir(sessionFile);
-  await mkdir(dir, { recursive: true });
-  // Only what the last capture did not already ship. Written to a scratch name and renamed, so a
-  // host reading the directory never unbundles a file that is still being written.
-  const scratch = join(dir, `${bundleName(seq)}.${process.pid}.writing`);
-  await git(projectDir, [
-    "bundle",
-    "create",
-    scratch,
-    SNAP,
-    ...(tip ? ["--not", tip.commit] : []),
-  ]);
-  await rename(scratch, join(dir, bundleName(seq)));
+    const seq = (tip?.seq ?? 0) + 1;
+    const dir = shareDir(sessionFile);
+    await mkdir(dir, { recursive: true });
+    // Only what the last capture did not already ship. Written to a scratch name and renamed, so a
+    // host reading the directory never unbundles a file that is still being written.
+    const scratch = join(dir, `${bundleName(seq)}.${process.pid}.writing`);
+    await git(projectDir, ["bundle", "create", scratch, ref, ...(tip ? ["--not", tip.commit] : [])]);
+    await rename(scratch, join(dir, bundleName(seq)));
 
-  await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
-  await writeJson(heldPath(projectDir), { tree } satisfies Held);
+    await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
+    await writeJson(heldPath(projectDir), { tree } satisfies Held);
+    await writeJson(claimPath(projectDir), { session: sessionFile } satisfies Claim);
+  });
 }
 
 /**
@@ -151,35 +187,49 @@ export async function capture(projectDir: string, sessionFile: string): Promise<
 export async function ensure(projectDir: string, sessionFile: string): Promise<void> {
   const tip = await readJson<Tip>(tipPath(sessionFile));
   if (!tip) return;
+  if (!(await ours(projectDir, sessionFile, "restoring into"))) return;
 
-  const held = await readJson<Held>(heldPath(projectDir));
-  if (held?.tree === tip.tree) return;
+  await withSessionLock(treeLockPath(projectDir), async () => {
+    const held = await readJson<Held>(heldPath(projectDir));
+    if (held?.tree === tip.tree) return;
 
-  // A directory with files in it that this host never built is a working copy, and checking a
-  // stored tree out over it would rewrite somebody's files. An EMPTY directory is not a working
-  // copy. It is the ordinary shape of a machine that has never seen this project, and refusing
-  // there is how the tree ends up never travelling at all.
-  if (!held && !(await isEmptyDir(projectDir))) return;
+    // What is on disk decides, not what a note claims. A directory holding anything this host has
+    // not shipped is either somebody's working copy or a capture that never made it out, and a
+    // reset would throw that away. Empty belongs to nobody, which is the ordinary shape of a
+    // machine that has never seen this project.
+    if (!(await isEmptyDir(projectDir))) {
+      await ensureShadow(projectDir);
+      await git(projectDir, ["add", "-A"]);
+      const here = (await git(projectDir, ["write-tree"])).stdout.trim();
+      if (here !== held?.tree) {
+        console.warn(
+          `not restoring ${projectDir} to ${tip.tree.slice(0, 8)}: it holds ${here.slice(0, 8)}, ` +
+            `which nothing has shipped`,
+        );
+        return;
+      }
+    }
 
-  await mkdir(projectDir, { recursive: true });
-  await ensureShadow(projectDir);
+    await mkdir(projectDir, { recursive: true });
+    await ensureShadow(projectDir);
 
-  const names = (await readdir(shareDir(sessionFile)).catch(() => []))
-    .filter((name) => name.endsWith(".bundle"))
-    .sort();
-  for (const name of names) {
-    // In order, because each bundle after the first names the previous commit as a prerequisite.
-    // Already having one is not an error worth stopping for, and neither is a bundle a newer
-    // capture has since superseded.
-    await git(projectDir, ["bundle", "unbundle", join(shareDir(sessionFile), name)]).catch(
-      () => undefined,
-    );
-  }
+    const names = (await readdir(shareDir(sessionFile)).catch(() => []))
+      .filter((name) => name.endsWith(".bundle"))
+      .sort();
+    for (const name of names) {
+      // In order, because each bundle after the first names the previous commit as a prerequisite.
+      // Already having one is not an error worth stopping for.
+      await git(projectDir, ["bundle", "unbundle", join(shareDir(sessionFile), name)]).catch(
+        () => undefined,
+      );
+    }
 
-  // `-u --reset` is what makes this a move rather than a merge: a file the newer tree dropped is
-  // removed, which checking the paths out would leave behind.
-  await git(projectDir, ["read-tree", "-u", "--reset", tip.tree]);
-  await writeJson(heldPath(projectDir), { tree: tip.tree } satisfies Held);
+    // `-u --reset` is what makes this a move rather than a merge: a file the newer tree dropped is
+    // removed, which checking the paths out would leave behind.
+    await git(projectDir, ["read-tree", "-u", "--reset", tip.tree]);
+    await writeJson(heldPath(projectDir), { tree: tip.tree } satisfies Held);
+    await writeJson(claimPath(projectDir), { session: sessionFile } satisfies Claim);
+  });
 }
 
 /** Drop what a session's tree cost, once the session is over. */

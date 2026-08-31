@@ -45,6 +45,9 @@ function fakeTurn(options: { interruptAfter?: number } = {}) {
       record: async () => {
         seen.push("record");
       },
+      abandonStep: async () => {
+        seen.push("abandon");
+      },
       interrupted: () => options.interruptAfter !== undefined && step >= options.interruptAfter,
       modelCall: async () => {
         step++;
@@ -75,7 +78,7 @@ function fakeTurn(options: { interruptAfter?: number } = {}) {
       },
       sealStep: async (results) => {
         seen.push(`seal:${step}:${results.length}`);
-        return { done: step === STEPS_TO_ANSWER };
+        return { done: step === STEPS_TO_ANSWER, retryAttempt: 0 };
       },
     },
   };

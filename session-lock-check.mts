@@ -68,6 +68,31 @@ async function main() {
   });
   check("a live holder's lock is not stolen", refused);
 
+  // Mutual exclusion when several contenders find one stale lock together. It does NOT cover the
+  // interleaving the rename-based reclaim exists for: that needs a contender stalled between
+  // reading the lock's age and reclaiming it, for longer than another takes to reclaim and
+  // acquire. Nothing here can hold the event loop at that point, so this passes either way.
+  let bothIn = false;
+  for (let round = 0; round < 20 && !bothIn; round++) {
+    const raced = join(dir, `raced-${round}.jsonl`);
+    await writeFile(`${raced}.lock`, JSON.stringify({ token: "dead" }), "utf8");
+    const old = new Date(Date.now() - STALE_ENOUGH);
+    await utimes(`${raced}.lock`, old, old);
+
+    let inside = 0;
+    await Promise.all(
+      [0, 1].map(() =>
+        withSessionLock(raced, async () => {
+          inside++;
+          if (inside > 1) bothIn = true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          inside--;
+        }).catch(() => undefined),
+      ),
+    );
+  }
+  check("contenders finding one stale lock together do not overlap", !bothIn);
+
   // The first activity of a session takes the lock before anything has created the directory the
   // session file lives in, so the lock has to make it rather than sit there failing.
   const fresh = join(dir, "not-yet", "session.jsonl");
