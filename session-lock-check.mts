@@ -93,6 +93,22 @@ async function main() {
   }
   check("contenders finding one stale lock together do not overlap", !bothIn);
 
+  // The late reclaim cannot be forced from here, so pin what protects against it instead. A holder
+  // whose lock was taken has to be able to find that out before it writes, which is what every
+  // writing activity asks on its way to the write.
+  const fenced = join(dir, "fenced.jsonl");
+  let sawOwned: boolean | undefined;
+  let sawLost: boolean | undefined;
+  await withSessionLock(fenced, async (owned) => {
+    sawOwned = await owned();
+    // Somebody else reclaims and takes it. This is the state a slow holder wakes up in.
+    await rm(`${fenced}.lock`, { force: true });
+    await writeFile(`${fenced}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
+    sawLost = await owned();
+  });
+  check("a holder can tell its lock is still its own", sawOwned === true);
+  check("and can tell when it is not", sawLost === false);
+
   // The first activity of a session takes the lock before anything has created the directory the
   // session file lives in, so the lock has to make it rather than sit there failing.
   const fresh = join(dir, "not-yet", "session.jsonl");

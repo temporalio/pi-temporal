@@ -198,6 +198,8 @@ async function watch(args: string[]) {
       return; // the first step has not written the file yet
     }
     const size = info.size;
+    // Recorded after the handle is open, not here: a file replaced between the two would be read
+    // at the old offset while the new inode is already noted, and the next tick sees no change.
     // A compaction rewrites the whole file, and the rewrite can be the same size or bigger, so
     // watching the length alone misses it. A new inode is the part that always changes.
     if (inode !== undefined && info.ino !== inode) {
@@ -208,13 +210,20 @@ async function watch(args: string[]) {
       offset = 0;
       carry = "";
     }
-    inode = info.ino;
     if (size === offset) return;
     const handle = await open(file, "r");
     try {
-      const buffer = Buffer.alloc(size - offset);
+      const opened = await handle.stat();
+      if (inode !== undefined && opened.ino !== inode) {
+        offset = 0;
+        carry = "";
+      }
+      inode = opened.ino;
+      const readable = opened.size - offset;
+      if (readable <= 0) return;
+      const buffer = Buffer.alloc(readable);
       await handle.read(buffer, 0, buffer.length, offset);
-      offset = size;
+      offset = opened.size;
       carry += buffer.toString("utf8");
       const lines = carry.split("\n");
       // A tail can land mid-line, and half a JSON document is not a parse error worth reporting.
