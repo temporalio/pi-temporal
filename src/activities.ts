@@ -119,6 +119,9 @@ export function makeActivities(opts: ActivityOptions) {
   // Before anything the model asked for can run, and after the step that ran it is written down.
   // Both are no-ops when the tree is off, and the restore is a no-op on the host that captured,
   // because the tree it holds is already the one the shared directory names.
+  // Deliberately not caught. A step that cannot get the project's files must not run against
+  // whatever is in the directory: the model would be told those files are the project. Failing
+  // sends the work to a host that can do it.
   const bringTree = async (sessionFile: string) => {
     if (!opts.shipTree) return;
     await worktree.ensure(opts.projectDir, sessionFile);
@@ -213,9 +216,9 @@ export function makeActivities(opts: ActivityOptions) {
     try {
       return await withSessionLock(input.sessionFile, async (owned) => {
         await bringTree(input.sessionFile);
-        await stillOurs(owned, "the step");
         const session = await openSession(input.sessionFile);
         try {
+          await stillOurs(owned, "the step");
           const settled = await readyForStep(session, input, false);
           if (settled) return settled;
 
@@ -250,9 +253,10 @@ export function makeActivities(opts: ActivityOptions) {
     try {
       return await withSessionLock(input.sessionFile, async (owned) => {
         await bringTree(input.sessionFile);
-        await stillOurs(owned, "the model call");
         const session = await openSession(input.sessionFile);
         try {
+          // Before the prompt is recorded, which is this activity's first write.
+          await stillOurs(owned, "the model call");
           const settled = await readyForStep(session, input, true);
           if (settled) return { settled, calls: [], sequential: false, ended: true };
 
@@ -342,7 +346,6 @@ export function makeActivities(opts: ActivityOptions) {
         // The seal writes the step down, so it needs the tree the tools worked in. It can land on
         // a worker that ran none of them.
         await bringTree(input.sessionFile);
-        await stillOurs(owned, "the seal");
         const session = await openSession(input.sessionFile);
         try {
           const results: TurnToolCallOutcome[] = [];
@@ -356,6 +359,7 @@ export function makeActivities(opts: ActivityOptions) {
 
           // Named, so a message something else appended between the model call and here cannot
           // be the one these results are attributed to.
+          await stillOurs(owned, "the seal");
           const sealed = await session.sealStep(results, {
             expectCalls: input.calls.map((call) => call.id),
             retryAttempt: input.retryAttempt,

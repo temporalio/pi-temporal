@@ -272,8 +272,14 @@ Three rules bound it:
   with what it last agreed the directory held, so a checkout it did not put there, and its own
   edits that never made it out, both stop it. An empty directory holds nothing, and treating that
   as a working copy is how the tree ends up never travelling.
-- **One session per directory.** The first to use it claims it, and a second is refused. Two
-  sessions editing and resetting one directory would lose each other's files quietly.
+- **One session per directory.** A second is refused while the first is still using it, and gets
+  it back when that session is forgotten. Two sessions editing and resetting one directory would
+  lose each other's files.
+- **A refusal stops the step.** Running against files that are not the project tells the model
+  those files are the project, which is worse than not running, so it fails and Temporal puts the
+  work on a host that can do it.
+- **Tools of a step run one at a time** while the tree travels. Two on two hosts each publish a
+  tree without the other's work.
 - **It is off by default.** On a laptop the tools already run in the directory you meant, and
   shipping it there is disk spent on a problem that host does not have.
 

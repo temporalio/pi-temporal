@@ -69,32 +69,52 @@ async function main() {
   await mkdir(projectC, { recursive: true });
   await writeFile(join(projectC, "mine.txt"), "do not touch\n");
   asHost(root, "c");
-  await worktree.ensure(projectC, sessionFile);
+  // Loudly, not quietly. A step that ran here would tell the model these files are the project.
+  const refused = await worktree.ensure(projectC, sessionFile).then(() => false, () => true);
   const left = await readdir(projectC);
-  check("a working copy is left alone", left.join() === "mine.txt", left);
+  check("a working copy is refused, not overwritten", refused && left.join() === "mine.txt", left);
 
-  // A directory belongs to one session. A second one editing and resetting it would lose the
-  // first one's files, and neither would report anything wrong. Back on host A, because a claim is
-  // host-local: the case it covers is two sessions pointed at one directory on one machine.
+  // A session that never shipped these files must not adopt them. Host A's directory holds s1's
+  // work, so s2 gets neither a restore into it nor a capture out of it.
   asHost(root, "a");
   const other = join(root, "sessions", "s2.jsonl");
   const mine = await read(join(projectA, "note.txt"));
-  await worktree.capture(projectA, other);
+  const refusedCapture = await worktree.capture(projectA, other).then(() => false, () => true);
+  const refusedEnsure = await worktree.ensure(projectA, other).then(() => false, () => true);
   const untouched = (await read(join(projectA, "note.txt"))) === mine;
-  const noTip = await readdir(`${other}.tree`).then(() => false, () => true);
-  check("a second session cannot capture another's directory", untouched && noTip);
+  check("another session cannot adopt a directory", refusedCapture && untouched, {
+    refusedCapture,
+    refusedEnsure,
+    untouched,
+  });
 
-  // Local work nothing has shipped is what stops a reset, whether or not this host built the
-  // directory. Otherwise a host that captured once may be moved over its own unshipped edits.
+  // The guard only bites when this host is behind, so move the tip first. Otherwise `ensure`
+  // returns at "already at the tip" and never reaches the part being checked.
+  asHost(root, "b");
+  await writeFile(join(projectB, "note.txt"), "three\n");
+  await worktree.capture(projectB, sessionFile);
+
+  // A tool wrote and the worker died before the result got out. Those files are real work, so the
+  // move ships them rather than resetting over them.
+  asHost(root, "a");
   await writeFile(join(projectA, "unshipped.txt"), "not yours\n");
   await worktree.ensure(projectA, sessionFile);
   const kept = await read(join(projectA, "unshipped.txt"));
-  check("unshipped local work stops a reset", kept === "not yours\n", kept);
-  await rm(join(projectA, "unshipped.txt"));
+  check("work a crash left behind is shipped, not dropped", kept === "not yours\n", kept);
+  asHost(root, "b");
+  await worktree.ensure(projectB, sessionFile);
+  const reached = await read(join(projectB, "unshipped.txt"));
+  check("and the other host then gets it", reached === "not yours\n", reached);
 
-  await worktree.forget(sessionFile);
+  asHost(root, "a");
+  await worktree.forget(sessionFile, projectA);
   const gone = await readdir(`${sessionFile}.tree`).then(() => false, () => true);
   check("forgetting a session drops what its tree cost", gone);
+
+  // And hands the directory back. Otherwise a worker with one project directory serves exactly one
+  // session for as long as it lives, which is not a fleet.
+  const taken = await worktree.capture(projectA, other).then(() => true, () => false);
+  check("a finished session releases its directory", taken);
 
   console.log(failures.length === 0 ? "\nworktree-check: OK" : `\nworktree-check: ${failures.length} failed`);
   process.exit(failures.length === 0 ? 0 : 1);

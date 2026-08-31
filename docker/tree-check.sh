@@ -100,14 +100,13 @@ $COMPOSE run --rm -T client start \
   --session="$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
 
-# On both, because with two hosts polling the step that read it can have run on either, and the
-# claim is that whichever one it was could see what the other wrote.
-spreadA=$($COMPOSE exec -T worker-a sh -c 'cat /project/spread.txt 2>/dev/null' 2>/dev/null | tr -d '\r')
-spreadB=$($COMPOSE exec -T worker-b sh -c 'cat /project/spread.txt 2>/dev/null' 2>/dev/null | tr -d '\r')
-case "$spreadA$spreadB" in
-  *SPREAD*SPREAD*) ok "a step spread across two hosts leaves both holding the work" ;;
-  *SPREAD*) bad "a step spread across two hosts leaves both holding the work" "only one host has it" ;;
-  *) bad "a step spread across two hosts leaves both holding the work" "neither host has it" ;;
+# What the host that ran the read saw, which is the claim. Asserting both hosts hold the file is
+# stronger but flaky: nothing forces a turn's activities to spread, so a whole turn can land on one
+# host and the check would fail with nothing wrong.
+read_back=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
+case "$read_back" in
+  *"tool result: SPREAD"*) ok "with both hosts polling, the one that read it saw the other's work" ;;
+  *) bad "with both hosts polling, the read saw the write" "$(printf '%s' "$read_back" | tail -3)" ;;
 esac
 
 echo

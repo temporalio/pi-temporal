@@ -32,10 +32,13 @@ const lockPath = (sessionFile: string) => `${sessionFile}.lock`;
 
 const held = (token: string) => JSON.stringify({ token, host: hostname(), pid: process.pid });
 
-// Reclaims by renaming out of the way rather than removing, because two contenders can decide the
-// same lock is stale at the same moment. A rename to a name only this caller knows succeeds for
-// exactly one of them, and the loser gets ENOENT and goes back to competing for the lock itself.
-// Removing instead lets the loser delete the winner's fresh lock, and then both run the body.
+// Reclaims by renaming out of the way rather than removing. Two contenders deciding the same lock
+// is stale at the same moment then move the same file, and only one of them wins.
+//
+// It does not make reclaiming safe. `rename` acts on the path, not on the file that was measured,
+// so a contender slow between reading the age and reclaiming moves whatever is there by then,
+// including a lock somebody else has just taken. Nothing a lock beside a file can do closes that.
+// `owned()` is the answer, and it is why writers ask again on the way to the write.
 async function taken(path: string, token: string): Promise<boolean> {
   try {
     const info = await stat(path);
