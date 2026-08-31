@@ -29,6 +29,7 @@ import type {
   ToolCallResult,
 } from "./protocol.js";
 import * as pending from "./pending.js";
+import * as worktree from "./worktree.js";
 import { withSessionLock } from "./session-lock.js";
 import { textOf } from "./messages.js";
 
@@ -107,10 +108,29 @@ export interface ActivityOptions {
   readonly modelHint?: string;
   // Only needed when the key is not already in Pi's auth store.
   readonly apiKey?: string;
+  // Ship the project's files with the session, so a worker on another machine finds the work the
+  // last one did. Without it the transcript travels and the files do not.
+  readonly shipTree?: boolean;
 }
 
 export function makeActivities(opts: ActivityOptions) {
   const provider = opts.provider ?? "openai";
+
+  // Before anything the model asked for can run, and after the step that ran it is written down.
+  // Both are no-ops when the tree is off, and the restore is a no-op on the host that captured,
+  // because the tree it holds is already the one the shared directory names.
+  const bringTree = async (sessionFile: string) => {
+    if (!opts.shipTree) return;
+    await worktree.ensure(opts.projectDir, sessionFile);
+  };
+  const shipTree = async (sessionFile: string) => {
+    if (!opts.shipTree) return;
+    // A capture that fails must not fail the step. The work is done and recorded; what is lost is
+    // that the next host has to start from the previous capture.
+    await worktree.capture(opts.projectDir, sessionFile).catch((err) => {
+      console.warn(`could not ship the project tree: ${String(err)}`);
+    });
+  };
 
   async function openSession(sessionFile: string): Promise<AgentSession> {
     await mkdir(dirname(sessionFile), { recursive: true });
@@ -184,6 +204,7 @@ export function makeActivities(opts: ActivityOptions) {
     const stop = heartbeatEvery(3000);
     try {
       return await withSessionLock(input.sessionFile, async () => {
+        await bringTree(input.sessionFile);
         const session = await openSession(input.sessionFile);
         try {
           const settled = await readyForStep(session, input, false);
@@ -197,6 +218,7 @@ export function makeActivities(opts: ActivityOptions) {
           // Whole-step mode has no carry. Its session is rebuilt per activity too, so its retry
           // budget starts at zero on every step and only the step ceiling bounds it. That is how
           // it has always been; giving it the carry means giving step() the seal's post-run pass.
+          await shipTree(input.sessionFile);
           return { done, retryAttempt: 0, finalText: done ? lastAssistantText(messages) : "" };
         } finally {
           session.dispose();
@@ -213,6 +235,10 @@ export function makeActivities(opts: ActivityOptions) {
     const stop = heartbeatEvery(3000);
     try {
       return await withSessionLock(input.sessionFile, async () => {
+        // Here rather than in the tool activity, because the model call of a step always runs
+        // before its tools do, and it holds the session lock while the tool calls do not. Two
+        // tools of one step would otherwise race each other checking the same tree out.
+        await bringTree(input.sessionFile);
         const session = await openSession(input.sessionFile);
         try {
           const settled = await readyForStep(session, input, true);
@@ -316,6 +342,8 @@ export function makeActivities(opts: ActivityOptions) {
           // results would leave a retry of that seal reading an empty batch, and an empty batch
           // reads as one that wants another step even when a tool asked the turn to stop.
           const answer = lastAssistantText(session.state.messages as Msg[]);
+          // After the step is written down, so what ships is a tree whose transcript explains it.
+          await shipTree(input.sessionFile);
           return { done, retryAttempt: sealed.retryAttempt, finalText: done ? answer : "" };
         } finally {
           session.dispose();

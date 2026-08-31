@@ -38,6 +38,10 @@ services:
       - PI_SESSION_DIR=/sessions
       - PI_TEMPORAL_TASK_QUEUE=${PI_TEMPORAL_TASK_QUEUE:-pi-session}
       - PI_TEMPORAL_STEPPED=1
+      - PI_TEMPORAL_SHIP_TREE=${PI_TEMPORAL_SHIP_TREE:-0}
+      # Where the tools run. Each worker gets its own, so a project only reaches a second host by
+      # travelling with the session.
+      - PI_PROJECT_DIR=/project
       - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY}
     volumes:
       - sessions:/sessions
