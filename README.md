@@ -249,6 +249,44 @@ directory. The evidence is Temporal's own, because the worker identity is the co
 `/sessions` is a local volume, so this shows separate hosts rather than a separate filesystem
 implementation. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
 
+## Taking the project with it
+
+The session log travels because it is one file in a shared directory. The files the tools edit did
+not, so a worker on a second machine started every step in whatever directory it was pointed at,
+found nothing, and told the model the project was empty. `PI_TEMPORAL_SHIP_TREE=1` moves them too:
+
+```bash
+PI_TEMPORAL_SHIP_TREE=1 PI_SESSION_DIR=/shared/sessions PI_PROJECT_DIR=/work npm run worker
+```
+
+The shape is git's, because git already answers content addressing, an incremental transfer, and a
+checkout that removes what a later tree dropped. After a step is written down, `src/worktree.ts`
+captures the work tree and writes one bundle into `<session>.jsonl.tree/`. Before a step runs, a
+host that is behind unbundles what it has not seen and checks the newest tree out. An unchanged
+directory produces the tree the tip already names, so it ships nothing.
+
+Three rules bound it:
+
+- **It never touches the project's own `.git`.** The shadow repository is host-local and points at
+  the work tree from outside, so a project that is not a git repository works the same as one that
+  is, and one that is keeps its own history.
+- **It never writes over a tree this host did not build.** That is somebody's working copy. An
+  empty directory is not one, and treating it as one is how the tree ends up never travelling.
+- **It is off by default.** On a laptop the tools already run in the directory you meant, and
+  shipping it there is disk spent on a problem that host does not have.
+
+What it does not carry is what git would not: anything the project ignores. So a rebuilt tree may
+want an install step, the same as a fresh clone would.
+
+### Verified
+
+`worktree-check.mts` covers the mechanics with two fake hosts and needs neither a server nor a key:
+a file and a nested file arrive, a deletion arrives, an unchanged capture ships nothing, and a
+directory with files this host did not build is left alone. `docker/tree-check.sh` runs it for
+real: worker A writes a file, worker A's container is killed, and worker B, whose `/project` has
+never held anything, continues the same session and reads both that file and the rest of the
+project back. With `PI_TEMPORAL_SHIP_TREE=0` exactly the three tree assertions fail.
+
 ## A turn nobody started
 
 `start` hands a task over and returns, but something still has to run it. A schedule does not:
@@ -276,6 +314,8 @@ Helpers are at the repo root, none of which needs a model key:
 - `session-lock-check.mts` covers the one-writer-at-a-time lock: two writers do not overlap, a dead holder's lock is reclaimed on age, and a live holder's is not stolen.
 - `detached-check.mts` needs a server and a key. It is the only one that does, because what it
   proves is a session surviving the process holding it, which does not show up inside one process.
+- `worktree-check.mts` needs neither a server nor a key. It covers moving the project between hosts,
+  with the hosts faked as separate data directories over one shared session directory.
 - `pending-check.mts` needs neither a server nor a key. It covers the files a step keeps about its calls, which is what "a call that already started is not silently repeated" rests on: a fresh call looks fresh, scratch never reads as a result, and a sweep drops what the transcript answers and keeps what it does not.
 
 To see what a session is doing without reading its file, ask the workflow: `temporal workflow query --workflow-id pi-session-<id> --name turnState` reports the queue, the step in flight, and how the last turn ended.
