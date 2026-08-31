@@ -18,10 +18,14 @@ async function main() {
     provider: process.env.PI_TEMPORAL_PROVIDER,
     modelHint: process.env.PI_MODEL,
     apiKey: process.env.OPENAI_API_KEY,
+    shipTree: cfg.shipTree,
   });
 
   console.log(`pi-temporal worker on ${cfg.address} / ${cfg.namespace} / ${cfg.taskQueue}`);
   console.log(`sessions: ${cfg.sessionDir}   project: ${projectDir}`);
+  // Worth saying out loud, because it is the difference between a session that moves between
+  // machines with its files and one that moves without them.
+  console.log(`project files travel with the session: ${cfg.shipTree ? "yes" : "no"}`);
   await run();
 }
 
