@@ -310,9 +310,20 @@ export function makeActivities(opts: ActivityOptions) {
       // Opening a session can append to it (a first thinking-level entry), and two of these run at
       // once. The lock covers the open and is given back before the tool runs, which is the part
       // that has to stay parallel.
+      // The guard has to change when the lock does. While the lock is held it asks whether it is
+      // still ours; once it is given back, `ownedNow` can never go false again, so a guard closed
+      // over it would wave every later write through. A tool activity has no business writing at
+      // all, and an extension appending from `tool_execution_end` runs right here.
+      let opening = true;
       const session = await withSessionLock(input.sessionFile, (_owned, ownedNow) =>
-        openSession(input.sessionFile, writeGuard(ownedNow, "opening the session")),
+        openSession(input.sessionFile, () => {
+          if (opening) return writeGuard(ownedNow, "opening the session")();
+          throw new Error(
+            "a tool activity must not write to the session: the seal is the step's only writer",
+          );
+        }),
       );
+      opening = false;
       try {
         // The transcript first: a result in it means a whole dispatch and a seal already
         // happened, and the kept files for the call are what is left behind.
