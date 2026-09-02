@@ -296,14 +296,25 @@ The rules that bound it:
   died before shipping holds files nothing else has, and the session has moved on without them.
   They go to `<session>.jsonl.tree/salvage/` as a self-contained bundle, and the host comes to the
   tip. Recover one with `git bundle unbundle`. Nothing prunes them.
-- **Only the client or a model call may establish the project.** With nothing shipped yet, whatever
-  is in the directory is the starting point, so this cannot be a tool call: those land on whichever
-  worker is free, and an empty `/project` on that one would become the project everywhere. `start`
-  ships from the directory you ran it in (`--project=` overrides), which is the unambiguous answer.
+- **Only a client may establish the project.** Nothing running on a worker can: every activity, the
+  model call included, lands on whichever worker Temporal had free, so an activity that adopts its
+  own directory puts the project wherever the first unit of work happened to go. `start --project=`
+  sends it (the flag is required with the tree on, so nothing ships a home directory by accident),
+  and `/background` sends the directory you asked from. A session with nothing established refuses
+  every activity until a client sends it, which is loud rather than wrong.
+- **A schedule cannot carry the project yet.** Each firing is its own session and nothing is running
+  at firing time to send one, so `schedule` refuses with the tree on rather than creating sessions
+  that fail on every activity.
+- **A bundle nothing names is dropped, not obeyed.** A writer that died between renaming its bundle
+  into place and naming it as the tip leaves one behind, and every host afterwards computes that
+  same number. Refusing it wedged the session everywhere rather than on the host that crashed.
 - **One session per directory.** A second is refused while the first is using it, in both
-  directions. A session hands its directory back when it goes idle, but only when everything in it
-  has shipped, and only on the host that runs the retirement: a worker that served the session
-  earlier and does not draw that activity keeps its directory until it serves the session again.
+  directions. A session hands its directory back when it goes idle, and only then if this host built
+  that directory out of an empty one, everything in it has shipped, and it actually comes out empty.
+  A directory the host already had is somebody's working copy: what it holds includes the files git
+  ignores, which no bundle carries and nothing else has a copy of. Handing back is also only done by
+  the host that runs the retirement, so one that served the session earlier keeps its directory
+  until it serves that session again.
 - **A refused restore stops the step.** Running against files that are not the project tells the
   model those files are the project, which is worse than not running, so it fails and Temporal puts
   the work on a host that can do it. A refused *capture* is different: the tool has already run and
