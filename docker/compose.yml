@@ -55,6 +55,13 @@ services:
     <<: *worker
     entrypoint: ["node", "--import", "tsx", "src/cli.ts"]
     command: ["running"]
+    # Its own project, because with the tree on the client is what sends it. A client that has no
+    # project has nothing to send, and it used to send an empty tree that then became the project
+    # on every worker.
+    volumes:
+      - sessions:/sessions
+      - clientproject:/project
 
 volumes:
   sessions:
+  clientproject:

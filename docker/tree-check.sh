@@ -36,10 +36,11 @@ hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
 [ -n "$hostA" ] && ok "worker A is up ($hostA)" || { bad "worker A came up"; exit 1; }
 
 # Something already in the project, so the check covers a tree that has content before the agent
-# touches it rather than only what the agent creates.
-$COMPOSE exec -T worker-a sh -c 'echo seeded > /project/seed.txt' >/dev/null 2>&1
+# touches it rather than only what the agent creates. On the CLIENT, because the client is what
+# sends the project: no worker may establish it, since a worker is whichever one Temporal picked.
+$COMPOSE run --rm -T --entrypoint sh client -c 'echo seeded > /project/seed.txt' >/dev/null 2>&1
 
-sid=$($COMPOSE run --rm -T client start \
+sid=$($COMPOSE run --rm -T client start --project=/project \
   "Use the bash tool to run exactly: echo CARRIED > /project/note.txt. Then reply DONE." \
   2>/dev/null | tr -d '\r' | head -1)
 [ -n "$sid" ] && ok "a client started the session ($sid)" || { bad "no session"; exit 1; }
@@ -69,7 +70,7 @@ empty=$($COMPOSE exec -T worker-b sh -c 'ls -A /project | wc -l' 2>/dev/null | t
 [ "${empty:-1}" = "0" ] && ok "worker B's project is empty before the turn" || bad "worker B's project was not empty" "$empty"
 
 # --- the same session, on the other host. The file exists there only if the tree travelled.
-$COMPOSE run --rm -T client start \
+$COMPOSE run --rm -T client start --project=/project \
   "Use the bash tool to run exactly: cat /project/note.txt /project/seed.txt. Report what it printed." \
   --session="$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
@@ -91,11 +92,11 @@ esac
 # model call, each tool call and the seal are separate dispatches: nothing pins them together.
 $COMPOSE up -d worker-a >/dev/null 2>&1
 sleep 8
-$COMPOSE run --rm -T client start \
+$COMPOSE run --rm -T client start --project=/project \
   "Use the bash tool to run exactly: echo SPREAD > /project/spread.txt. Then reply DONE." \
   --session="$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
-$COMPOSE run --rm -T client start \
+$COMPOSE run --rm -T client start --project=/project \
   "Use the bash tool to run exactly: cat /project/spread.txt. Report what it printed." \
   --session="$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1

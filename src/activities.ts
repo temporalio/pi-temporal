@@ -144,14 +144,6 @@ export function makeActivities(opts: ActivityOptions) {
     }
   };
 
-  // Establishing the project, as opposed to adding to it. Only the model call does this, because it
-  // runs before any tool of the step and under the session lock, where a tool call lands on
-  // whichever worker is free. Not caught, for the same reason `bringTree` is not.
-  const seedTree = async (sessionFile: string) => {
-    if (!opts.shipTree) return;
-    await worktree.capture(opts.projectDir, sessionFile, { seed: true });
-  };
-
   const shipTree = async (sessionFile: string) => {
     if (!opts.shipTree) return;
     // A capture that fails must not fail the step: the tool has already run and its result is
@@ -277,9 +269,6 @@ export function makeActivities(opts: ActivityOptions) {
     try {
       return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
         await bringTree(input.sessionFile);
-        // After the restore, so a host that is behind seeds nothing: with a tip present this is the
-        // ordinary no-op capture of a directory that already matches.
-        await seedTree(input.sessionFile);
         const session = await openSession(
           input.sessionFile,
           writeGuard(ownedNow, "the model call"),

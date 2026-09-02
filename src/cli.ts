@@ -71,8 +71,24 @@ async function turnStateOf(
 async function seedProject(sessionId: string, projectFlag: string | undefined) {
   const cfg = fromEnv();
   if (!cfg.shipTree) return;
-  const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR ?? process.cwd();
-  await worktree.capture(projectDir, sessionFileFor(cfg.sessionDir, sessionId), { seed: true });
+  // Named, never guessed. Falling back to the working directory means `pi-temporal start` from a
+  // home directory ships every dotfile in it, `~/.ssh` and `~/.aws` included, because nothing there
+  // is covered by a `.gitignore`. It also means a thin client with no project sends an empty tree
+  // and every worker that does have the files is then refused.
+  const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR;
+  if (!projectDir) {
+    throw new Error(
+      "the tree is on, so this needs the project: pi-temporal start \"...\" --project=/path/to/repo",
+    );
+  }
+  const file = sessionFileFor(cfg.sessionDir, sessionId);
+  // Only the first prompt of a session sends it. A later `start --session=<id>` is a continuation,
+  // and by then the workers have moved the tip past whatever this client holds.
+  if (await worktree.established(file)) {
+    say("  the session already has its project");
+    return;
+  }
+  await worktree.capture(projectDir, file, { seed: true });
   say(`  sent the project from ${projectDir}`);
 }
 
@@ -102,6 +118,16 @@ async function schedule(args: string[]) {
   const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
+  // Every firing is its own session, and nothing is running at firing time to send the project. An
+  // activity cannot send it either, for the reason in `worktree.ensure`. So the two features do not
+  // compose yet, and saying so beats a scheduled session that fails on every activity.
+  if (fromEnv().shipTree) {
+    throw new Error(
+      "schedule does not carry the project yet: each firing is its own session and nothing is " +
+        "running to send it. Run with PI_TEMPORAL_SHIP_TREE unset, or point the workers at the " +
+        "project directly.",
+    );
+  }
 
   const { cfg, client, connection } = await connect();
   try {
