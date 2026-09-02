@@ -46,6 +46,11 @@ interface Held {
   // sequence again, which is one git subprocess per bundle per activity and gets slower for the
   // life of the session.
   readonly seq?: number;
+  // Whether this host built the directory out of an empty one, as opposed to adopting a directory
+  // that already had files. Only the first kind may ever be emptied again: the second is somebody's
+  // working copy, and what it holds includes files git ignores, which no bundle carries and nothing
+  // else has a copy of. Absent means no, which is what an older note without the field should mean.
+  readonly built?: boolean;
 }
 
 // What the shared directory says the newest state is. `seq` orders the bundles, because a host has
@@ -175,7 +180,13 @@ async function ingest(projectDir: string, sessionFile: string, from = 0) {
 
 // Commits whatever is in the directory and publishes it. The caller has already decided that is
 // the right thing to do, which is the part with the rules in it.
-async function publish(projectDir: string, sessionFile: string, tip: Tip | undefined, tree: string) {
+async function publish(
+  projectDir: string,
+  sessionFile: string,
+  tip: Tip | undefined,
+  tree: string,
+  built: boolean | undefined,
+) {
   const parent = tip ? ["-p", tip.commit] : [];
   const commit = (
     await git(projectDir, ["commit-tree", tree, ...parent, "-m", `pi-temporal ${tree.slice(0, 8)}`])
@@ -199,7 +210,9 @@ async function publish(projectDir: string, sessionFile: string, tip: Tip | undef
   await rename(scratch, join(dir, bundleName(seq)));
 
   await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
-  await writeJson(heldPath(projectDir, sessionFile), { tree, seq } satisfies Held);
+  // `built` is carried, never invented here. A capture says what the directory now holds, not where
+  // the directory came from, and the answer to that only changes when a restore creates one.
+  await writeJson(heldPath(projectDir, sessionFile), { tree, seq, built } satisfies Held);
 }
 
 // Work this host holds that the session never shipped, put where it can be recovered instead of
@@ -266,7 +279,7 @@ export async function capture(
     const tree = await treeHere(projectDir);
     if (tip?.tree === tree) return;
     if (tip) await ingest(projectDir, sessionFile, held?.seq ?? 0);
-    await publish(projectDir, sessionFile, tip, tree);
+    await publish(projectDir, sessionFile, tip, tree, held?.built);
   });
 }
 
@@ -316,9 +329,13 @@ export async function ensure(projectDir: string, sessionFile: string): Promise<v
     // `-u --reset` is what makes this a move rather than a merge: a file the newer tree dropped is
     // removed, which checking the paths out would leave behind.
     await git(projectDir, ["read-tree", "-u", "--reset", tip.tree]);
+    // A restore into a directory this session had no note for is the one case that creates a
+    // directory rather than adopting one, and `!held` only gets past the guard above when the
+    // directory was empty. Otherwise carry what the note already said.
     await writeJson(heldPath(projectDir, sessionFile), {
       tree: tip.tree,
       seq: tip.seq,
+      built: held?.built ?? true,
     } satisfies Held);
   });
 }
@@ -329,24 +346,36 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /**
  * Hand this host's directory back, so the next session can have it. What marks a directory taken is
- * this session's note, and the files in it are this session's too, so both go.
+ * this session's note, and the files in a directory this host built are this session's too, so both
+ * go.
  *
- * Refuses unless everything here has already shipped, because the shared bundles are the only other
- * copy. Returns whether the directory was actually freed.
+ * Refuses on three counts: a directory this host did not build out of an empty one, a directory
+ * holding work that never shipped, and a directory that did not actually come out empty. Returns
+ * whether it was freed.
  */
 export async function release(projectDir: string, sessionFile: string): Promise<boolean> {
   return await withSessionLock(treeLockPath(projectDir), async () => {
     const tip = await readJson<Tip>(tipPath(sessionFile));
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
     if (!tip || !held) return false;
-    // Anything unshipped is work only this host has. Keeping the directory is the lesser cost.
+    // Only a directory this host built out of an empty one. A directory that already had files when
+    // the session found it belongs to whoever put them there, and emptying it takes the files git
+    // ignores with it: a `.env`, an install, a build. No bundle carries those and nothing else has
+    // a copy. Keeping the directory is the lesser cost by a wide margin.
+    if (!held.built) return false;
+    // Anything unshipped is work only this host has.
     if ((await treeHere(projectDir)) !== tip.tree) return false;
+
     await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
     // `-x` as well, because what the next session finds has to be an empty directory and not a
-    // nearly empty one: anything left is a directory somebody has files in, which is what the
-    // restore refuses to write over. That takes ignored files too, so a rebuilt tree wants its
-    // install step again, the same as a fresh clone would.
+    // nearly empty one: anything left is a directory the restore refuses to write over. On a tree
+    // this host built there is nothing to lose, which is exactly why only those get here.
     await git(projectDir, ["clean", "-fdxq"]);
+
+    // Neither command above removes a `.git` at the root of the work tree, and git's walk skips it.
+    // A directory that is not actually empty is one the next session is refused, so dropping the
+    // note there would wedge this host instead of handing it back. Keep the note and say no.
+    if (!(await isEmptyDir(projectDir))) return false;
     await rm(heldPath(projectDir, sessionFile), { force: true });
     return true;
   });

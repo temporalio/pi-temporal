@@ -4,6 +4,7 @@
 //
 // Usage: npx tsx worktree-check.mts
 
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -173,6 +174,28 @@ async function main() {
     .capture(projectB, s4, { seed: true })
     .then(() => true, () => false);
   check("which is what lets the next session use it", reusable);
+
+  // The case the assertion above cannot see, because its fake project is a bare directory. A real
+  // project is a git checkout, and a host that seeded the session from one is holding somebody
+  // else's files: tracked, untracked, and the ones git ignores, which no bundle carries. Emptying
+  // that is data loss, and the leftover `.git` would wedge the host for every later session too.
+  const owned = join(root, "owned", "project");
+  await mkdir(owned, { recursive: true });
+  execFileSync("git", ["init", "-q", owned]);
+  await writeFile(join(owned, "src.txt"), "code\n");
+  await writeFile(join(owned, ".gitignore"), ".env\n");
+  await writeFile(join(owned, ".env"), "SECRET=1\n");
+  const s5 = join(shared, "s5.jsonl");
+  asHost(root, "owned");
+  await worktree.capture(owned, s5, { seed: true });
+  const refusedOwned = (await worktree.release(owned, s5)) === false;
+  const intact = (await read(join(owned, "src.txt"))) === "code\n";
+  const ignoredKept = (await read(join(owned, ".env"))) === "SECRET=1\n";
+  check("a directory this host did not build is never emptied", refusedOwned && intact && ignoredKept, {
+    refusedOwned,
+    intact,
+    ignoredKept,
+  });
 
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
