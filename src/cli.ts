@@ -13,10 +13,14 @@
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { connect, interrupt, submitPrompt } from "./client.js";
-import { fromEnv, sessionFileFor } from "./config.js";
+import { describe, fromEnv, notes, preflight, sessionFileFor } from "./config.js";
 import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
-import { ScheduleOverlapPolicy, WorkflowNotFoundError } from "@temporalio/client";
+import {
+  QueryRejectedError,
+  ScheduleOverlapPolicy,
+  WorkflowNotFoundError,
+} from "@temporalio/client";
 import type { TurnState } from "./protocol.js";
 import { textOf } from "./messages.js";
 
@@ -26,6 +30,8 @@ const say = (line: string) => process.stderr.write(line + "\n");
 // Anything a script is meant to read. Kept off stderr so `$(pi-temporal start ...)` is an id and
 // not an id plus whatever else was worth printing to a person.
 const emit = (line: string) => process.stdout.write(line + "\n");
+
+import { resolve } from "node:path";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -54,19 +60,16 @@ async function turnStateOf(
     );
     return { kind: "state", state };
   } catch (err) {
-    // A workflow that is not there is a session that has finished. Anything else (a deadline, a
-    // worker that cannot answer) must not read as "finished".
-    return err instanceof WorkflowNotFoundError ? { kind: "gone" } : { kind: "unreachable" };
+    // The query was refused because the run is closed, which includes a run the server terminated
+    // for outgrowing its history. That is a finished session, not an unreachable one.
+    if (err instanceof QueryRejectedError) return { kind: "gone" };
+    // No workflow under this id: a session that retired, or was never started. Decided by the
+    // error's type rather than its text, because any error whose message happens to say "not
+    // found" about something else would otherwise end a follower mid-turn.
+    if (err instanceof WorkflowNotFoundError) return { kind: "gone" };
+    // Anything else (a deadline, a worker that cannot answer) must not read as "finished".
+    return { kind: "unreachable" };
   }
-}
-
-/** The value of `--name=value` in `args`, if given. */
-function flag(args: string[], name: string): string | undefined {
-  return args
-    .find((a) => a.startsWith(`--${name}=`))
-    ?.split("=")
-    .slice(1)
-    .join("=");
 }
 
 // Hand the project over with the task. A no-op unless the tree travels, because with the tree off
@@ -74,19 +77,39 @@ function flag(args: string[], name: string): string | undefined {
 async function seedProject(sessionId: string, projectFlag: string | undefined) {
   const cfg = fromEnv();
   if (!cfg.shipTree) return;
-  const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR ?? process.cwd();
-  await worktree.capture(projectDir, sessionFileFor(cfg.sessionDir, sessionId), { seed: true });
+  // Named, never guessed. Falling back to the working directory means `pi-temporal start` from a
+  // home directory ships every dotfile in it, `~/.ssh` and `~/.aws` included, because nothing there
+  // is covered by a `.gitignore`. It also means a thin client with no project sends an empty tree
+  // and every worker that does have the files is then refused.
+  const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR;
+  if (!projectDir) {
+    throw new Error(
+      'the tree is on, so this needs the project: pi-temporal start "..." --project=/path/to/repo',
+    );
+  }
+  const file = sessionFileFor(cfg.sessionDir, sessionId);
+  // Only the first prompt of a session sends it. A later `start --session=<id>` is a continuation,
+  // and by then the workers have moved the tip past whatever this client holds.
+  if (await worktree.established(file)) {
+    say("  the session already has its project");
+    return;
+  }
+  await worktree.capture(projectDir, file, { seed: true });
   say(`  sent the project from ${projectDir}`);
 }
+
+// One flag's value, from `--name=value`. `slice(1).join("=")` keeps a value with its own `=` whole.
+const flagOf = (args: string[], name: string) =>
+  args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
 
 async function start(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
-  const sessionId = flag(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
+  const sessionId = flagOf(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
   // Before the prompt, so the project is established from the directory the person running this
   // meant. Left to the workers it is established by whichever one draws the first activity, and
   // that is right only when that worker happens to be the one holding the files.
-  await seedProject(sessionId, flag(args, "project"));
+  await seedProject(sessionId, flagOf(args, "project"));
   // signal-with-start, so this both creates the session and hands it the prompt. Nothing waits for
   // the turn: whichever worker is polling the queue runs it.
   await submitPrompt(sessionId, text);
@@ -98,11 +121,32 @@ async function start(args: string[]) {
 // the session is created by the workflow rather than by whoever asked for it.
 async function schedule(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
-  const every = flag(args, "every");
-  const cron = flag(args, "cron");
-  const id = flag(args, "id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
+  const every = flagOf(args, "every");
+  const cron = flagOf(args, "cron");
+  const id = flagOf(args, "id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
+  // Every firing is its own session and nothing is running at firing time to send it a project, so
+  // the project is sent once, here, and each firing takes a copy of it. A worker may not establish
+  // a project from its own directory; copying a store a client wrote is a different thing, and it
+  // is the one that lets a schedule and the travelling tree compose.
+  const scheduled = fromEnv();
+  let template: string | undefined;
+  if (scheduled.shipTree) {
+    const projectDir = flagOf(args, "project") ?? process.env.PI_PROJECT_DIR;
+    if (!projectDir) {
+      throw new Error(
+        "the tree is on, so a schedule needs the project: " +
+          'pi-temporal schedule "..." --every=1h --project=/path/to/repo',
+      );
+    }
+    template = sessionFileFor(scheduled.sessionDir, `schedule-${id}`);
+    await worktree.capture(projectDir, template, { seed: true });
+    // A template is not a session anything runs, so nothing ever retires it. Leaving this host's
+    // claim on the directory it came from would refuse every later session started there.
+    await worktree.unclaim(projectDir, template);
+    say(`  sent the project from ${projectDir}`);
+  }
 
   const { cfg, client, connection } = await connect();
   try {
@@ -129,7 +173,9 @@ async function schedule(args: string[]) {
           {
             idleTimeout: cfg.idleTimeout,
             stepped: cfg.stepped,
+            toolTimeoutMinutes: cfg.toolTimeoutMinutes,
             sessionDir: cfg.sessionDir,
+            template,
             initialPrompt: { promptId: `scheduled-${id}`, text },
           },
         ],
@@ -298,7 +344,9 @@ async function main() {
       const { client, connection } = await connect();
       try {
         await client.schedule.getHandle(id).delete();
+        // A firing can be queued before any worker copies its project.
         say(`deleted ${id}`);
+        say("  kept the project template for firings already queued or running");
       } finally {
         await connection.close();
       }
@@ -315,12 +363,81 @@ async function main() {
       say(`interrupted ${sessionId}`);
       return;
     }
+    // What this process resolved, and what is wrong with it. Deploying used to mean setting a
+    // handful of variables that have to agree, with no way to ask whether they did until a session
+    // answered with the wrong files hours later.
+    case "doctor": {
+      const cfg = fromEnv();
+      say("pi-temporal");
+      for (const [name, value] of Object.entries(describe(cfg))) say(`  ${name}: ${value}`);
+      for (const note of notes(cfg)) say(`  note: ${note}`);
+      const problems = preflight(cfg);
+      const reach = await connect()
+        .then(async ({ client, connection }) => {
+          try {
+            await client.workflowService.getSystemInfo({});
+            return "reached the server";
+          } finally {
+            await connection.close();
+          }
+        })
+        .catch((err) => {
+          const why = err instanceof Error ? err.message : String(err);
+          return `could not reach ${cfg.address}: ${why}`;
+        });
+      say(`  server: ${reach}`);
+      for (const problem of problems) say(`problem: ${problem}`);
+      if (!reach.startsWith("reached")) process.exitCode = 1;
+      if (problems.length > 0) process.exitCode = 1;
+      else if (reach.startsWith("reached")) say("this deployment looks consistent");
+      return;
+    }
+    // Reclaiming the disk a finished session's files cost. Nothing does this on its own: a session
+    // that went idle can be prompted again, and the bundles are what its next turn restores from,
+    // so only somebody who knows the session is done can say so. The transcript is left alone.
+    case "forget": {
+      const sessionId = rest.find((a) => !a.startsWith("--"));
+      if (!sessionId) throw new Error("forget wants a session id");
+      const { client, connection } = await connect();
+      // Only a session nothing is driving, and only when that is known rather than assumed: a
+      // worker that cannot be reached is not a finished session, and dropping the bundles of a
+      // running one takes the project out from under its next step.
+      const reached = await turnStateOf(client, sessionId).finally(() => connection.close());
+      if (reached.kind !== "gone") {
+        throw new Error(
+          reached.kind === "state"
+            ? `${sessionId} is still running; stop it first`
+            : `cannot tell whether ${sessionId} is running; not touching its files`,
+        );
+      }
+      await worktree.forget(sessionFileFor(fromEnv().sessionDir, sessionId));
+      say(`dropped what ${sessionId} kept for its project files`);
+      say("  the transcript is untouched; a new turn would start from an empty project");
+      return;
+    }
+    case "release-tree": {
+      // The directory a stranded tool left refused. Nothing here can tell whether that tool is
+      // still running, which is the whole reason the refusal is persistent, so this says what it
+      // is forgetting and leaves the judgement with whoever ran it.
+      const dir = rest.find((a) => !a.startsWith("--"));
+      if (!dir) throw new Error("release-tree wants a project directory");
+      const forgotten = await worktree.clearWriters(resolve(dir));
+      if (forgotten === 0) {
+        say(`${dir} was not refused; nothing to clear`);
+        return;
+      }
+      say(`cleared ${forgotten} unaccounted writer(s) on ${dir}`);
+      say("  stop anything still running in it first: this only forgets that they were there");
+      return;
+    }
     default:
       say("usage: pi-temporal <start|running|watch|stop> [args]");
       say('  start "<task>" [--session=<id>]   hand a task to a worker and return');
       say("  running                          what this deployment is running");
       say("  watch <sessionId>                follow one until its turn ends");
       say("  stop <sessionId>                 interrupt the turn in flight");
+      say("  forget <sessionId>               drop the project files a finished session kept");
+      say("  doctor                           what this deployment resolved, and what is wrong");
     say('  schedule "<task>" --every=1h     run it on a schedule, with no client at all');
     say("  unschedule <scheduleId>          stop that schedule");
       process.exitCode = command ? 1 : 0;
