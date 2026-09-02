@@ -84,6 +84,10 @@ export interface SessionTurnOptions {
   // What a run that rolled over was still holding. The queue is the whole of the control state, so
   // handing it to the next run is what makes the rollover invisible to a client.
   readonly queued?: readonly PromptInput[];
+  // What the last turn came to, carried across a rollover. A client polling `turnState` for its own
+  // prompt (the extension's `/background` does) otherwise never sees the answer: the new run starts
+  // with nothing finished, and the watcher gives up when the session retires.
+  readonly finished?: TurnState["finished"];
   // Roll over at this many history events, on top of the server's own suggestion. The suggestion is
   // what production runs on; this is for an operator who wants a tighter bound, and it is what
   // makes the rollover reachable in a check.

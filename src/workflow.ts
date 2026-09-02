@@ -58,7 +58,13 @@ const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 // keep a run open waiting for it, and the next prompt works whether or not this succeeded.
 const { retireSession } = proxyActivities<{
   retireSession(input: { sessionFile: string }): Promise<void>;
-}>({ startToCloseTimeout: "1 minute", retry: { maximumAttempts: 3 } });
+}>({
+  startToCloseTimeout: "1 minute",
+  // A total cap as well: a queue nobody is polling must not hold the run open, since anything
+  // queued behind this is waiting on it.
+  scheduleToCloseTimeout: "5 minutes",
+  retry: { maximumAttempts: 3 },
+});
 
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
@@ -95,7 +101,7 @@ export async function piSession(
   ];
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
-  let finished: TurnState["finished"];
+  let finished: TurnState["finished"] = options?.finished;
 
   setHandler(submitPrompt, (p) => {
     queue.push(p);
@@ -115,6 +121,12 @@ export async function piSession(
       await retireSession({ sessionFile: file }).catch((err) =>
         log.warn("could not retire the session's directory", { sessionId: id, err: String(err) }),
       );
+      // Look again. Awaiting an activity here is what makes this necessary: the server used to
+      // protect the old shape, because a signal landing while the same workflow task was in flight
+      // failed its completion and replayed it with the signal in history. An await splits that into
+      // two tasks, so a prompt accepted during the retirement would be pushed onto a queue nothing
+      // reads again, and `start` would have told the caller it was accepted.
+      if (queue.length > 0) continue;
       return;
     }
 
@@ -135,6 +147,7 @@ export async function piSession(
         // repeating it on every rollover would ask for the same work again.
         initialPrompt: undefined,
         queued: queue,
+        finished,
       });
     }
 

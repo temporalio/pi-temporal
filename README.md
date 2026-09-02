@@ -364,6 +364,7 @@ Helpers are at the repo root, none of which needs a model key:
   proves is a session surviving the process holding it, which does not show up inside one process.
 - `worktree-check.mts` needs neither a server nor a key. It covers moving the project between hosts,
   with the hosts faked as separate data directories over one shared session directory.
+- `stall-check.mts` needs neither a server nor a key, and takes about 70 seconds: it stops a holder's event loop past the lock's stale window and asks what the holder believes when it comes back.
 - `rollover-check.mts` needs a server, no key. It drives a session past a small `maxHistory` and holds the two things a rollover must not break: the run really does change, and every prompt it accepted is still answered afterwards.
 - `pending-check.mts` needs neither a server nor a key. It covers the files a step keeps about its calls, which is what "a call that already started is not silently repeated" rests on: a fresh call looks fresh, scratch never reads as a result, and a sweep drops what the transcript answers and keeps what it does not.
 

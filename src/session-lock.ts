@@ -94,8 +94,14 @@ export async function withSessionLock<T>(
   }
 
   // Set the moment the refresher finds the lock is somebody else's, and never unset: a lock taken
-  // away does not come back. This is what a writer that cannot await asks.
+  // away does not come back.
   let lost = false;
+  // When this process last saw the lock file say the lock was ours. The flag above is not enough on
+  // its own: it is set from inside a timer callback, and a process whose event loop stops does not
+  // run timers, so a holder that was paused past STALE_MS and reclaimed comes back to a flag that
+  // still says "mine". A clock read needs no event loop and no I/O, so it is the one thing a
+  // synchronous caller can trust after a pause.
+  let lastConfirmed = Date.now();
 
   // Stops as soon as the lock is not ours. A holder reclaimed while it was blocked would
   // otherwise keep the next holder's lock alive long after that one died.
@@ -119,6 +125,7 @@ export async function withSessionLock<T>(
         clearInterval(refresh);
         return;
       }
+      lastConfirmed = Date.now();
       const now = new Date();
       await utimes(path, now, now).catch(() => {});
     })();
@@ -137,10 +144,12 @@ export async function withSessionLock<T>(
   };
 
   // For a writer that cannot await. Pi's append path is synchronous all the way down, so the one
-  // place that is always immediately before a write cannot read the lock file. This answers from
-  // the refresher's last tick, so it is up to REFRESH_MS behind, which is still the difference
-  // between checking before a model call and checking at the write that ends it.
-  const ownedNow = () => !lost;
+  // place that is always immediately before a write cannot read the lock file.
+  //
+  // Two questions, both answered without I/O: has the refresher seen the lock taken, and has this
+  // process been away long enough for it to have been. The second is what covers a stall, which is
+  // the only way a live holder loses a lock it is still refreshing.
+  const ownedNow = () => !lost && Date.now() - lastConfirmed < STALE_MS;
 
   try {
     return await body(owned, ownedNow);
