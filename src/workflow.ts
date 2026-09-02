@@ -12,6 +12,7 @@ import {
   setHandler,
   workflowInfo,
   condition,
+  continueAsNew,
   CancellationScope,
   isCancellation,
   log,
@@ -87,7 +88,11 @@ export async function piSession(
     : runStep;
   // Seeded from the input, which is what lets a turn start with no client: the task is already in
   // the workflow when it begins, rather than arriving as a signal from something still running.
-  const queue: PromptInput[] = options?.initialPrompt ? [options.initialPrompt] : [];
+  // `queued` is the other source, from a run that rolled over with work still in hand.
+  const queue: PromptInput[] = [
+    ...(options?.initialPrompt ? [options.initialPrompt] : []),
+    ...(options?.queued ?? []),
+  ];
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
   let finished: TurnState["finished"];
@@ -111,6 +116,26 @@ export async function piSession(
         log.warn("could not retire the session's directory", { sessionId: id, err: String(err) }),
       );
       return;
+    }
+
+    // Nothing is in flight at this point, which is the only place a rollover is safe: the queue is
+    // the whole of the control state, and a turn that is mid-step cannot be handed to a new run.
+    // Without this, history grows for the life of the run and the server terminates it mid-turn.
+    // A stepped step is a handful of events per tool, so a busy session reaches the limit in hours.
+    const info = workflowInfo();
+    if (info.continueAsNewSuggested || info.historyLength >= (options?.maxHistory ?? Infinity)) {
+      log.info("rolling the session over", {
+        sessionId: id,
+        queued: queue.length,
+        historyLength: info.historyLength,
+      });
+      await continueAsNew<typeof piSession>(id, file, {
+        ...options,
+        // Carried as the queue, not as the initial prompt: that one is a schedule's task, and
+        // repeating it on every rollover would ask for the same work again.
+        initialPrompt: undefined,
+        queued: queue,
+      });
     }
 
     const prompt = queue.shift()!;

@@ -16,7 +16,7 @@ import { connect, interrupt, submitPrompt } from "./client.js";
 import { fromEnv, sessionFileFor } from "./config.js";
 import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
-import { ScheduleOverlapPolicy } from "@temporalio/client";
+import { QueryRejectedError, ScheduleOverlapPolicy } from "@temporalio/client";
 import type { TurnState } from "./protocol.js";
 import { textOf } from "./messages.js";
 
@@ -54,6 +54,9 @@ async function turnStateOf(
     );
     return { kind: "state", state };
   } catch (err) {
+    // The query was refused because the run is closed, which includes a run the server terminated
+    // for outgrowing its history. That is a finished session, not an unreachable one.
+    if (err instanceof QueryRejectedError) return { kind: "gone" };
     const message = String((err as Error)?.message ?? err);
     // A workflow that is not there, or already closed, is a session that has finished. Anything
     // else (a deadline, a worker that cannot answer) must not read as "finished".

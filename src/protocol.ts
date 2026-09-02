@@ -81,6 +81,13 @@ export interface SessionTurnOptions {
   // Where to keep the session log when the id is derived rather than given. A scheduled start has
   // no client to choose either, and the workflow may not read the environment.
   readonly sessionDir?: string;
+  // What a run that rolled over was still holding. The queue is the whole of the control state, so
+  // handing it to the next run is what makes the rollover invisible to a client.
+  readonly queued?: readonly PromptInput[];
+  // Roll over at this many history events, on top of the server's own suggestion. The suggestion is
+  // what production runs on; this is for an operator who wants a tighter bound, and it is what
+  // makes the rollover reachable in a check.
+  readonly maxHistory?: number;
 }
 
 // A call the model asked for, recorded but not run. The arguments stay in the transcript: the
