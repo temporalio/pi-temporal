@@ -35,6 +35,7 @@ import type {
 } from "../src/protocol.js";
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
+import * as worktree from "../src/worktree.js";
 
 const STATUS_KEY = "pi-temporal";
 const POLL_MS = 2000;
@@ -50,6 +51,7 @@ interface Env {
   readonly durableTurns: boolean;
   readonly provider?: string;
   readonly modelHint?: string;
+  readonly shipTree: boolean;
 }
 
 // Read here rather than importing src/config.ts: that one is the worker's, and an extension has
@@ -61,6 +63,7 @@ const env = (): Env => ({
   sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
   idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
   stepped: process.env.PI_TEMPORAL_STEPPED === "1",
+  shipTree: process.env.PI_TEMPORAL_SHIP_TREE === "1",
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
   durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS !== "0",
   provider: process.env.PI_TEMPORAL_PROVIDER,
@@ -280,6 +283,15 @@ export default function (pi: ExtensionAPI) {
 
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);
+        // The project goes with the task, from the directory you asked from. Nothing on the worker
+        // side may establish it: a tool call and a model call both land on whichever worker is
+        // free, so an activity that adopts its own directory puts the project wherever Temporal
+        // happened to send the first unit of work.
+        if (cfg.shipTree) {
+          await worktree.capture(ctx.cwd, `${cfg.sessionDir}/${task.sessionId}.jsonl`, {
+            seed: true,
+          });
+        }
         const { client } = await connect();
         await client.workflow.signalWithStart(WORKFLOW_TYPE, {
           taskQueue: cfg.taskQueue,

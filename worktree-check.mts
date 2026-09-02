@@ -27,6 +27,16 @@ const read = (path: string) => readFile(path, "utf8").catch(() => "");
 // The note a host keeps about what it holds. Its path is hashed from the project directory, so it
 // is found rather than constructed: there is one tree directory per project on a host, and one
 // note per session in it.
+async function heldNotePath(root: string, host: string): Promise<string | undefined> {
+  const trees = join(root, host, "data", "trees");
+  for (const dir of await readdir(trees).catch(() => [] as string[])) {
+    const names = await readdir(join(trees, dir)).catch(() => [] as string[]);
+    const note = names.find((n) => n.startsWith("held-"));
+    if (note) return join(trees, dir, note);
+  }
+  return undefined;
+}
+
 async function heldNote(root: string, host: string): Promise<{ seq?: number } | undefined> {
   const trees = join(root, host, "data", "trees");
   for (const dir of await readdir(trees).catch(() => [] as string[])) {
@@ -132,6 +142,28 @@ async function main() {
   const held = await read(join(projectB, "note.txt"));
   check("and nothing the other host shipped is reverted", held === "three\n", held);
 
+  // A writer that died between renaming its bundle into place and naming it as the tip leaves a
+  // bundle nothing points at. Every host afterwards computes that same number, so refusing it wedges
+  // the session everywhere rather than on the one host that crashed.
+  const orphaned = join(shared, "s6.jsonl");
+  const projectF = join(root, "f", "project");
+  await mkdir(projectF, { recursive: true });
+  asHost(root, "f");
+  await writeFile(join(projectF, "one.txt"), "first\n");
+  await worktree.capture(projectF, orphaned, { seed: true });
+  const tipBefore = await read(join(`${orphaned}.tree`, "tip.json"));
+  const notePath = (await heldNotePath(root, "f"))!;
+  const noteBefore = await read(notePath);
+  await writeFile(join(projectF, "two.txt"), "second\n");
+  await worktree.capture(projectF, orphaned);
+  // Roll both back, which is what a crash after the bundle rename and before either write leaves:
+  // the bundle is on disk and nothing names it.
+  await writeFile(join(`${orphaned}.tree`, "tip.json"), tipBefore);
+  await writeFile(notePath, noteBefore);
+  await writeFile(join(projectF, "three.txt"), "third\n");
+  const carriedOn = await worktree.capture(projectF, orphaned).then(() => true, () => false);
+  check("a bundle nothing names does not wedge the session", carriedOn);
+
   // Who may establish the project. A tool call lands on whichever worker is free, so a capture from
   // one must not be what decides: an empty directory on that host would become the project on every
   // host, and the host actually holding the files is then refused forever.
@@ -145,6 +177,11 @@ async function main() {
   await worktree.capture(projectD, fresh);
   const seeded = await readdir(`${fresh}.tree`).catch(() => [] as string[]);
   check("a tool call cannot establish the project", seeded.length === 0, seeded);
+  // And nothing else on a worker can either. A model call lands on whichever worker is free too, so
+  // letting that one adopt its directory only moved the race rather than closing it. With nothing
+  // shipped, every activity refuses until a client sends the project.
+  const unestablished = await worktree.ensure(projectD, fresh).then(() => false, () => true);
+  check("and no activity runs before a client sends it", unestablished);
   asHost(root, "e");
   await worktree.capture(projectE, fresh, { seed: true });
   asHost(root, "d");

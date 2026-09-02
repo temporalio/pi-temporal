@@ -15,10 +15,11 @@
 // that work is set aside under `salvage/` rather than reverted. And it never lets two sessions
 // share one directory, which means one project directory serves one session at a time.
 //
-// Who may move the tip is the rule the rest follows from. Only a host standing on it may add to
-// it, and only the client or a model call may establish it when nothing has shipped yet. A tool
-// call is dispatched to whichever worker is free, so letting one of those do either job puts the
-// project wherever Temporal happened to send the work.
+// Who may move the tip is the rule the rest follows from. Only a host standing on it may add to it,
+// and nothing running on a worker may establish it: every activity, the model call included, lands
+// on whichever worker Temporal had free, so an activity that adopts its own directory puts the
+// project wherever the first unit of work happened to go. The client sends it, before the session
+// starts, and a session with nothing established refuses every activity until it does.
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -197,11 +198,25 @@ async function publish(
   const seq = (tip?.seq ?? 0) + 1;
   const dir = shareDir(sessionFile);
   await mkdir(dir, { recursive: true });
-  // Somebody already took this number. Every writer holds the session lock, so this is the case
-  // where that lock did not hold rather than an ordinary race, and continuing would leave the tip
-  // naming a commit the surviving bundle does not carry.
+  // The number is taken. Two different things look like this, and only one of them is a conflict.
+  //
+  // A writer that got ahead of us is: refuse, because continuing would leave the tip naming a
+  // commit the surviving bundle does not carry. The tip says so.
+  //
+  // A writer that died between renaming its bundle into place and naming it as the tip is not. It
+  // leaves a bundle nothing points at, and every host afterwards computes this same number, finds
+  // it, and refuses. That wedges the session on every host for good: each refused capture then sets
+  // its work aside and no host ever sees another's writes again. Take the orphan out and carry on.
+  // Safe because the callers hold the session lock, so no live writer is inside that window.
   if ((await readdir(dir).catch(() => [] as string[])).includes(bundleName(seq))) {
-    throw new WrongTree(`not shipping ${projectDir}: bundle ${seq} is already there`);
+    const now = await readJson<Tip>(tipPath(sessionFile));
+    if ((now?.seq ?? 0) >= seq) {
+      throw new WrongTree(
+        `not shipping ${projectDir}: the session is already at bundle ${now?.seq ?? seq}`,
+      );
+    }
+    console.warn(`dropping bundle ${seq} for ${sessionFile}: nothing names it and the tip is behind it`);
+    await rm(join(dir, bundleName(seq)), { force: true });
   }
   // Written to a scratch name and renamed, so a host reading the directory never unbundles a file
   // that is still being written.
@@ -299,7 +314,15 @@ export async function ensure(projectDir: string, sessionFile: string): Promise<v
     if (await heldByOthers(projectDir, sessionFile)) {
       throw new WrongTree(`not restoring ${projectDir}: another session is working in it`);
     }
-    if (!tip) return;
+    // Nothing shipped, and nothing here may establish it. A tool call lands on whichever worker is
+    // free, and so does the model call: an activity that adopts its own directory puts the project
+    // wherever Temporal happened to send the first unit of work, which is how an empty `/project`
+    // became the project on every host. The client sends it, before the session starts.
+    if (!tip) {
+      throw new WrongTree(
+        `no project established for ${sessionFile}: send it with \`pi-temporal start --project=...\``,
+      );
+    }
 
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
     if (held?.tree === tip.tree) return;
@@ -380,6 +403,14 @@ export async function release(projectDir: string, sessionFile: string): Promise<
     return true;
   });
 }
+
+/**
+ * Whether this session already has a project. A client continuing a session must not send one
+ * again: the workers have moved the tip since it started, and what the client holds is the state
+ * the session began from, which a capture would then be refused for or, worse, revert to.
+ */
+export const established = async (sessionFile: string) =>
+  (await readJson<Tip>(tipPath(sessionFile))) !== undefined;
 
 /**
  * Keep what this host holds where it can be recovered, without touching the tip. For a caller that
