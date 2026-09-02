@@ -11,11 +11,17 @@
 // Three things this deliberately does not do. It never touches the project's own `.git`: the
 // shadow repository is host-local and points at the work tree from outside, so a project that is
 // not a git repository works the same as one that is, and one that is keeps its own history. It
-// never writes over work nothing has shipped, which covers both somebody's checkout and its own
-// edits that never made it out. And it never lets two sessions share one directory.
+// never writes over somebody's checkout, and never drops work a crash caught before it shipped:
+// that work is set aside under `salvage/` rather than reverted. And it never lets two sessions
+// share one directory, which means one project directory serves one session at a time.
+//
+// Who may move the tip is the rule the rest follows from. Only a host standing on it may add to
+// it, and only the client or a model call may establish it when nothing has shipped yet. A tool
+// call is dispatched to whichever worker is free, so letting one of those do either job puts the
+// project wherever Temporal happened to send the work.
 
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -85,11 +91,15 @@ async function readJson<T>(path: string): Promise<T | undefined> {
   }
 }
 
+// Random rather than the pid. Every container is pid 1, so two hosts writing the same name would
+// otherwise pick the same scratch file and each would rename the other's half-written one.
+const scratchToken = () => randomBytes(6).toString("hex");
+
 // Through a scratch name, because a reader that finds half a document cannot tell it from a
 // document that says something else.
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true });
-  const scratch = `${path}.${process.pid}.writing`;
+  const scratch = `${path}.${scratchToken()}.writing`;
   await writeFile(scratch, JSON.stringify(value), "utf8");
   await rename(scratch, path);
 }
@@ -173,7 +183,7 @@ async function publish(projectDir: string, sessionFile: string, tip: Tip | undef
   await mkdir(dir, { recursive: true });
   // Written to a scratch name and renamed, so a host reading the directory never unbundles a file
   // that is still being written.
-  const scratch = join(dir, `${bundleName(seq)}.${process.pid}.writing`);
+  const scratch = join(dir, `${bundleName(seq)}.${scratchToken()}.writing`);
   await git(projectDir, ["bundle", "create", scratch, ref, ...(tip ? ["--not", tip.commit] : [])]);
   await rename(scratch, join(dir, bundleName(seq)));
 
@@ -181,28 +191,61 @@ async function publish(projectDir: string, sessionFile: string, tip: Tip | undef
   await writeJson(heldPath(projectDir, sessionFile), { tree } satisfies Held);
 }
 
+// Work this host holds that the session never shipped, put where it can be recovered instead of
+// being reverted away. Kept out of the numbered sequence and out of the directory `ingest` reads,
+// so getting it back is a deliberate act and no other host pays to carry it.
+async function salvage(projectDir: string, sessionFile: string, tree: string) {
+  const dir = join(shareDir(sessionFile), "salvage");
+  await mkdir(dir, { recursive: true });
+  // A root commit rather than one on the tip: the bundle then carries the whole tree and stands on
+  // its own, which is what someone recovering it an hour later needs.
+  const commit = (
+    await git(projectDir, ["commit-tree", tree, "-m", `pi-temporal salvage ${tree.slice(0, 8)}`])
+  ).stdout.trim();
+  // Not a child path of the session's own ref: git cannot hold both `refs/x` and `refs/x/y`.
+  const ref = `${snapRef(sessionFile)}-salvage`;
+  await git(projectDir, ["update-ref", ref, commit]);
+
+  const name = `${tree.slice(0, 12)}.bundle`;
+  const scratch = join(dir, `${name}.${scratchToken()}.writing`);
+  await git(projectDir, ["bundle", "create", scratch, ref]);
+  await rename(scratch, join(dir, name));
+  console.warn(
+    `set aside ${projectDir} as ${join(dir, name)}: it held work this session never shipped, ` +
+      `and the session moved on without it. Recover with \`git bundle unbundle\`.`,
+  );
+}
+
 /**
  * Record the project's files against this session. Cheap when nothing changed: a tree id is
  * content-addressed, so an untouched directory produces the tree the tip already names.
  */
-export async function capture(projectDir: string, sessionFile: string): Promise<void> {
+export async function capture(
+  projectDir: string,
+  sessionFile: string,
+  // Whether this caller may establish the project when nothing has shipped yet. Off for everything
+  // except the client and the model call, because the first capture decides what the project *is*
+  // and a tool call is dispatched to whichever worker is free. Letting one do it meant an empty
+  // `/project` on the host that happened to draw the first tool became the project, on every host.
+  opts: { readonly seed?: boolean } = {},
+): Promise<void> {
   // One at a time per directory. Two captures share an index and a shadow repository, so a second
   // one collides on `index.lock`, and that failure reads as a session that stopped shipping.
   await withSessionLock(treeLockPath(projectDir), async () => {
     const tip = await readJson<Tip>(tipPath(sessionFile));
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
 
-    // Nothing shipped yet is how a project enters the system: whatever is here is the starting
-    // point. After that, only a host standing on the tip may add to it. Committing from a host
-    // that never caught up publishes its older files as the newer tree, and every other host then
-    // resets to them, which loses the work they were shipped to carry.
-    // Two sessions in one directory would edit and reset each other's files. The first capture is
-    // how a project enters the system, so it takes whatever is here, but only if nothing else is
-    // already working in it.
-    if (!tip && (await heldByOthers(projectDir, sessionFile))) {
-      throw new WrongTree(`not shipping ${projectDir}: another session is working in it`);
-    }
-    if (tip && held?.tree !== tip.tree) {
+    if (!tip) {
+      // Nothing shipped yet. Whatever is here is the starting point, but only from a caller that
+      // is entitled to say so, and only if nothing else is already working in this directory.
+      if (!opts.seed) return;
+      if (await heldByOthers(projectDir, sessionFile)) {
+        throw new WrongTree(`not shipping ${projectDir}: another session is working in it`);
+      }
+    } else if (held?.tree !== tip.tree) {
+      // Only a host standing on the tip may add to it. Committing from a host that never caught up
+      // publishes its older files as the newer tree, and every other host then resets to them,
+      // which loses the work they were shipped to carry.
       throw new WrongTree(
         `not shipping ${projectDir}: this host holds ${held?.tree.slice(0, 8) ?? "nothing"}, ` +
           `and the session is at ${tip.tree.slice(0, 8)}`,
@@ -222,10 +265,18 @@ export async function capture(projectDir: string, sessionFile: string): Promise<
  * describe somebody else's files as the project.
  */
 export async function ensure(projectDir: string, sessionFile: string): Promise<void> {
-  const tip = await readJson<Tip>(tipPath(sessionFile));
-  if (!tip) return;
-
   await withSessionLock(treeLockPath(projectDir), async () => {
+    // Read inside the lock. A capture on this host between the read and the lock would leave this
+    // deciding against a tip that has already moved, and resetting the directory to the older tree.
+    const tip = await readJson<Tip>(tipPath(sessionFile));
+
+    // Before the tip check, not after it. A session with nothing shipped yet used to return here,
+    // so its tools ran in a directory another session was working in and edited its files.
+    if (await heldByOthers(projectDir, sessionFile)) {
+      throw new WrongTree(`not restoring ${projectDir}: another session is working in it`);
+    }
+    if (!tip) return;
+
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
     if (held?.tree === tip.tree) return;
 
@@ -239,17 +290,13 @@ export async function ensure(projectDir: string, sessionFile: string): Promise<v
         );
       }
     } else {
-      // This session's own directory, but not what it last shipped. A tool wrote and the worker
-      // died before the result got out. Ship it before moving, because those files are real work
-      // and a reset would drop them with nothing recording that it happened.
+      // Behind the tip, and holding files this session never shipped: a tool wrote and the worker
+      // died before the result got out. Both are real work and they cannot both stay. Publishing
+      // this tree is the tempting answer and the wrong one, because the tip is what every other
+      // host has already agreed on, so moving it here reverts everything shipped since `held` on
+      // all of them. The odd one out is set aside instead, and the directory comes to the tip.
       const here = await treeHere(projectDir);
-      if (here !== held.tree) {
-        // The tip's objects first: the commit about to be written names it as its parent, and this
-        // host has not necessarily seen it.
-        await ingest(projectDir, sessionFile);
-        await publish(projectDir, sessionFile, tip, here);
-        return;
-      }
+      if (here !== held.tree) await salvage(projectDir, sessionFile, here);
     }
 
     await mkdir(projectDir, { recursive: true });

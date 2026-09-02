@@ -13,7 +13,8 @@
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { connect, interrupt, submitPrompt } from "./client.js";
-import { sessionFileFor } from "./config.js";
+import { fromEnv, sessionFileFor } from "./config.js";
+import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
 import { ScheduleOverlapPolicy, WorkflowNotFoundError } from "@temporalio/client";
 import type { TurnState } from "./protocol.js";
@@ -68,10 +69,24 @@ function flag(args: string[], name: string): string | undefined {
     .join("=");
 }
 
+// Hand the project over with the task. A no-op unless the tree travels, because with the tree off
+// every worker runs in the directory it was pointed at and there is nothing to send.
+async function seedProject(sessionId: string, projectFlag: string | undefined) {
+  const cfg = fromEnv();
+  if (!cfg.shipTree) return;
+  const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR ?? process.cwd();
+  await worktree.capture(projectDir, sessionFileFor(cfg.sessionDir, sessionId), { seed: true });
+  say(`  sent the project from ${projectDir}`);
+}
+
 async function start(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
   const sessionId = flag(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
+  // Before the prompt, so the project is established from the directory the person running this
+  // meant. Left to the workers it is established by whichever one draws the first activity, and
+  // that is right only when that worker happens to be the one holding the files.
+  await seedProject(sessionId, flag(args, "project"));
   // signal-with-start, so this both creates the session and hands it the prompt. Nothing waits for
   // the turn: whichever worker is polling the queue runs it.
   await submitPrompt(sessionId, text);

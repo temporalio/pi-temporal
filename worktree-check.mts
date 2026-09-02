@@ -37,7 +37,7 @@ async function main() {
   await writeFile(join(projectA, "note.txt"), "one\n");
   await mkdir(join(projectA, "sub"), { recursive: true });
   await writeFile(join(projectA, "sub", "deep.txt"), "deep\n");
-  await worktree.capture(projectA, sessionFile);
+  await worktree.capture(projectA, sessionFile, { seed: true });
   const shipped = await readdir(`${sessionFile}.tree`);
   check("a capture ships a bundle", shipped.some((n) => n.endsWith(".bundle")), shipped);
 
@@ -79,10 +79,15 @@ async function main() {
   asHost(root, "a");
   const other = join(root, "sessions", "s2.jsonl");
   const mine = await read(join(projectA, "note.txt"));
-  const refusedCapture = await worktree.capture(projectA, other).then(() => false, () => true);
+  const refusedCapture = await worktree
+    .capture(projectA, other, { seed: true })
+    .then(() => false, () => true);
+  // Both directions, and both asserted. The restore returned before this check when the session had
+  // shipped nothing, so a second session's tools ran in the first one's directory and edited its
+  // files. The old shape computed this and then left it out of the assertion.
   const refusedEnsure = await worktree.ensure(projectA, other).then(() => false, () => true);
   const untouched = (await read(join(projectA, "note.txt"))) === mine;
-  check("another session cannot adopt a directory", refusedCapture && untouched, {
+  check("another session cannot adopt a directory", refusedCapture && refusedEnsure && untouched, {
     refusedCapture,
     refusedEnsure,
     untouched,
@@ -94,17 +99,44 @@ async function main() {
   await writeFile(join(projectB, "note.txt"), "three\n");
   await worktree.capture(projectB, sessionFile);
 
-  // A tool wrote and the worker died before the result got out. Those files are real work, so the
-  // move ships them rather than resetting over them.
+  // A tool wrote and the worker died before the result got out, and the session moved on without
+  // it. Both are real work and they cannot both stay. The tip is what every other host has agreed
+  // on, so the odd one out is set aside and this host comes to the tip.
   asHost(root, "a");
   await writeFile(join(projectA, "unshipped.txt"), "not yours\n");
   await worktree.ensure(projectA, sessionFile);
-  const kept = await read(join(projectA, "unshipped.txt"));
-  check("work a crash left behind is shipped, not dropped", kept === "not yours\n", kept);
+  const moved = await read(join(projectA, "note.txt"));
+  check("a host behind the tip is brought to it", moved === "three\n", moved);
+  const salvaged = await readdir(join(`${sessionFile}.tree`, "salvage")).catch(() => [] as string[]);
+  check("work a crash left behind is kept, not dropped", salvaged.some((n) => n.endsWith(".bundle")), salvaged);
+
+  // The assertion the old shape did not make. That interleaving is a lost update, and reading only
+  // the file that survives it leaves this green while everything shipped since reverts one line
+  // away. It read `unshipped.txt` on both hosts and never re-read `note.txt`.
   asHost(root, "b");
   await worktree.ensure(projectB, sessionFile);
-  const reached = await read(join(projectB, "unshipped.txt"));
-  check("and the other host then gets it", reached === "not yours\n", reached);
+  const held = await read(join(projectB, "note.txt"));
+  check("and nothing the other host shipped is reverted", held === "three\n", held);
+
+  // Who may establish the project. A tool call lands on whichever worker is free, so a capture from
+  // one must not be what decides: an empty directory on that host would become the project on every
+  // host, and the host actually holding the files is then refused forever.
+  const fresh = join(shared, "s3.jsonl");
+  const projectD = join(root, "d", "project");
+  const projectE = join(root, "e", "project");
+  await mkdir(projectD, { recursive: true });
+  await mkdir(projectE, { recursive: true });
+  await writeFile(join(projectE, "real.txt"), "the project\n");
+  asHost(root, "d");
+  await worktree.capture(projectD, fresh);
+  const seeded = await readdir(`${fresh}.tree`).catch(() => [] as string[]);
+  check("a tool call cannot establish the project", seeded.length === 0, seeded);
+  asHost(root, "e");
+  await worktree.capture(projectE, fresh, { seed: true });
+  asHost(root, "d");
+  await worktree.ensure(projectD, fresh);
+  const real = await read(join(projectD, "real.txt"));
+  check("the host holding the files defines it", real === "the project\n", real);
 
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
@@ -113,7 +145,9 @@ async function main() {
 
   // And hands the directory back. Otherwise a worker with one project directory serves exactly one
   // session for as long as it lives, which is not a fleet.
-  const taken = await worktree.capture(projectA, other).then(() => true, () => false);
+  const taken = await worktree
+    .capture(projectA, other, { seed: true })
+    .then(() => true, () => false);
   check("a finished session releases its directory", taken);
 
   console.log(failures.length === 0 ? "\nworktree-check: OK" : `\nworktree-check: ${failures.length} failed`);
