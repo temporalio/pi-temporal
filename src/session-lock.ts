@@ -20,6 +20,10 @@ import { dirname } from "node:path";
 // next one reclaims. That is what `owned()` is for. Whoever is about to write asks whether the
 // lock is still theirs, which narrows the hole from the whole body to the gap between that
 // question and the write.
+//
+// `ownedNow()` is the same question for a writer that cannot await one. Pi's append path is
+// synchronous all the way down, and the write a model call ends with lands at the end of a stream
+// that runs for minutes, so an awaited check before the call is not a check on that write at all.
 const STALE_MS = 60_000;
 const REFRESH_MS = 3_000;
 const RETRY_MS = 250;
@@ -56,11 +60,12 @@ async function taken(path: string, token: string): Promise<boolean> {
  * Run `body` as the only writer of this session file. Throws if the lock cannot be taken in time,
  * which is a retryable condition: the holder is another attempt that is still working.
  *
- * `body` is handed an `owned()` it should call immediately before it writes. See STALE_MS.
+ * `body` is handed an `owned()` it should call immediately before it writes, and an `ownedNow()`
+ * for a writer that cannot await one. See STALE_MS.
  */
 export async function withSessionLock<T>(
   sessionFile: string,
-  body: (owned: () => Promise<boolean>) => Promise<T>,
+  body: (owned: () => Promise<boolean>, ownedNow: () => boolean) => Promise<T>,
   waitMs = 60_000,
 ): Promise<T> {
   const path = lockPath(sessionFile);
@@ -88,6 +93,10 @@ export async function withSessionLock<T>(
     }
   }
 
+  // Set the moment the refresher finds the lock is somebody else's, and never unset: a lock taken
+  // away does not come back. This is what a writer that cannot await asks.
+  let lost = false;
+
   // Stops as soon as the lock is not ours. A holder reclaimed while it was blocked would
   // otherwise keep the next holder's lock alive long after that one died.
   const refresh = setInterval(() => {
@@ -99,10 +108,14 @@ export async function withSessionLock<T>(
         // Gone means reclaimed. Anything else is one read that failed, and the shared storage this
         // exists for is exactly where that happens. Stopping on it would let the lock age out from
         // under a holder that is still writing.
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") clearInterval(refresh);
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          lost = true;
+          clearInterval(refresh);
+        }
         return;
       }
       if (owner.token !== token) {
+        lost = true;
         clearInterval(refresh);
         return;
       }
@@ -123,8 +136,14 @@ export async function withSessionLock<T>(
     }
   };
 
+  // For a writer that cannot await. Pi's append path is synchronous all the way down, so the one
+  // place that is always immediately before a write cannot read the lock file. This answers from
+  // the refresher's last tick, so it is up to REFRESH_MS behind, which is still the difference
+  // between checking before a model call and checking at the write that ends it.
+  const ownedNow = () => !lost;
+
   try {
-    return await body(owned);
+    return await body(owned, ownedNow);
   } finally {
     clearInterval(refresh);
     // Only our own. A lock reclaimed as stale belongs to whoever took it next.
