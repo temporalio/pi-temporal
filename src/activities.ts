@@ -144,10 +144,15 @@ export function makeActivities(opts: ActivityOptions) {
 
   const shipTree = async (sessionFile: string) => {
     if (!opts.shipTree) return;
-    // A capture that fails must not fail the step. The work is done and recorded; what is lost is
-    // that the next host has to start from the previous capture.
-    await worktree.capture(opts.projectDir, sessionFile).catch((err) => {
-      console.warn(`could not ship the project tree: ${String(err)}`);
+    // A capture that fails must not fail the step: the tool has already run and its result is
+    // recorded, and a retry finds that result rather than running it again, so throwing here costs
+    // an attempt and still ships nothing. What it must not do is lose the work. The files are the
+    // only record of what the tool did, so they are kept where they can be recovered.
+    await worktree.capture(opts.projectDir, sessionFile).catch(async (err) => {
+      console.error(`could not ship the project tree: ${String(err)}`);
+      await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
+        console.error(`and could not set it aside either: ${String(keepErr)}`);
+      });
     });
   };
 
@@ -294,7 +299,11 @@ export function makeActivities(opts: ActivityOptions) {
       // A tool call is its own dispatch, so it can land on a worker that ran neither the model
       // call nor any sibling tool. Without this it runs against whatever files that host happens
       // to have, and reports the answer as if it were the project's.
-      await bringTree(input.sessionFile);
+      //
+      // Under the session lock, because the tip and the bundles live beside the session file and
+      // the tree's own lock is host-local. Two hosts publishing at once is the case that has to be
+      // excluded, and only the shared lock excludes it.
+      await withSessionLock(input.sessionFile, () => bringTree(input.sessionFile));
       // Opening a session can append to it (a first thinking-level entry), and two of these run at
       // once. The lock covers the open and is given back before the tool runs, which is the part
       // that has to stay parallel.
@@ -338,8 +347,8 @@ export function makeActivities(opts: ActivityOptions) {
         await pending.keepResult(input.sessionFile, input.step, input.call.id, outcome);
         // Shipped from here, because this host ran the tool and is the only one holding what it
         // did. The seal can land anywhere, and capturing there would ship a directory that never
-        // saw this tool.
-        await shipTree(input.sessionFile);
+        // saw this tool. Under the shared lock, for the reason the restore above is.
+        await withSessionLock(input.sessionFile, () => shipTree(input.sessionFile));
         return { outcome: "settled" };
       } finally {
         session.dispose();
@@ -396,7 +405,19 @@ export function makeActivities(opts: ActivityOptions) {
     }
   }
 
-  return { runStep, runModelCall, runToolCall, sealStep };
+  /** Give the project directory back when the session stops being driven. Without a caller for
+   * this, a worker with one `PI_PROJECT_DIR` serves one session for as long as it lives and every
+   * later one is refused. */
+  async function retireSession(input: { readonly sessionFile: string }): Promise<void> {
+    if (!opts.shipTree) return;
+    const freed = await worktree.release(opts.projectDir, input.sessionFile).catch((err) => {
+      console.warn(`could not hand back ${opts.projectDir}: ${String(err)}`);
+      return false;
+    });
+    if (freed) console.log(`handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
+  }
+
+  return { runStep, runModelCall, runToolCall, sealStep, retireSession };
 }
 
 export type Activities = ReturnType<typeof makeActivities>;

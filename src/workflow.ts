@@ -68,6 +68,12 @@ function toolCallActivities(timeoutMinutes: number) {
 // that is itself a model call over the whole context. So it keeps the step-sized backstop.
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
+// Retiring is housekeeping, so it gets a short leash: a session that has already stopped must not
+// keep a run open waiting for it, and the next prompt works whether or not this succeeded.
+const { retireSession } = proxyActivities<{
+  retireSession(input: { sessionFile: string }): Promise<void>;
+}>({ startToCloseTimeout: "1 minute", retry: { maximumAttempts: 3 } });
+
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
 export const turnState = defineQuery<TurnState>(QUERIES.turnState);
@@ -125,7 +131,16 @@ export async function piSession(
 
   for (;;) {
     const woke = await condition(() => queue.length > 0, idleTimeout);
-    if (!woke && queue.length === 0) return; // idle: retire; the next prompt starts a fresh run
+    if (!woke && queue.length === 0) {
+      // Idle: retire, and the next prompt starts a fresh run. Hand the project directory back on
+      // the way out, so a worker is not still holding it for a session nobody is driving. Best
+      // effort: it frees the host that runs this, and a host that served the session earlier and
+      // does not draw this activity keeps its own directory until it serves this session again.
+      await retireSession({ sessionFile: file }).catch((err) =>
+        log.warn("could not retire the session's directory", { sessionId: id, err: String(err) }),
+      );
+      return;
+    }
 
     const prompt = queue.shift()!;
     let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
