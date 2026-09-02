@@ -42,6 +42,10 @@ const snapRef = (sessionFile: string) =>
 // the first one's files as its own and reset over them.
 interface Held {
   readonly tree: string;
+  // The highest bundle this host has taken in. Without it every restore unbundles the whole
+  // sequence again, which is one git subprocess per bundle per activity and gets slower for the
+  // life of the session.
+  readonly seq?: number;
 }
 
 // What the shared directory says the newest state is. `seq` orders the bundles, because a host has
@@ -154,12 +158,13 @@ async function treeHere(projectDir: string) {
   return (await git(projectDir, ["write-tree"])).stdout.trim();
 }
 
-// Every bundle this session has shipped, in order, because each one after the first names the
+// The bundles this host has not taken in yet, in order, because each one after the first names the
 // previous commit as a prerequisite. Already having one is not an error worth stopping for.
-async function ingest(projectDir: string, sessionFile: string) {
+async function ingest(projectDir: string, sessionFile: string, from = 0) {
   await ensureShadow(projectDir);
   const names = (await readdir(shareDir(sessionFile)).catch(() => []))
     .filter((name) => name.endsWith(".bundle"))
+    .filter((name) => Number.parseInt(name, 10) > from)
     .sort();
   for (const name of names) {
     await git(projectDir, ["bundle", "unbundle", join(shareDir(sessionFile), name)]).catch(
@@ -181,6 +186,12 @@ async function publish(projectDir: string, sessionFile: string, tip: Tip | undef
   const seq = (tip?.seq ?? 0) + 1;
   const dir = shareDir(sessionFile);
   await mkdir(dir, { recursive: true });
+  // Somebody already took this number. Every writer holds the session lock, so this is the case
+  // where that lock did not hold rather than an ordinary race, and continuing would leave the tip
+  // naming a commit the surviving bundle does not carry.
+  if ((await readdir(dir).catch(() => [] as string[])).includes(bundleName(seq))) {
+    throw new WrongTree(`not shipping ${projectDir}: bundle ${seq} is already there`);
+  }
   // Written to a scratch name and renamed, so a host reading the directory never unbundles a file
   // that is still being written.
   const scratch = join(dir, `${bundleName(seq)}.${scratchToken()}.writing`);
@@ -188,7 +199,7 @@ async function publish(projectDir: string, sessionFile: string, tip: Tip | undef
   await rename(scratch, join(dir, bundleName(seq)));
 
   await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
-  await writeJson(heldPath(projectDir, sessionFile), { tree } satisfies Held);
+  await writeJson(heldPath(projectDir, sessionFile), { tree, seq } satisfies Held);
 }
 
 // Work this host holds that the session never shipped, put where it can be recovered instead of
@@ -254,7 +265,7 @@ export async function capture(
 
     const tree = await treeHere(projectDir);
     if (tip?.tree === tree) return;
-    if (tip) await ingest(projectDir, sessionFile);
+    if (tip) await ingest(projectDir, sessionFile, held?.seq ?? 0);
     await publish(projectDir, sessionFile, tip, tree);
   });
 }
@@ -300,12 +311,55 @@ export async function ensure(projectDir: string, sessionFile: string): Promise<v
     }
 
     await mkdir(projectDir, { recursive: true });
-    await ingest(projectDir, sessionFile);
+    await ingest(projectDir, sessionFile, held?.seq ?? 0);
 
     // `-u --reset` is what makes this a move rather than a merge: a file the newer tree dropped is
     // removed, which checking the paths out would leave behind.
     await git(projectDir, ["read-tree", "-u", "--reset", tip.tree]);
-    await writeJson(heldPath(projectDir, sessionFile), { tree: tip.tree } satisfies Held);
+    await writeJson(heldPath(projectDir, sessionFile), {
+      tree: tip.tree,
+      seq: tip.seq,
+    } satisfies Held);
+  });
+}
+
+// git's hash of the empty tree. Checking it out is how a directory is emptied without `rm -rf`,
+// which would take the shadow repository's own bookkeeping with it.
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/**
+ * Hand this host's directory back, so the next session can have it. What marks a directory taken is
+ * this session's note, and the files in it are this session's too, so both go.
+ *
+ * Refuses unless everything here has already shipped, because the shared bundles are the only other
+ * copy. Returns whether the directory was actually freed.
+ */
+export async function release(projectDir: string, sessionFile: string): Promise<boolean> {
+  return await withSessionLock(treeLockPath(projectDir), async () => {
+    const tip = await readJson<Tip>(tipPath(sessionFile));
+    const held = await readJson<Held>(heldPath(projectDir, sessionFile));
+    if (!tip || !held) return false;
+    // Anything unshipped is work only this host has. Keeping the directory is the lesser cost.
+    if ((await treeHere(projectDir)) !== tip.tree) return false;
+    await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
+    // `-x` as well, because what the next session finds has to be an empty directory and not a
+    // nearly empty one: anything left is a directory somebody has files in, which is what the
+    // restore refuses to write over. That takes ignored files too, so a rebuilt tree wants its
+    // install step again, the same as a fresh clone would.
+    await git(projectDir, ["clean", "-fdxq"]);
+    await rm(heldPath(projectDir, sessionFile), { force: true });
+    return true;
+  });
+}
+
+/**
+ * Keep what this host holds where it can be recovered, without touching the tip. For a caller that
+ * could not ship and must not lose the work: a tool has already run, so the files are the only
+ * record of what it did.
+ */
+export async function setAside(projectDir: string, sessionFile: string): Promise<void> {
+  await withSessionLock(treeLockPath(projectDir), async () => {
+    await salvage(projectDir, sessionFile, await treeHere(projectDir));
   });
 }
 

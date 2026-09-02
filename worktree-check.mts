@@ -23,6 +23,19 @@ const asHost = (root: string, name: string) => {
 
 const read = (path: string) => readFile(path, "utf8").catch(() => "");
 
+// The note a host keeps about what it holds. Its path is hashed from the project directory, so it
+// is found rather than constructed: there is one tree directory per project on a host, and one
+// note per session in it.
+async function heldNote(root: string, host: string): Promise<{ seq?: number } | undefined> {
+  const trees = join(root, host, "data", "trees");
+  for (const dir of await readdir(trees).catch(() => [] as string[])) {
+    const names = await readdir(join(trees, dir)).catch(() => [] as string[]);
+    const note = names.find((n) => n.startsWith("held-"));
+    if (note) return JSON.parse(await read(join(trees, dir, note))) as { seq?: number };
+  }
+  return undefined;
+}
+
 async function main() {
   const root = await mkdtemp(join(tmpdir(), "pi-worktree-"));
   const shared = join(root, "sessions");
@@ -137,6 +150,29 @@ async function main() {
   await worktree.ensure(projectD, fresh);
   const real = await read(join(projectD, "real.txt"));
   check("the host holding the files defines it", real === "the project\n", real);
+
+  // What makes the next restore incremental. Read on a host whose note came from a restore rather
+  // than from its own capture, which is the only place the reset path writes one. This pins that
+  // the bookkeeping is written, not the number of subprocesses it saves, which nothing here
+  // measures.
+  const noted = await heldNote(root, "d");
+  check("a restore records how far it got", typeof noted?.seq === "number", noted);
+
+  // How a directory is handed back, so the next session can have it. Without this a worker with one
+  // project directory serves one session for as long as it lives and refuses every later one.
+  asHost(root, "b");
+  await writeFile(join(projectB, "not-shipped.txt"), "mine\n");
+  const refusedRelease = (await worktree.release(projectB, sessionFile)) === false;
+  check("a directory holding unshipped work is not handed back", refusedRelease);
+  await rm(join(projectB, "not-shipped.txt"));
+  const released = await worktree.release(projectB, sessionFile);
+  const emptied = (await readdir(projectB)).length === 0;
+  check("and a clean one is", released && emptied, { released, emptied });
+  const s4 = join(shared, "s4.jsonl");
+  const reusable = await worktree
+    .capture(projectB, s4, { seed: true })
+    .then(() => true, () => false);
+  check("which is what lets the next session use it", reusable);
 
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
