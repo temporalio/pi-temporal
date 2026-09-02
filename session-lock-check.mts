@@ -109,6 +109,23 @@ async function main() {
   check("a holder can tell its lock is still its own", sawOwned === true);
   check("and can tell when it is not", sawLost === false);
 
+  // The same question, asked the way Pi's own append path has to ask it. That path is synchronous
+  // all the way down, so the one place that is always immediately before a write cannot await a
+  // read of the lock file. This answers from the refresher's last tick instead, which is why the
+  // wait below is a tick and not nothing.
+  const sync = join(dir, "sync.jsonl");
+  let syncHeld: boolean | undefined;
+  let syncLost: boolean | undefined;
+  await withSessionLock(sync, async (_owned, ownedNow) => {
+    syncHeld = ownedNow();
+    await rm(`${sync}.lock`, { force: true });
+    await writeFile(`${sync}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
+    await sleep(REFRESH_TICK + 500);
+    syncLost = ownedNow();
+  });
+  check("a writer that cannot await can still tell it holds the lock", syncHeld === true);
+  check("and notices within a refresh when it does not", syncLost === false, { syncLost });
+
   // The first activity of a session takes the lock before anything has created the directory the
   // session file lives in, so the lock has to make it rather than sit there failing.
   const fresh = join(dir, "not-yet", "session.jsonl");
@@ -145,8 +162,9 @@ async function main() {
   await withSessionLock(flaky, async () => {
     const lock = `${flaky}.lock`;
     const saved = await readFile(lock, "utf8");
-    // Unreadable for one tick, then fine again.
-    await rm(lock, { force: true });
+    // Unreadable for one tick, then fine again. Overwritten in place rather than removed and
+    // rewritten: absent means reclaimed, which the refresher is right to stop on, and a tick
+    // landing in the gap between the two made this fail for the wrong reason.
     await writeFile(lock, "{ not json", "utf8");
     await sleep(REFRESH_TICK + 500);
     await writeFile(lock, saved, "utf8");

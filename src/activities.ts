@@ -134,6 +134,16 @@ export function makeActivities(opts: ActivityOptions) {
     }
   };
 
+  // Handed to the session so every append asks before it lands. `stillOurs` guards the writes this
+  // file makes; this guards the ones Pi makes inside a call, and the assistant message is the one
+  // that matters: it is written at the end of a stream that can run for minutes, long after the
+  // last thing anyone checked.
+  const writeGuard = (ownedNow: () => boolean, what: string) => () => {
+    if (!ownedNow()) {
+      throw new Error(`lost the session lock during ${what}; another attempt has it`);
+    }
+  };
+
   // Establishing the project, as opposed to adding to it. Only the model call does this, because it
   // runs before any tool of the step and under the session lock, where a tool call lands on
   // whichever worker is free. Not caught, for the same reason `bringTree` is not.
@@ -156,9 +166,10 @@ export function makeActivities(opts: ActivityOptions) {
     });
   };
 
-  async function openSession(sessionFile: string): Promise<AgentSession> {
+  async function openSession(sessionFile: string, guard?: () => void): Promise<AgentSession> {
     await mkdir(dirname(sessionFile), { recursive: true });
     const sessionManager = SessionManager.open(sessionFile);
+    sessionManager.setWriteGuard(guard);
 
     const modelRuntime = await ModelRuntime.create();
     if (opts.apiKey) await modelRuntime.setRuntimeApiKey(provider, opts.apiKey);
@@ -227,9 +238,9 @@ export function makeActivities(opts: ActivityOptions) {
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned) => {
+      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
         await bringTree(input.sessionFile);
-        const session = await openSession(input.sessionFile);
+        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the step"));
         try {
           await stillOurs(owned, "the step");
           const settled = await readyForStep(session, input, false);
@@ -264,12 +275,15 @@ export function makeActivities(opts: ActivityOptions) {
   async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned) => {
+      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
         await bringTree(input.sessionFile);
         // After the restore, so a host that is behind seeds nothing: with a tip present this is the
         // ordinary no-op capture of a directory that already matches.
         await seedTree(input.sessionFile);
-        const session = await openSession(input.sessionFile);
+        const session = await openSession(
+          input.sessionFile,
+          writeGuard(ownedNow, "the model call"),
+        );
         try {
           // Before the prompt is recorded, which is this activity's first write.
           await stillOurs(owned, "the model call");
@@ -307,7 +321,9 @@ export function makeActivities(opts: ActivityOptions) {
       // Opening a session can append to it (a first thinking-level entry), and two of these run at
       // once. The lock covers the open and is given back before the tool runs, which is the part
       // that has to stay parallel.
-      const session = await withSessionLock(input.sessionFile, () => openSession(input.sessionFile));
+      const session = await withSessionLock(input.sessionFile, (_owned, ownedNow) =>
+        openSession(input.sessionFile, writeGuard(ownedNow, "opening the session")),
+      );
       try {
         // The transcript first: a result in it means a whole dispatch and a seal already
         // happened, and the kept files for the call are what is left behind.
@@ -362,11 +378,11 @@ export function makeActivities(opts: ActivityOptions) {
   async function sealStep(input: SealStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned) => {
+      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
         // The seal writes the step down, so it needs the tree the tools worked in. It can land on
         // a worker that ran none of them.
         await bringTree(input.sessionFile);
-        const session = await openSession(input.sessionFile);
+        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the seal"));
         try {
           const results: TurnToolCallOutcome[] = [];
           for (const call of input.calls) {
