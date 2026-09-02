@@ -186,6 +186,17 @@ What it costs: each activity opens the session file and builds an `AgentSession`
 - **An interrupt keeps what finished.** The step is closed on the way out, so a call that returned before the stop keeps its result. Only the one that was still running reads as an unknown outcome.
 - **Stepped mode keeps what a call produced.** A crash between a tool finishing and its result reaching Temporal loses the work under the whole-step mode: nothing recorded it. With a tool call per activity the result is kept beside the session file the moment the tool returns, so the retry finds it and the tool is not asked again. What is still lost is a tool that was inside its own execution when the process died, which is what an unknown outcome is for.
 
+- **A long session rolls over.** History grows for the life of a run, and a run that outgrows it is
+  terminated by the server, mid-turn. The workflow continues as new when nothing is in flight,
+  carrying its queue, which is the whole of the control state. `continueAsNewSuggested` is what
+  drives it in production; `maxHistory` in the workflow options is a tighter bound for an operator
+  who wants one, and is what makes the rollover reachable in a check.
+- **The write at the end of a model call is guarded too.** The lock check used to sit before the
+  call, and the assistant message is written at the end of a stream that runs for minutes. The
+  session asks on its way to every append now, through the fork's `setWriteGuard`. It answers from
+  the lock refresher's last tick, because Pi's append path is synchronous and cannot await a read
+  of the lock file, so the window is a refresh interval rather than a whole model call.
+
 ## A session that outlives its client
 
 `/background` sends a task to a worker, but its commands live inside a pi session, so a task could
@@ -195,6 +206,8 @@ task keeps going with nobody able to see it. `src/cli.ts` is the other half:
 ```bash
 # hand a task over and walk away; prints the session id and exits
 npx tsx src/cli.ts start "port the auth module to the new API"
+# with the tree on, this also sends the project from the directory you are in
+npx tsx src/cli.ts start "fix the failing test" --project=/path/to/repo
 
 # what this deployment is running right now
 npx tsx src/cli.ts running
@@ -212,6 +225,10 @@ task, the machine that runs it, and the machine that watches it need not be the 
 
 Three things worth knowing about the shape:
 
+- **A closed run is a finished session, not a live one.** A closed workflow answers a query by
+  default, with the state it held when it closed, so a run the server terminated reported its turn
+  as still running and a follower polled it forever. The client rejects queries against a run that
+  is not open.
 - **A query is answered by a worker**, so an open session whose workers are all down cannot answer.
   Each query carries its own deadline and the answer is one of three: the state, gone, or
   unreachable. Left as two, one dead worker turns `running` into a listing that hangs.
@@ -262,24 +279,38 @@ PI_TEMPORAL_SHIP_TREE=1 PI_SESSION_DIR=/shared/sessions PI_PROJECT_DIR=/work npm
 The shape is git's, because git already answers content addressing, an incremental transfer, and a
 checkout that removes what a later tree dropped. After a step is written down, `src/worktree.ts`
 captures the work tree and writes one bundle into `<session>.jsonl.tree/`. Before a step runs, a
-host that is behind unbundles what it has not seen and checks the newest tree out. An unchanged
-directory produces the tree the tip already names, so it ships nothing.
+host that is behind unbundles the ones it has not taken in (it records how far it got, so a long
+session does not re-unbundle its whole history every activity) and checks the newest tree out. An
+unchanged directory produces the tree the tip already names, so it ships nothing.
 
-Three rules bound it:
+The rules that bound it:
 
 - **It never touches the project's own `.git`.** The shadow repository is host-local and points at
   the work tree from outside, so a project that is not a git repository works the same as one that
   is, and one that is keeps its own history.
-- **It never writes over work nothing has shipped.** Before a reset it compares what is on disk
-  with what it last agreed the directory held, so a checkout it did not put there, and its own
-  edits that never made it out, both stop it. An empty directory holds nothing, and treating that
-  as a working copy is how the tree ends up never travelling.
-- **One session per directory.** A second is refused while the first is still using it, and gets
-  it back when that session is forgotten. Two sessions editing and resetting one directory would
-  lose each other's files.
-- **A refusal stops the step.** Running against files that are not the project tells the model
-  those files are the project, which is worse than not running, so it fails and Temporal puts the
-  work on a host that can do it.
+- **Only a host standing on the tip may move it.** A host that had fallen behind used to publish
+  its own tree over the tip, which reverted everything shipped since on every host at their next
+  restore. That was the worst bug this thing has had, and it was silent.
+- **It never writes over somebody's checkout.** Before a reset it compares what is on disk with
+  what it last agreed the directory held. An empty directory holds nothing, and treating that as a
+  working copy is how the tree ends up never travelling.
+- **Work a crash left behind is set aside, not dropped and not published.** A host that wrote and
+  died before shipping holds files nothing else has, and the session has moved on without them.
+  They go to `<session>.jsonl.tree/salvage/` as a self-contained bundle, and the host comes to the
+  tip. Recover one with `git bundle unbundle`. Nothing prunes them.
+- **Only the client or a model call may establish the project.** With nothing shipped yet, whatever
+  is in the directory is the starting point, so this cannot be a tool call: those land on whichever
+  worker is free, and an empty `/project` on that one would become the project everywhere. `start`
+  ships from the directory you ran it in (`--project=` overrides), which is the unambiguous answer.
+- **One session per directory.** A second is refused while the first is using it, in both
+  directions. A session hands its directory back when it goes idle, but only when everything in it
+  has shipped, and only on the host that runs the retirement: a worker that served the session
+  earlier and does not draw that activity keeps its directory until it serves the session again.
+- **A refused restore stops the step.** Running against files that are not the project tells the
+  model those files are the project, which is worse than not running, so it fails and Temporal puts
+  the work on a host that can do it. A refused *capture* is different: the tool has already run and
+  a retry would find its result rather than run it again, so throwing there costs an attempt and
+  still ships nothing. It sets the work aside instead, and says so.
 - **Tools of a step run one at a time** while the tree travels. Two on two hosts each publish a
   tree without the other's work.
 - **It is off by default.** On a laptop the tools already run in the directory you meant, and
@@ -292,11 +323,19 @@ want an install step, the same as a fresh clone would.
 
 `worktree-check.mts` covers the mechanics with two fake hosts and needs neither a server nor a key:
 a file and a nested file arrive, a deletion arrives, an unchanged capture ships nothing, a
-directory holding work nothing shipped is left alone, and a second session cannot take one that is
-already claimed. `docker/tree-check.sh` runs it for
-real: worker A writes a file, worker A's container is killed, and worker B, whose `/project` has
-never held anything, continues the same session and reads both that file and the rest of the
-project back. With `PI_TEMPORAL_SHIP_TREE=0` exactly the three tree assertions fail.
+directory holding work nothing shipped is left alone, a second session cannot take one that is
+already in use in either direction, a tool call cannot establish the project, a host behind the tip
+comes to it with its own work kept rather than published, and a directory is handed back only once
+everything in it has shipped.
+
+The assertion worth naming is "nothing the other host shipped is reverted". The check used to set
+up exactly the interleaving that loses data, read the one file that survived it, and stay green
+while the rest reverted one line away.
+
+`docker/tree-check.sh` runs it for real: worker A writes a file, worker A's container is killed,
+and worker B, whose `/project` has never held anything, continues the same session and reads both
+that file and the rest of the project back. With `PI_TEMPORAL_SHIP_TREE=0` exactly the three tree
+assertions fail.
 
 ## A turn nobody started
 
@@ -322,11 +361,12 @@ Helpers are at the repo root, none of which needs a model key:
 - `step-loop-check.mts` runs the executor against a Temporal server with the activities stubbed, in both modes: one step at a time and in order, an interrupt that ends the turn and not the session.
 - `local-turn-check.mts` does the same for a turn of a live session, with the turn itself faked: handed over once in whole-turn mode, and a model call, its calls and a seal per step in stepped mode. It also holds the two rules that half depends on: the calls of a step do not overlap there, and an interrupt stops the loop instead of buying another model call.
 - `l2-step-check.mts` needs no server either. It drives the stepped step body against fake activities: calls overlap unless the batch says otherwise, a failed tool still lets the step close, and an interrupt is not swallowed.
-- `session-lock-check.mts` covers the one-writer-at-a-time lock: two writers do not overlap, a dead holder's lock is reclaimed on age, and a live holder's is not stolen.
+- `session-lock-check.mts` covers the one-writer-at-a-time lock: two writers do not overlap, a dead holder's lock is reclaimed on age, a live holder's is not stolen, and a holder can tell it has lost the lock both ways it needs to ask (awaited, and synchronously from the refresher's last tick, which is what the session's own append path uses). The late-reclaim race itself has no regression test: nothing here can hold the event loop between reading a lock's age and reclaiming it.
 - `detached-check.mts` needs a server and a key. It is the only one that does, because what it
   proves is a session surviving the process holding it, which does not show up inside one process.
 - `worktree-check.mts` needs neither a server nor a key. It covers moving the project between hosts,
   with the hosts faked as separate data directories over one shared session directory.
+- `rollover-check.mts` needs a server, no key. It drives a session past a small `maxHistory` and holds the two things a rollover must not break: the run really does change, and every prompt it accepted is still answered afterwards.
 - `pending-check.mts` needs neither a server nor a key. It covers the files a step keeps about its calls, which is what "a call that already started is not silently repeated" rests on: a fresh call looks fresh, scratch never reads as a result, and a sweep drops what the transcript answers and keeps what it does not.
 
 To see what a session is doing without reading its file, ask the workflow: `temporal workflow query --workflow-id pi-session-<id> --name turnState` reports the queue, the step in flight, and how the last turn ended.
@@ -366,6 +406,15 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - [x] A worker inside pi, so a task runs with nothing else launched (verified with no worker process anywhere).
 - [x] Every turn durable by default via `registerTurnExecutor`, with a crash mid tool call finished on reopen.
 - [x] A tool call per activity, behind `PI_TEMPORAL_STEPPED=1`, on both halves.
+- [x] The project's files travel with the session, behind `PI_TEMPORAL_SHIP_TREE=1`.
+- [x] An independent review of the whole stack, and its findings closed: who may move the tree's tip, how a project enters the system, a fence on the tree store that crosses hosts, a directory that is handed back, history that is bounded, and the write at the end of a model call.
+
+Still open, and named rather than buried:
+
+- Nothing prunes `<session>.jsonl.tree/`, so a long session's bundles and anything under `salvage/` grow without bound.
+- A directory is handed back only by the host that runs the retirement. Another host that served the session earlier keeps its own until it serves that session again.
+- The tree lock is host-local; what excludes two hosts is the session lock the activities take around their tree writes.
+- The container checks use a local volume for the shared session directory, so they show separate hosts rather than a separate filesystem. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
 
 Live, on `gpt-4o-mini`, with the stepped mode on:
 
