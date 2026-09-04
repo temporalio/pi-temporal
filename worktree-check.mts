@@ -234,6 +234,25 @@ async function main() {
     ignoredKept,
   });
 
+  // The same directory after a restore, which is what a session with more than one host does to it.
+  // An adopted directory's note carries no answer to "who built this", and reading that absence as
+  // a value to fall back on promoted somebody's repository to one this host may empty.
+  const helper = join(root, "s5-worker", "project");
+  asHost(root, "s5-worker");
+  await worktree.ensure(helper, s5);
+  await writeFile(join(helper, "src.txt"), "edited\n");
+  await worktree.capture(helper, s5);
+  asHost(root, "owned");
+  await worktree.ensure(owned, s5);
+  const afterRestore = (await worktree.release(owned, s5)) === false;
+  const stillThere = (await read(join(owned, "src.txt"))) === "edited\n";
+  const stillIgnored = (await read(join(owned, ".env"))) === "SECRET=1\n";
+  check(
+    "and a restore does not turn it into one this host built",
+    afterRestore && stillThere && stillIgnored,
+    { afterRestore, stillThere, stillIgnored },
+  );
+
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
   const gone = await readdir(`${sessionFile}.tree`).then(() => false, () => true);
