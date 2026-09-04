@@ -366,6 +366,12 @@ and worker B, whose `/project` has never held anything, continues the same sessi
 that file and the rest of the project back. With `PI_TEMPORAL_SHIP_TREE=0` exactly the three tree
 assertions fail.
 
+`NFS=1 docker/tree-check.sh` runs the same ten assertions with `/sessions` on a real NFSv4 server
+rather than a local volume. That is the part the lock rests on: an exclusive create has to be
+exclusive and a rename has to be atomic, and a local volume answers both by construction, which is
+no answer at all for the filesystem a fleet actually shares. The mount is the daemon's, so no worker
+needs privileges of its own. NFSv3 still answers neither, and nothing here pretends to test it.
+
 ## Deploying it
 
 Two deployments, not a dozen knobs, because the settings are not independent. `PI_TEMPORAL_PROFILE`
@@ -498,7 +504,7 @@ Still open, and named rather than buried:
 
 - Nothing removes a finished session's `<session>.jsonl.tree/` on its own, because a session that went idle can be prompted again and those bundles are what its next turn restores from. `pi-temporal forget <sessionId>` does it for a session that is over, and refuses one that is still running or that nobody could answer for. Anything under `salvage/` stays either way: nothing else has a copy of it.
 - The tree lock is host-local; what excludes two hosts is the session lock the activities take around their tree writes.
-- The container checks use a local volume for the shared session directory, so they show separate hosts rather than a separate filesystem. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
+- The checks over NFSv4 answer the exclusive-create and atomic-rename questions the lock rests on. NFSv3 does not answer them, and nothing here tests it: `session-lock.ts` says so and means it.
 
 Live, on `gpt-4o-mini`, with the stepped mode on:
 

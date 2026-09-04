@@ -3,7 +3,7 @@
 // directory. The pi extension runs the same worker inside pi (see src/session-worker.ts); this
 // one is for a fleet, or for keeping tasks moving with no pi open.
 
-import { connectionOptions, describe, fromEnv, preflight } from "./config.js";
+import { connectionOptions, describe, fromEnv, notes, preflight } from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
 import * as worktree from "./worktree.js";
 
@@ -11,6 +11,7 @@ async function main() {
   const cfg = fromEnv();
   const projectDir = process.env.PI_PROJECT_DIR ?? process.cwd();
 
+  for (const note of notes(cfg)) console.log(`  note: ${note}`);
   const problems = preflight(cfg);
   for (const problem of problems) console.error(`configuration: ${problem}`);
   // A worker that starts anyway is one that accepts work it cannot do, and the failure lands on
