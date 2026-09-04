@@ -513,6 +513,49 @@ export async function retire(projectDir: string, sessionFile: string): Promise<b
 }
 
 /**
+ * Give a session the project a client put somewhere else, by copying that store into this session's
+ * own. For a schedule: every firing is its own session and nothing is running at firing time to
+ * send a project, so the client sends one when the schedule is made and each firing takes a copy.
+ *
+ * This runs on a worker and it does not break the rule that a worker may not establish a project.
+ * What it publishes is not the directory this worker is standing in, which is the thing that rule
+ * exists to keep out; it is a store some client wrote, chosen by whoever made the schedule.
+ *
+ * A no-op once the session has a tip of its own, so a re-driven activity does not copy twice.
+ */
+export async function adopt(template: string, sessionFile: string): Promise<boolean> {
+  return await withSessionLock(sharedLockPath(sessionFile), async () => {
+    if (await established(sessionFile)) return false;
+    const tip = await readJson<Tip>(tipPath(template));
+    if (!tip) throw new WrongTree(`no project was sent for ${template}`);
+    const from = shareDir(template);
+    const to = shareDir(sessionFile);
+    await mkdir(to, { recursive: true });
+    for (const name of (await readdir(from).catch(() => [] as string[])).filter((n) =>
+      n.endsWith(".bundle"),
+    )) {
+      // Through a scratch name for the same reason a capture is: a host reading this directory must
+      // never unbundle a file that is still being copied.
+      const scratch = join(to, `${name}.${scratchToken()}.writing`);
+      await writeFile(scratch, await readFile(join(from, name)));
+      await rename(scratch, join(to, name));
+    }
+    // Last, so a copy that dies half way leaves a session with no project rather than one whose tip
+    // names a bundle that is not there.
+    await writeJson(tipPath(sessionFile), tip);
+    return true;
+  });
+}
+
+/**
+ * Drop this host's claim on a directory without touching what the session shipped. For a client
+ * that seeded a template: the note says "a session is working here", and nothing ever retires a
+ * template, so leaving it would refuse every later session in the directory it was sent from.
+ */
+export const unclaim = (projectDir: string, sessionFile: string) =>
+  rm(heldPath(projectDir, sessionFile), { force: true });
+
+/**
  * Hand back every directory this host is still holding for a session that is over, and say how many
  * there were. Called when a worker starts.
  *

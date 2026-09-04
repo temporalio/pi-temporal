@@ -329,6 +329,38 @@ async function main() {
     releasedAt,
   });
 
+  // A session nobody sent a project to. Every firing of a schedule is its own session and nothing
+  // is running at firing time to send one, so the client sends it once and each firing copies it.
+  const templateFile = join(shared, "schedule-nightly.jsonl");
+  const projectTemplate = join(root, "template", "project");
+  await mkdir(projectTemplate, { recursive: true });
+  asHost(root, "template");
+  await writeFile(join(projectTemplate, "todo.txt"), "review the merges\n");
+  await worktree.capture(projectTemplate, templateFile, { seed: true });
+  await worktree.unclaim(projectTemplate, templateFile);
+
+  const firing = join(shared, "fired-1.jsonl");
+  const took = await worktree.adopt(templateFile, firing);
+  const projectFiring = join(root, "firing", "project");
+  await mkdir(projectFiring, { recursive: true });
+  asHost(root, "firing");
+  await worktree.ensure(projectFiring, firing);
+  const arrived = await read(join(projectFiring, "todo.txt"));
+  check("a firing takes the project the schedule was given", took && arrived === "review the merges\n", {
+    took,
+    arrived,
+  });
+  const again = await worktree.adopt(templateFile, firing);
+  check("and a re-driven activity does not copy it twice", again === false);
+
+  // The directory the template came from is not a directory a session is working in, so the next
+  // real session started there is not refused. Nothing ever retires a template.
+  asHost(root, "template");
+  const stillUsable = await worktree
+    .capture(projectTemplate, join(shared, "after-template.jsonl"), { seed: true })
+    .then(() => true, () => false);
+  check("and the directory it was sent from is free afterwards", stillUsable);
+
   // The directories a worker is holding for sessions that finished elsewhere. Nothing asks for them
   // again, so nothing frees them: the lazy path only acts when another session wants that same
   // directory. A worker that served fifty sessions holds fifty until this runs.

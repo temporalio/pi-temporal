@@ -417,6 +417,19 @@ npx tsx src/cli.ts schedule "review yesterday's merges" --cron="0 9 * * *" --id=
 npx tsx src/cli.ts unschedule morning
 ```
 
+With the tree on it also needs the project, which nothing is running at firing time to send:
+
+```bash
+npx tsx src/cli.ts schedule "review yesterday.s merges" --cron="0 9 * * *" --id=morning \
+  --project=/path/to/repo
+```
+
+The client sends it once, into a store beside the sessions, and each firing copies that store into
+its own session before its first step. A worker still may not establish a project from the directory
+it is standing in, which is the rule that keeps an empty `/project` from becoming the project
+everywhere; copying a store a client wrote is a different act, and it is the one that lets a
+schedule and the travelling tree compose. `unschedule` drops the copy with the schedule.
+
 Each firing is its own session, because the workflow takes the task in its input and derives its
 own id from the firing it was given. Two things make that work rather than one. `initialPrompt` in
 the workflow input is the task, so nothing has to be running to send a first prompt. And the
