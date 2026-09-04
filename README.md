@@ -308,6 +308,7 @@ The rules that bound it:
 - **A schedule cannot carry the project yet.** Each firing is its own session and nothing is running
   at firing time to send one, so `schedule` refuses with the tree on rather than creating sessions
   that fail on every activity.
+- **A worker hands back what it held for finished sessions when it starts**, and lazily after that: a directory is freed when another session asks for that same one. Between the two, a worker that served fifty sessions is not sitting on fifty directories.
 - **The chain restarts rather than growing for ever.** Every fortieth capture carries the whole tree
   and stands on nothing, and the bundles before it are removed once the tip names it. A session that
   runs for hours would otherwise keep every state it has ever been in, and a host joining late would
@@ -481,7 +482,6 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 Still open, and named rather than buried:
 
 - Nothing removes a finished session's `<session>.jsonl.tree/` on its own, because a session that went idle can be prompted again and those bundles are what its next turn restores from. `pi-temporal forget <sessionId>` does it for a session that is over, and refuses one that is still running or that nobody could answer for. Anything under `salvage/` stays either way: nothing else has a copy of it.
-- A host hands its directory back when the next session asks for it, not when the session it served ends. So a worker holds one directory per session it served until something else wants it.
 - The tree lock is host-local; what excludes two hosts is the session lock the activities take around their tree writes.
 - The container checks use a local volume for the shared session directory, so they show separate hosts rather than a separate filesystem. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
 

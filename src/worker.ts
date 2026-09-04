@@ -5,6 +5,7 @@
 
 import { connectionOptions, describe, fromEnv, preflight } from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
+import * as worktree from "./worktree.js";
 
 async function main() {
   const cfg = fromEnv();
@@ -15,6 +16,14 @@ async function main() {
   // A worker that starts anyway is one that accepts work it cannot do, and the failure lands on
   // whoever prompted it rather than on whoever deployed it.
   if (problems.length > 0) process.exit(1);
+
+  // Directories this host held for sessions that have since finished. The lazy path frees one when
+  // another session wants that same directory, which is enough to keep serving and not enough to
+  // keep tidy.
+  if (cfg.shipTree) {
+    const freed = await worktree.sweep().catch(() => 0);
+    if (freed > 0) console.log(`  handed back ${freed} directories held for finished sessions`);
+  }
 
   const { run } = await createSessionWorker({
     address: cfg.address,
