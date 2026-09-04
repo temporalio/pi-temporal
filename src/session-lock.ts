@@ -6,7 +6,7 @@
 // Advisory, and beside the session file, so it works wherever the session file works. A holder
 // that dies is reclaimed on age, which is why the lock is refreshed while it is held.
 
-import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
@@ -45,16 +45,28 @@ const held = (token: string) => JSON.stringify({ token, host: hostname(), pid: p
 // Reclaims by renaming out of the way rather than removing. Two contenders deciding the same lock
 // is stale at the same moment then move the same file, and only one of them wins.
 //
-// It does not make reclaiming safe. `rename` acts on the path, not on the file that was measured,
-// so a contender slow between reading the age and reclaiming moves whatever is there by then,
-// including a lock somebody else has just taken. Nothing a lock beside a file can do closes that.
-// `owned()` is the answer, and it is why writers ask again on the way to the write.
-async function taken(path: string, token: string): Promise<boolean> {
+// `rename` acts on the path, not on the file whose age was measured, so a contender slow between
+// the two moves whatever is there by then, including a lock somebody has just taken. What the
+// measurement can be pinned to is the content: a token changes only when a different holder writes
+// one. So the file is read before the move and the moved file after it, and a reclaim that finds it
+// changed puts it back and reports the lock as held rather than taking it. The restore is a `link`,
+// which fails instead of overwriting, so a third contender that created one meanwhile keeps it and
+// this one still loses. What is left is a lock briefly absent from its path, which is what `owned()`
+// covers and why writers ask again on the way to the write.
+async function taken(path: string, token: string, pauseMs = 0): Promise<boolean> {
   try {
     const info = await stat(path);
     if (Date.now() - info.mtimeMs < STALE_MS) return true;
+    const before = await readFile(path, "utf8").catch(() => undefined);
+    if (pauseMs > 0) await new Promise((resolve) => setTimeout(resolve, pauseMs));
     const corpse = `${path}.stale.${token}`;
     await rename(path, corpse);
+    const moved = await readFile(corpse, "utf8").catch(() => undefined);
+    if (moved !== before) {
+      await link(corpse, path).catch(() => {});
+      await rm(corpse, { force: true });
+      return true;
+    }
     await rm(corpse, { force: true });
     return false;
   } catch {
@@ -73,6 +85,12 @@ export async function withSessionLock<T>(
   sessionFile: string,
   body: (owned: () => Promise<boolean>, ownedNow: () => boolean) => Promise<T>,
   waitMs = 60_000,
+  // How long to stall between measuring a stale lock's age and reclaiming it. Zero everywhere but
+  // the check that reproduces the reclaim race: that interleaving needs a contender held at exactly
+  // that point for longer than another takes to reclaim and acquire, and nothing outside this
+  // module can hold it there. Only the stall is injected; what the check asserts is the real
+  // outcome, one holder or two.
+  reclaimPauseMs = 0,
 ): Promise<T> {
   const path = lockPath(sessionFile);
   const token = randomUUID();
@@ -87,7 +105,7 @@ export async function withSessionLock<T>(
       await writeFile(path, held(token), { flag: "wx" });
       break;
     } catch (err) {
-      const contended = await taken(path, token);
+      const contended = await taken(path, token, reclaimPauseMs);
       if (Date.now() >= deadline) {
         // Only call it contention when it was. Anything else is the real error, and reporting a
         // writer that does not exist sends the next reader looking for one.
