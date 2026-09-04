@@ -56,6 +56,9 @@ interface Held {
   // somebody else's note cannot ask the shared directory anything about it, and a note nothing can
   // ask about is a claim nothing takes back.
   readonly session?: string;
+  // And which directory it is about, for the same reason: the note lives under a hash of the path,
+  // so a sweep that finds a note nobody needs any more cannot otherwise say where to act.
+  readonly directory?: string;
 }
 
 // What the shared directory says the newest state is. `seq` orders the bundles, because a host has
@@ -74,9 +77,10 @@ const bundleName = (seq: number) => `${String(seq).padStart(8, "0")}.bundle`;
 
 // Host-local, and keyed by the path the tools run in. Two projects on one worker get a shadow
 // repository each; the same project on two workers gets one on each of them.
+const treesRoot = () => join(process.env.PI_TEMPORAL_DATA ?? join(homedir(), ".pi-temporal"), "trees");
+
 function hostDir(projectDir: string) {
-  const root = process.env.PI_TEMPORAL_DATA ?? join(homedir(), ".pi-temporal");
-  return join(root, "trees", createHash("sha256").update(projectDir).digest("hex").slice(0, 16));
+  return join(treesRoot(), createHash("sha256").update(projectDir).digest("hex").slice(0, 16));
 }
 
 const gitDir = (projectDir: string) => join(hostDir(projectDir), "git");
@@ -93,9 +97,25 @@ const isRetired = async (sessionFile: string) =>
   (await readJson<unknown>(retiredPath(sessionFile))) !== undefined;
 // A session doing work is not retired, whatever a marker from its last idle period says.
 const revive = (sessionFile: string) => rm(retiredPath(sessionFile), { force: true });
-// Host-local, because a project directory is. One worker running two steps of two sessions is the
-// case this excludes; two hosts cannot share the directory in the first place.
+// Two locks, because there are two questions and they have different answers.
+//
+// The first is host-local, because a project directory is: it excludes one worker running steps of
+// two sessions in the same directory, and it is what makes the shadow repository's index safe.
+//
+// The second lives in the shared directory, so it crosses hosts, and it is what stops two machines
+// writing one session's bundles at once. That used to be nobody's job here: the activities happened
+// to hold the session's own lock around their tree writes, so the rule held for them and not for
+// the client, which seeds a project holding neither. A lock the callers have to remember is a rule
+// that is true until somebody adds a caller.
 const treeLockPath = (projectDir: string) => join(hostDir(projectDir), "tree");
+const sharedLockPath = (sessionFile: string) => join(shareDir(sessionFile), "writers");
+
+// Always in this order. Two locks taken in two orders is the one way to turn exclusion into a
+// deadlock, and the directory is the outer one because a host takes it for every session.
+const withTreeLocks = <T>(projectDir: string, sessionFile: string, body: () => Promise<T>) =>
+  withSessionLock(treeLockPath(projectDir), () =>
+    withSessionLock(sharedLockPath(sessionFile), body),
+  );
 
 async function readJson<T>(path: string): Promise<T | undefined> {
   try {
@@ -264,6 +284,7 @@ async function publish(
     seq,
     built,
     session: sessionFile,
+    directory: projectDir,
   } satisfies Held);
 }
 
@@ -352,7 +373,7 @@ export async function capture(
 ): Promise<void> {
   // One at a time per directory. Two captures share an index and a shadow repository, so a second
   // one collides on `index.lock`, and that failure reads as a session that stopped shipping.
-  await withSessionLock(treeLockPath(projectDir), async () => {
+  await withTreeLocks(projectDir, sessionFile, async () => {
     // Work of any kind means this session is not the finished one its last idle period marked.
     await revive(sessionFile);
     const tip = await readJson<Tip>(tipPath(sessionFile));
@@ -388,7 +409,7 @@ export async function capture(
  * describe somebody else's files as the project.
  */
 export async function ensure(projectDir: string, sessionFile: string): Promise<void> {
-  await withSessionLock(treeLockPath(projectDir), async () => {
+  await withTreeLocks(projectDir, sessionFile, async () => {
     await revive(sessionFile);
     // Read inside the lock. A capture on this host between the read and the lock would leave this
     // deciding against a tip that has already moved, and resetting the directory to the older tree.
@@ -447,6 +468,7 @@ export async function ensure(projectDir: string, sessionFile: string): Promise<v
       seq: tip.seq,
       built: held ? held.built : true,
       session: sessionFile,
+      directory: projectDir,
     } satisfies Held);
   });
 }
@@ -465,7 +487,7 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
  * whether it was freed.
  */
 export async function release(projectDir: string, sessionFile: string): Promise<boolean> {
-  return await withSessionLock(treeLockPath(projectDir), async () => {
+  return await withTreeLocks(projectDir, sessionFile, async () => {
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
     if (!held) return false;
     // A directory that could not be emptied is one the next restore refuses, so dropping the note
@@ -491,6 +513,37 @@ export async function retire(projectDir: string, sessionFile: string): Promise<b
 }
 
 /**
+ * Hand back every directory this host is still holding for a session that is over, and say how many
+ * there were. Called when a worker starts.
+ *
+ * The lazy path only frees a directory when another session asks for that same one, which is enough
+ * to keep a worker serving and not enough to keep it tidy: a worker that served fifty sessions in
+ * fifty directories holds all fifty until somebody wants each one back. Same rules as everywhere
+ * else, so nothing here empties a directory this host adopted or one holding work that never
+ * shipped.
+ */
+export async function sweep(): Promise<number> {
+  let freed = 0;
+  for (const dir of await readdir(treesRoot()).catch(() => [] as string[])) {
+    const names = (await readdir(join(treesRoot(), dir)).catch(() => [] as string[])).filter((name) =>
+      name.startsWith("held-"),
+    );
+    for (const name of names) {
+      const path = join(treesRoot(), dir, name);
+      const note = await readJson<Held>(path);
+      if (!note?.session || !note.directory || !(await isRetired(note.session))) continue;
+      const done = await withTreeLocks(note.directory, note.session, async () => {
+        if (note.built && !(await handBack(note.directory!, note.session!, note))) return false;
+        await rm(path, { force: true });
+        return true;
+      }).catch(() => false);
+      if (done) freed++;
+    }
+  }
+  return freed;
+}
+
+/**
  * Whether this session already has a project. A client continuing a session must not send one
  * again: the workers have moved the tip since it started, and what the client holds is the state
  * the session began from, which a capture would then be refused for or, worse, revert to.
@@ -504,7 +557,7 @@ export const established = async (sessionFile: string) =>
  * record of what it did.
  */
 export async function setAside(projectDir: string, sessionFile: string): Promise<void> {
-  await withSessionLock(treeLockPath(projectDir), async () => {
+  await withTreeLocks(projectDir, sessionFile, async () => {
     await salvage(projectDir, sessionFile, await treeHere(projectDir));
   });
 }

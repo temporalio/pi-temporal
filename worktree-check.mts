@@ -9,6 +9,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as worktree from "./src/worktree.js";
+import { withSessionLock } from "./src/session-lock.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
@@ -307,6 +308,52 @@ async function main() {
   await worktree.ensure(projectNew, compacted);
   const fresh2 = await read(join(projectNew, "count.txt"));
   check("and one that never saw the session gets there too", fresh2 === "45\n", fresh2);
+
+  // The lock that crosses hosts, as opposed to the host-local one that keeps two sessions off one
+  // directory. Held from outside, which is what another machine looks like from here, a capture
+  // waits for it rather than writing a second bundle over the same number. Nothing used to hold
+  // this: the activities happened to take the session's own lock, so the rule was true for them and
+  // not for the client that seeds a project.
+  const otherHostHolds = withSessionLock(join(`${compacted}.tree`, "writers"), async () => {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    return Date.now();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  asHost(root, "long");
+  await writeFile(join(projectLong, "count.txt"), "46\n");
+  await worktree.capture(projectLong, compacted);
+  const captureFinished = Date.now();
+  const releasedAt = await otherHostHolds;
+  check("a capture waits for the lock that crosses hosts", captureFinished >= releasedAt, {
+    captureFinished,
+    releasedAt,
+  });
+
+  // The directories a worker is holding for sessions that finished elsewhere. Nothing asks for them
+  // again, so nothing frees them: the lazy path only acts when another session wants that same
+  // directory. A worker that served fifty sessions holds fifty until this runs.
+  const sweptSession = join(shared, "s9.jsonl");
+  const projectSwept = join(root, "swept", "project");
+  await mkdir(projectSwept, { recursive: true });
+  const projectSeed9 = join(root, "seed9", "project");
+  await mkdir(projectSeed9, { recursive: true });
+  asHost(root, "seed9");
+  await writeFile(join(projectSeed9, "swept.txt"), "yes\n");
+  await worktree.capture(projectSeed9, sweptSession, { seed: true });
+  asHost(root, "swept");
+  await worktree.ensure(projectSwept, sweptSession);
+  asHost(root, "seed9");
+  await worktree.retire(projectSeed9, sweptSession);
+
+  asHost(root, "swept");
+  const heldBefore = (await readdir(projectSwept)).length;
+  const freed = await worktree.sweep();
+  const heldAfter = (await readdir(projectSwept)).length;
+  check(
+    "a sweep hands back what a finished session left on this host",
+    freed === 1 && heldBefore > 0 && heldAfter === 0,
+    { freed, heldBefore, heldAfter },
+  );
 
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
