@@ -183,6 +183,23 @@ async function ingest(projectDir: string, sessionFile: string, from = 0) {
   }
 }
 
+// How many captures the chain grows for before one carries the whole tree and the rest are dropped.
+// A step is a handful of captures, so this is tens of steps: long enough that most sessions never
+// pay for a full tree, short enough that a session running for hours does not keep every state it
+// has ever been in.
+const COMPACT_EVERY = 40;
+
+// Everything the self-contained bundle at `seq` made unnecessary. Nothing else in the directory is
+// touched: `salvage/` is work nobody has another copy of, and the tip is what this was written for.
+async function dropBundlesBefore(dir: string, seq: number) {
+  const names = (await readdir(dir).catch(() => [] as string[])).filter((name) =>
+    name.endsWith(".bundle"),
+  );
+  for (const name of names) {
+    if (Number.parseInt(name, 10) < seq) await rm(join(dir, name), { force: true });
+  }
+}
+
 // Commits whatever is in the directory and publishes it. The caller has already decided that is
 // the right thing to do, which is the part with the rules in it.
 async function publish(
@@ -192,14 +209,21 @@ async function publish(
   tree: string,
   built: boolean | undefined,
 ) {
-  const parent = tip ? ["-p", tip.commit] : [];
+  const seq = (tip?.seq ?? 0) + 1;
+  // Every so often the chain restarts instead of growing. The bundle written here carries the whole
+  // tree rather than the difference, and stands on nothing, so every bundle before it can go: a
+  // host that is behind gets everything from this one alone. Without it a session's directory grows
+  // for as long as the session lives, and a fresh host unbundles every capture ever made to catch
+  // up. The commit is a root commit for the same reason `salvage` uses one: a bundle whose
+  // prerequisites are missing cannot be unbundled at all.
+  const restart = seq % COMPACT_EVERY === 0;
+  const parent = tip && !restart ? ["-p", tip.commit] : [];
   const commit = (
     await git(projectDir, ["commit-tree", tree, ...parent, "-m", `pi-temporal ${tree.slice(0, 8)}`])
   ).stdout.trim();
   const ref = snapRef(sessionFile);
   await git(projectDir, ["update-ref", ref, commit]);
 
-  const seq = (tip?.seq ?? 0) + 1;
   const dir = shareDir(sessionFile);
   await mkdir(dir, { recursive: true });
   // The number is taken. Two different things look like this, and only one of them is a conflict.
@@ -225,10 +249,14 @@ async function publish(
   // Written to a scratch name and renamed, so a host reading the directory never unbundles a file
   // that is still being written.
   const scratch = join(dir, `${bundleName(seq)}.${scratchToken()}.writing`);
-  await git(projectDir, ["bundle", "create", scratch, ref, ...(tip ? ["--not", tip.commit] : [])]);
+  const incremental = tip && !restart ? ["--not", tip.commit] : [];
+  await git(projectDir, ["bundle", "create", scratch, ref, ...incremental]);
   await rename(scratch, join(dir, bundleName(seq)));
 
   await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
+  // After the tip names the self-contained one, never before: a crash in between leaves bundles
+  // nothing needs, and a crash the other way round leaves a session nobody can restore.
+  if (restart) await dropBundlesBefore(dir, seq);
   // `built` is carried, never invented here. A capture says what the directory now holds, not where
   // the directory came from, and the answer to that only changes when a restore creates one.
   await writeJson(heldPath(projectDir, sessionFile), {

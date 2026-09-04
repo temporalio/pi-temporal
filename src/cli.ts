@@ -335,12 +335,36 @@ async function main() {
       say(`interrupted ${sessionId}`);
       return;
     }
+    // Reclaiming the disk a finished session's files cost. Nothing does this on its own: a session
+    // that went idle can be prompted again, and the bundles are what its next turn restores from,
+    // so only somebody who knows the session is done can say so. The transcript is left alone.
+    case "forget": {
+      const sessionId = rest.find((a) => !a.startsWith("--"));
+      if (!sessionId) throw new Error("forget wants a session id");
+      const { client, connection } = await connect();
+      // Only a session nothing is driving, and only when that is known rather than assumed: a
+      // worker that cannot be reached is not a finished session, and dropping the bundles of a
+      // running one takes the project out from under its next step.
+      const reached = await turnStateOf(client, sessionId).finally(() => connection.close());
+      if (reached.kind !== "gone") {
+        throw new Error(
+          reached.kind === "state"
+            ? `${sessionId} is still running; stop it first`
+            : `cannot tell whether ${sessionId} is running; not touching its files`,
+        );
+      }
+      await worktree.forget(sessionFileFor(fromEnv().sessionDir, sessionId));
+      say(`dropped what ${sessionId} kept for its project files`);
+      say("  the transcript is untouched; a new turn would start from an empty project");
+      return;
+    }
     default:
       say("usage: pi-temporal <start|running|watch|stop> [args]");
       say('  start "<task>" [--session=<id>]   hand a task to a worker and return');
       say("  running                          what this deployment is running");
       say("  watch <sessionId>                follow one until its turn ends");
       say("  stop <sessionId>                 interrupt the turn in flight");
+      say("  forget <sessionId>               drop the project files a finished session kept");
     say('  schedule "<task>" --every=1h     run it on a schedule, with no client at all');
     say("  unschedule <scheduleId>          stop that schedule");
       process.exitCode = command ? 1 : 0;

@@ -274,6 +274,40 @@ async function main() {
     carried,
   });
 
+  // What stops a session's directory growing for as long as the session lives. Every so often a
+  // capture carries the whole tree and stands on nothing, and the ones before it go. What has to
+  // survive that is the restore, from both distances: a host that stopped early and one that has
+  // never seen the session.
+  const compacted = join(shared, "s8.jsonl");
+  const projectLong = join(root, "long", "project");
+  await mkdir(projectLong, { recursive: true });
+  asHost(root, "long");
+  await writeFile(join(projectLong, "count.txt"), "0\n");
+  await worktree.capture(projectLong, compacted, { seed: true });
+
+  const projectLate = join(root, "late", "project");
+  asHost(root, "late");
+  await worktree.ensure(projectLate, compacted);
+
+  asHost(root, "long");
+  for (let i = 1; i <= 45; i++) {
+    await writeFile(join(projectLong, "count.txt"), `${i}\n`);
+    await worktree.capture(projectLong, compacted);
+  }
+  const bundles = (await readdir(`${compacted}.tree`)).filter((n) => n.endsWith(".bundle"));
+  check("the bundle chain restarts rather than growing for ever", bundles.length < 20, bundles.length);
+
+  asHost(root, "late");
+  await worktree.ensure(projectLate, compacted);
+  const late = await read(join(projectLate, "count.txt"));
+  check("a host that stopped early still catches up afterwards", late === "45\n", late);
+
+  const projectNew = join(root, "new", "project");
+  asHost(root, "new");
+  await worktree.ensure(projectNew, compacted);
+  const fresh2 = await read(join(projectNew, "count.txt"));
+  check("and one that never saw the session gets there too", fresh2 === "45\n", fresh2);
+
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
   const gone = await readdir(`${sessionFile}.tree`).then(() => false, () => true);
