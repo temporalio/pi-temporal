@@ -11,6 +11,10 @@ import { queueForWorker } from "./queue.js";
 
 export interface SessionWorkerOptions extends ActivityOptions {
   readonly address: string;
+  // How the server is reached when it is not a plaintext dev server: an API key for Cloud, a
+  // certificate pair for a cluster with mTLS. Built by `connectionOptions`, so the client and the
+  // worker cannot disagree about it.
+  readonly connect?: Parameters<typeof NativeConnection.connect>[0];
   readonly namespace: string;
   readonly taskQueue: string;
   // Activities beyond runStep. The turn executor adds runLocalTurn, which needs the live turns of
@@ -26,7 +30,7 @@ export interface SessionWorker {
 }
 
 export async function createSessionWorker(opts: SessionWorkerOptions): Promise<SessionWorker> {
-  const connection = await NativeConnection.connect({ address: opts.address });
+  const connection = await NativeConnection.connect(opts.connect ?? { address: opts.address });
   // The queue this process polls on its own, so a step can be sent back to the worker that started
   // it. Derived here rather than passed in: it has to be the same name the activities report, and
   // one of the two computing it separately is a session that waits on a queue nobody polls.

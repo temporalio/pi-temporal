@@ -4,13 +4,13 @@
 
 import { randomUUID } from "node:crypto";
 import { Client, Connection } from "@temporalio/client";
-import { fromEnv, sessionFileFor } from "./config.js";
+import { connectionOptions, fromEnv, sessionFileFor } from "./config.js";
 import { WORKFLOW_TYPE, workflowId } from "./protocol.js";
 import type { PromptInput, SessionTurnOptions } from "./protocol.js";
 
 export async function connect() {
   const cfg = fromEnv();
-  const connection = await Connection.connect({ address: cfg.address });
+  const connection = await Connection.connect(connectionOptions(cfg));
   const client = new Client({
     connection,
     namespace: cfg.namespace,

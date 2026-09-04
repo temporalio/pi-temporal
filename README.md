@@ -365,6 +365,48 @@ and worker B, whose `/project` has never held anything, continues the same sessi
 that file and the rest of the project back. With `PI_TEMPORAL_SHIP_TREE=0` exactly the three tree
 assertions fail.
 
+## Deploying it
+
+Two deployments, not a dozen knobs, because the settings are not independent. `PI_TEMPORAL_PROFILE`
+picks one and the rest follow:
+
+| | `local` (default) | `fleet` |
+|---|---|---|
+| what it is | pi on your machine, worker inside it | workers on machines nobody is sitting at |
+| session directory | `~/.pi-temporal/sessions` | **you name it**, on storage every worker reaches |
+| project files travel | no | yes |
+| unit of work | a whole step | the model call, each tool call, the seal |
+
+Anything above can still be set on its own; the profile only decides what it is when you do not.
+What a fleet cannot be talked out of is the two that make it a fleet: a session directory only one
+machine can see is a worker that never picks anything up, and files that do not travel are a model
+being told an empty directory is the project. `preflight` refuses both, and a worker that fails it
+exits rather than accepting work it cannot do.
+
+Reaching a server that is not the dev server:
+
+```bash
+TEMPORAL_ADDRESS=your-ns.a1b2c.tmprl.cloud:7233 TEMPORAL_NAMESPACE=your-ns.a1b2c \
+  PI_TEMPORAL_API_KEY_FILE=/run/secrets/temporal-key      # Temporal Cloud
+TEMPORAL_ADDRESS=temporal.internal:7233 \
+  PI_TEMPORAL_TLS_CERT=/run/secrets/tls.crt PI_TEMPORAL_TLS_KEY=/run/secrets/tls.key \
+  PI_TEMPORAL_TLS_CA=/run/secrets/ca.crt                  # a cluster with mTLS
+```
+
+The key is read from a file rather than passed in argv, and nothing prints it. Both halves build the
+connection from the same function, so a client and a worker cannot disagree about how to reach the
+cluster or which namespace they are in.
+
+Ask before deploying rather than after:
+
+```bash
+npx tsx src/cli.ts doctor
+```
+
+It prints what this process resolved and names what is wrong with it, including the mistakes that
+read as something else later: an API key against a dev server, a Cloud key with the `default`
+namespace, an address that is not loopback with no credentials at all, half a certificate pair.
+
 ## A turn nobody started
 
 `start` hands a task over and returns, but something still has to run it. A schedule does not:
