@@ -312,9 +312,11 @@ The rules that bound it:
   directions. A session hands its directory back when it goes idle, and only then if this host built
   that directory out of an empty one, everything in it has shipped, and it actually comes out empty.
   A directory the host already had is somebody's working copy: what it holds includes the files git
-  ignores, which no bundle carries and nothing else has a copy of. Handing back is also only done by
-  the host that runs the retirement, so one that served the session earlier keeps its directory
-  until it serves that session again.
+  ignores, which no bundle carries and nothing else has a copy of, so that one keeps its files and
+  only the note goes. The retirement runs on one host, and it says the session is over in the shared
+  directory as well: every other host reads that the next time a session wants its directory, and
+  hands its own back then. Without somewhere shared to ask, the note is the only answer and nothing
+  can correct it, so a directory served one session and refused every later one.
 - **A refused restore stops the step.** Running against files that are not the project tells the
   model those files are the project, which is worse than not running, so it fails and Temporal puts
   the work on a host that can do it. A refused *capture* is different: the tool has already run and
@@ -334,8 +336,9 @@ want an install step, the same as a fresh clone would.
 a file and a nested file arrive, a deletion arrives, an unchanged capture ships nothing, a
 directory holding work nothing shipped is left alone, a second session cannot take one that is
 already in use in either direction, a tool call cannot establish the project, a host behind the tip
-comes to it with its own work kept rather than published, and a directory is handed back only once
-everything in it has shipped.
+comes to it with its own work kept rather than published, a directory is handed back only once
+everything in it has shipped, a restore does not turn a directory this host adopted into one it may
+empty, and a host that did not run the retirement can still serve the next session.
 
 The assertion worth naming is "nothing the other host shipped is reverted". The check used to set
 up exactly the interleaving that loses data, read the one file that survived it, and stay green
@@ -421,8 +424,8 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 
 Still open, and named rather than buried:
 
-- Nothing prunes `<session>.jsonl.tree/`, so a long session's bundles and anything under `salvage/` grow without bound.
-- A directory is handed back only by the host that runs the retirement. Another host that served the session earlier keeps its own until it serves that session again.
+- Nothing prunes `<session>.jsonl.tree/`, so a long session's bundles and anything under `salvage/` grow without bound. `worktree.forget` does it and has no caller: a session that is retired can be resumed, and its files have to be there when it is.
+- A host hands its directory back when the next session asks for it, not when the session it served ends. So a worker holds one directory per session it served until something else wants it.
 - The tree lock is host-local; what excludes two hosts is the session lock the activities take around their tree writes.
 - The container checks use a local volume for the shared session directory, so they show separate hosts rather than a separate filesystem. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
 
