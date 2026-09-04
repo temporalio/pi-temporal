@@ -36,6 +36,7 @@ import type {
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 import * as worktree from "../src/worktree.js";
+import { connectionOptions, fromEnv } from "../src/config.js";
 
 const STATUS_KEY = "pi-temporal";
 const POLL_MS = 2000;
@@ -56,14 +57,10 @@ interface Env {
 
 // Read here rather than importing src/config.ts: that one is the worker's, and an extension has
 // no business inheriting the worker's defaults for the project directory.
+// One reader for everything both halves share, so the extension and the worker cannot disagree
+// about which profile is in force or where the sessions live.
 const env = (): Env => ({
-  address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
-  namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
-  taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
-  sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
-  idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
-  stepped: process.env.PI_TEMPORAL_STEPPED === "1",
-  shipTree: process.env.PI_TEMPORAL_SHIP_TREE === "1",
+  ...fromEnv(),
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
   durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS !== "0",
   provider: process.env.PI_TEMPORAL_PROVIDER,
@@ -90,7 +87,7 @@ export default function (pi: ExtensionAPI) {
 
   const connect = () => {
     connecting ??= (async () => {
-      const connection = await Connection.connect({ address: cfg.address });
+      const connection = await Connection.connect(connectionOptions(fromEnv()));
       return { client: new Client({ connection, namespace: cfg.namespace }), connection };
     })();
     return connecting;
@@ -102,6 +99,7 @@ export default function (pi: ExtensionAPI) {
     embedding ??= (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
+        connect: connectionOptions(fromEnv()),
         namespace: cfg.namespace,
         taskQueue: cfg.taskQueue,
         // Tools run where you are, so a background task sees the project you asked from.
@@ -193,6 +191,7 @@ export default function (pi: ExtensionAPI) {
     turnWorker ??= (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
+        connect: connectionOptions(fromEnv()),
         namespace: cfg.namespace,
         taskQueue: turnQueue,
         projectDir: process.cwd(),

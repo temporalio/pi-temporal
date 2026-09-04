@@ -3,15 +3,22 @@
 // directory. The pi extension runs the same worker inside pi (see src/session-worker.ts); this
 // one is for a fleet, or for keeping tasks moving with no pi open.
 
-import { fromEnv } from "./config.js";
+import { connectionOptions, describe, fromEnv, preflight } from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
 
 async function main() {
   const cfg = fromEnv();
   const projectDir = process.env.PI_PROJECT_DIR ?? process.cwd();
 
+  const problems = preflight(cfg);
+  for (const problem of problems) console.error(`configuration: ${problem}`);
+  // A worker that starts anyway is one that accepts work it cannot do, and the failure lands on
+  // whoever prompted it rather than on whoever deployed it.
+  if (problems.length > 0) process.exit(1);
+
   const { run } = await createSessionWorker({
     address: cfg.address,
+    connect: connectionOptions(cfg),
     namespace: cfg.namespace,
     taskQueue: cfg.taskQueue,
     projectDir,
@@ -21,11 +28,9 @@ async function main() {
     shipTree: cfg.shipTree,
   });
 
-  console.log(`pi-temporal worker on ${cfg.address} / ${cfg.namespace} / ${cfg.taskQueue}`);
-  console.log(`sessions: ${cfg.sessionDir}   project: ${projectDir}`);
-  // Worth saying out loud, because it is the difference between a session that moves between
-  // machines with its files and one that moves without them.
-  console.log(`project files travel with the session: ${cfg.shipTree ? "yes" : "no"}`);
+  console.log("pi-temporal worker");
+  for (const [name, value] of Object.entries(describe(cfg))) console.log(`  ${name}: ${value}`);
+  console.log(`  project: ${projectDir}`);
   await run();
 }
 

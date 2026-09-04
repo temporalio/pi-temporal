@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { connect, interrupt, submitPrompt } from "./client.js";
-import { fromEnv, sessionFileFor } from "./config.js";
+import { describe, fromEnv, preflight, sessionFileFor } from "./config.js";
 import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
 import { QueryRejectedError, ScheduleOverlapPolicy } from "@temporalio/client";
@@ -335,6 +335,31 @@ async function main() {
       say(`interrupted ${sessionId}`);
       return;
     }
+    // What this process resolved, and what is wrong with it. Deploying used to mean setting a
+    // handful of variables that have to agree, with no way to ask whether they did until a session
+    // answered with the wrong files hours later.
+    case "doctor": {
+      const cfg = fromEnv();
+      say("pi-temporal");
+      for (const [name, value] of Object.entries(describe(cfg))) say(`  ${name}: ${value}`);
+      const problems = preflight(cfg);
+      const reach = await connect()
+        .then(async ({ client, connection }) => {
+          try {
+            await client.workflowService.getSystemInfo({});
+            return "reached the server";
+          } finally {
+            await connection.close();
+          }
+        })
+        .catch((err) => `could not reach ${cfg.address}: ${err instanceof Error ? err.message : String(err)}`);
+      say(`  server: ${reach}`);
+      for (const problem of problems) say(`problem: ${problem}`);
+      if (!reach.startsWith("reached")) process.exitCode = 1;
+      if (problems.length > 0) process.exitCode = 1;
+      else if (reach.startsWith("reached")) say("this deployment looks consistent");
+      return;
+    }
     // Reclaiming the disk a finished session's files cost. Nothing does this on its own: a session
     // that went idle can be prompted again, and the bundles are what its next turn restores from,
     // so only somebody who knows the session is done can say so. The transcript is left alone.
@@ -365,6 +390,7 @@ async function main() {
       say("  watch <sessionId>                follow one until its turn ends");
       say("  stop <sessionId>                 interrupt the turn in flight");
       say("  forget <sessionId>               drop the project files a finished session kept");
+      say("  doctor                           what this deployment resolved, and what is wrong");
     say('  schedule "<task>" --every=1h     run it on a schedule, with no client at all');
     say("  unschedule <scheduleId>          stop that schedule");
       process.exitCode = command ? 1 : 0;
