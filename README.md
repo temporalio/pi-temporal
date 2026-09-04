@@ -194,8 +194,11 @@ What it costs: each activity opens the session file and builds an `AgentSession`
 - **The write at the end of a model call is guarded too.** The lock check used to sit before the
   call, and the assistant message is written at the end of a stream that runs for minutes. The
   session asks on its way to every append now, through the fork's `setWriteGuard`. It answers from
-  the lock refresher's last tick, because Pi's append path is synchronous and cannot await a read
-  of the lock file, so the window is a refresh interval rather than a whole model call.
+  the last refresh the lock confirmed, because Pi's append path is synchronous and cannot await a
+  read of the lock file, so the window is a refresh interval rather than a whole model call. It
+  compares timestamps rather than reading a flag a timer sets: a process whose event loop stopped
+  runs no timers, and that stall is the one case the guard exists for. It also gives up ten seconds
+  before the age a contender reclaims at, because those two are measured on two hosts' clocks.
 
 ## A session that outlives its client
 

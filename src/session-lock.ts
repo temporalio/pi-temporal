@@ -27,6 +27,12 @@ import { dirname } from "node:path";
 const STALE_MS = 60_000;
 const REFRESH_MS = 3_000;
 const RETRY_MS = 250;
+// How much earlier than that a holder stops saying the lock is its own. Both sides measuring the
+// same threshold is wrong in the direction that costs something: the contender reads an mtime
+// another host's clock wrote, so a clock ahead by `d` reclaims `d` early, and the holder is still
+// answering yes to the one question asked immediately before a write. A refresh interval plus room
+// for the skew a machine drifts to without anybody noticing.
+const MARGIN_MS = 10_000;
 
 // mtime comes from whichever host last touched the file, so a skewed clock reads a live lock as
 // dead. The exclusive create is what actually excludes, which needs a filesystem where O_EXCL is
@@ -148,8 +154,9 @@ export async function withSessionLock<T>(
   //
   // Two questions, both answered without I/O: has the refresher seen the lock taken, and has this
   // process been away long enough for it to have been. The second is what covers a stall, which is
-  // the only way a live holder loses a lock it is still refreshing.
-  const ownedNow = () => !lost && Date.now() - lastConfirmed < STALE_MS;
+  // the only way a live holder loses a lock it is still refreshing. It gives up before the age a
+  // contender reclaims at rather than exactly at it, because the two are measured on two clocks.
+  const ownedNow = () => !lost && Date.now() - lastConfirmed < STALE_MS - MARGIN_MS;
 
   try {
     return await body(owned, ownedNow);
