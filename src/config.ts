@@ -121,13 +121,24 @@ export function preflight(cfg: Config): string[] {
   if (!!process.env.PI_TEMPORAL_TLS_CERT !== !!process.env.PI_TEMPORAL_TLS_KEY) {
     problems.push("PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY come as a pair");
   }
+  return problems;
+}
+
+/**
+ * Worth saying, not worth refusing. The difference matters: a process that exits takes a deployment
+ * with it, so only what cannot work belongs in `preflight`. Plaintext to an address that is not
+ * loopback is a private network in most deployments and a mistake in some, and nothing here can
+ * tell which.
+ */
+export function notes(cfg: Config): string[] {
+  const said: string[] = [];
   if (!LOOPBACK.test(cfg.address) && !cfg.apiKey && !cfg.tls) {
-    problems.push(
-      `TEMPORAL_ADDRESS is ${cfg.address} with no credentials: set PI_TEMPORAL_API_KEY for Cloud, ` +
-        "or PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY for a cluster with mTLS",
+    said.push(
+      `reaching ${cfg.address} in plaintext. For Temporal Cloud set PI_TEMPORAL_API_KEY; for a ` +
+        "cluster with mTLS set PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY",
     );
   }
-  return problems;
+  return said;
 }
 
 /** Every setting that decides how this process behaves, and nothing that is a credential. */

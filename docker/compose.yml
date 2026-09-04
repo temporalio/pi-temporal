@@ -6,8 +6,9 @@
 #   docker compose -f docker/compose.yml up -d temporal worker-a
 #   docker compose -f docker/compose.yml run --rm client start "..."
 #
-# What this does NOT test: /sessions is a local volume, so the O_EXCL caveats in session-lock.ts
-# (NFSv3) are still untested. A real fleet wants a filesystem that answers those.
+# /sessions is a local volume here, which answers the exclusive-create and atomic-rename questions
+# by construction. `NFS=1` puts it on a real NFSv4 server instead (docker/compose.nfs.yml), which is
+# the shape that tests them rather than assuming them.
 
 name: pi-temporal-l3
 

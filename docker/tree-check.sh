@@ -8,12 +8,17 @@
 #
 # Usage: OPENAI_API_KEY=... docker/tree-check.sh
 #
-# KEEP=1 leaves the stack up to look at.
+# KEEP=1 leaves the stack up to look at. NFS=1 puts the session directory on a real NFSv4 server
+# instead of a local volume, which is the filesystem the lock's caveats are about.
 
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 COMPOSE="docker compose -f docker/compose.yml"
+# The same checks over a real network filesystem. A local volume answers the exclusive-create and
+# atomic-rename questions by construction, which is what the lock rests on, so it proves them only
+# where a fleet does not run.
+[ -n "${NFS:-}" ] && COMPOSE="$COMPOSE -f docker/compose.nfs.yml"
 export PI_TEMPORAL_TASK_QUEUE="pi-tree-$$"
 export PI_TEMPORAL_SHIP_TREE=1
 
@@ -30,6 +35,12 @@ $COMPOSE down -v >/dev/null 2>&1
 docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null || { echo "build failed"; exit 1; }
 # One worker for the first half, so the second one is provably a host that has never seen this
 # project. The second half brings both up, which is the only way a step's activities get spread.
+# The file server first, and waited for. The session directory is a volume the DAEMON mounts, and
+# it does that while creating a container rather than while starting it, so `depends_on` is too
+# late: the mount is attempted before anything has waited for the export to exist.
+if [ -n "${NFS:-}" ]; then
+  $COMPOSE up -d --wait nfs >/dev/null 2>&1 || { echo "the file server did not start"; exit 1; }
+fi
 $COMPOSE up -d temporal worker-a >/dev/null 2>&1 || { echo "stack failed to start"; exit 1; }
 
 hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')

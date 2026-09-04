@@ -1,0 +1,61 @@
+# The same two workers, with the session directory on a real network filesystem instead of a local
+# volume.
+#
+#   NFS=1 docker/tree-check.sh
+#
+# What this is for. Everything the lock does rests on an exclusive create being exclusive, and on a
+# rename being atomic, and a local volume answers both by construction. It says nothing about the
+# filesystem a fleet actually shares. NFSv4 does answer them (v3 does not, which is the caveat in
+# `session-lock.ts`), so this is the shape that tests the claim rather than assuming it.
+#
+# The mount is the daemon's, not the container's: the volume driver mounts the export and hands the
+# result to the workers, so nothing here needs a privileged worker or an `nfs-common` in the image.
+# The server itself is privileged, because `nfsd` is the kernel's.
+
+name: pi-temporal-l3
+
+services:
+  nfs:
+    image: erichough/nfs-server:latest
+    privileged: true
+    environment:
+      - NFS_EXPORT_0=/exports *(rw,no_subtree_check,no_root_squash,fsid=0)
+    volumes:
+      - nfsdata:/exports
+    ports:
+      # Published, because the daemon does the mounting and a compose service name means nothing to
+      # it. The port is fixed for the same reason the cluster's is: a check that has to discover one
+      # is a check that fails for a reason nobody reads.
+      - "12049:2049"
+    healthcheck:
+      test: ["CMD-SHELL", "rpcinfo -T tcp 127.0.0.1 100003 4 >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  worker-a:
+    depends_on:
+      nfs:
+        condition: service_healthy
+
+  worker-b:
+    depends_on:
+      nfs:
+        condition: service_healthy
+
+  client:
+    depends_on:
+      nfs:
+        condition: service_healthy
+
+volumes:
+  nfsdata:
+  sessions:
+    driver: local
+    driver_opts:
+      type: nfs
+      # `soft` so a server that dies fails the check rather than hanging it. `nolock` because what
+      # excludes two writers here is an exclusive create and a rename, not an advisory lock: that is
+      # the whole point of the lock's shape, and this is where it is put to the test.
+      o: "addr=127.0.0.1,nfsvers=4,port=12049,nolock,soft"
+      device: ":/"

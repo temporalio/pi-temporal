@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { connect, interrupt, submitPrompt } from "./client.js";
-import { describe, fromEnv, preflight, sessionFileFor } from "./config.js";
+import { describe, fromEnv, notes, preflight, sessionFileFor } from "./config.js";
 import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
 import { QueryRejectedError, ScheduleOverlapPolicy } from "@temporalio/client";
@@ -357,6 +357,7 @@ async function main() {
       const cfg = fromEnv();
       say("pi-temporal");
       for (const [name, value] of Object.entries(describe(cfg))) say(`  ${name}: ${value}`);
+      for (const note of notes(cfg)) say(`  note: ${note}`);
       const problems = preflight(cfg);
       const reach = await connect()
         .then(async ({ client, connection }) => {
