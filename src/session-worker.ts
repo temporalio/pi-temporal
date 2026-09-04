@@ -7,6 +7,7 @@
 import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { makeActivities, type ActivityOptions } from "./activities.js";
+import { queueForWorker } from "./queue.js";
 
 export interface SessionWorkerOptions extends ActivityOptions {
   readonly address: string;
@@ -26,26 +27,47 @@ export interface SessionWorker {
 
 export async function createSessionWorker(opts: SessionWorkerOptions): Promise<SessionWorker> {
   const connection = await NativeConnection.connect({ address: opts.address });
+  // The queue this process polls on its own, so a step can be sent back to the worker that started
+  // it. Derived here rather than passed in: it has to be the same name the activities report, and
+  // one of the two computing it separately is a session that waits on a queue nobody polls.
+  const stepQueue = queueForWorker(opts.taskQueue, opts.projectDir);
+  const activities = { ...makeActivities({ ...opts, stepQueue }), ...opts.activities };
   const worker = await Worker.create({
     connection,
     namespace: opts.namespace,
     taskQueue: opts.taskQueue,
     workflowsPath: fileURLToPath(new URL("./workflows.ts", import.meta.url)),
-    activities: { ...makeActivities(opts), ...opts.activities },
+    activities,
+  });
+  // Activities only. The workflow runs wherever it was started; what comes back here is the work
+  // that has to be on this host, and without a poller every pinned step would pay the
+  // schedule-to-start wait before falling back to the shared queue.
+  const pinned = await Worker.create({
+    connection,
+    namespace: opts.namespace,
+    taskQueue: stepQueue,
+    activities,
   });
 
   let running: Promise<void> | undefined;
+  let runningPinned: Promise<void> | undefined;
   return {
     worker,
     run: () => {
+      runningPinned ??= pinned.run();
+      runningPinned.catch(() => {
+        // Reported by whichever of the two the caller awaits; this one must not go unhandled.
+      });
       running ??= worker.run();
       return running;
     },
     stop: async () => {
       worker.shutdown();
+      pinned.shutdown();
       await running?.catch(() => {
         // A worker shut down mid-poll rejects; that is the shutdown, not a failure.
       });
+      await runningPinned?.catch(() => {});
       await connection.close();
     },
   };

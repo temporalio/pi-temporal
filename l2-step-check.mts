@@ -201,6 +201,84 @@ async function main() {
     check("an unknown outcome still seals", run.seals.length === 1, run.seals);
   }
 
+  // Pinning the rest of a step to the worker that made its model call, and what happens when that
+  // worker is gone. The pin is what lets a step's tools run together again while the tree travels:
+  // they write one directory instead of shipping it to each other. The fallback is what keeps a
+  // dead worker from holding the step for good.
+  {
+    const pinnedTools: ToolCallInput[] = [];
+    const pinnedSeals: SealStepInput[] = [];
+    const sharedTools: ToolCallInput[] = [];
+    const sharedSeals: SealStepInput[] = [];
+    let refuse = false;
+    let refused = 0;
+    // What Temporal raises when nobody took the work. Matched by shape, because that is what the
+    // workflow's own predicate matches.
+    const unclaimed = () =>
+      Object.assign(new Error("activity failed"), {
+        name: "ActivityFailure",
+        cause: { name: "TimeoutFailure", timeoutType: "SCHEDULE_TO_START" },
+      });
+    const isUnclaimed = (err: unknown) =>
+      (err as { cause?: { timeoutType?: string } })?.cause?.timeoutType === "SCHEDULE_TO_START";
+
+    const pinnedStep = (calls: DeferredToolCall[]) =>
+      makeSteppedStep({
+        activities: {
+          runModelCall: async () => ({ calls, sequential: false, ended: false, queue: "mine" }),
+          runToolCall: async (input) => {
+            sharedTools.push(input);
+            return { outcome: "settled" };
+          },
+          sealStep: async (input) => {
+            sharedSeals.push(input);
+            return SEALED;
+          },
+        },
+        isCancellation,
+        isUnclaimed,
+        pinnedTo: (queue) => {
+          if (queue !== "mine") throw new Error(`pinned to ${queue}`);
+          return {
+            runToolCall: async (input) => {
+              if (refuse) {
+                refused++;
+                throw unclaimed();
+              }
+              pinnedTools.push(input);
+              return { outcome: "settled" };
+            },
+            sealStep: async (input) => {
+              if (refuse) {
+                refused++;
+                throw unclaimed();
+              }
+              pinnedSeals.push(input);
+              return SEALED;
+            },
+          };
+        },
+        nonCancellable: (fn) => fn(),
+      });
+
+    await pinnedStep([call("a"), call("b")])(INPUT);
+    check(
+      "a step's tools and seal go back to the worker that made the model call",
+      pinnedTools.length === 2 && pinnedSeals.length === 1 && sharedTools.length === 0,
+      { pinnedTools: pinnedTools.length, pinnedSeals: pinnedSeals.length },
+    );
+
+    refuse = true;
+    await pinnedStep([call("c")])(INPUT);
+    // Schedule-to-start is the one failure that says the activity never started, so moving the work
+    // cannot run a tool twice. One refusal, not two: the seal that follows already knows.
+    check(
+      "and move to the shared queue when nobody takes them",
+      sharedTools.length === 1 && sharedSeals.length === 1 && refused === 1,
+      { sharedTools: sharedTools.length, sharedSeals: sharedSeals.length, refused },
+    );
+  }
+
   const bad = failures.length;
   console.log(bad === 0 ? "l2-step-check: OK" : `l2-step-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);

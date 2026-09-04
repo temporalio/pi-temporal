@@ -30,6 +30,14 @@ export interface SteppedActivities {
 export interface SteppedStepDeps {
   readonly activities: SteppedActivities;
   readonly isCancellation: (err: unknown) => boolean;
+  // The same two activities, addressed to the queue one worker polls on its own. A step's tools
+  // write the directory the model call's worker is standing in, so keeping them there is what lets
+  // them run at once: they see each other through the filesystem rather than through the tree
+  // store. Offered only the queue that worker reported.
+  readonly pinnedTo?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
+  // Whether a failure means nobody took the work. It is the one kind a pinned dispatch answers by
+  // trying the shared queue, because it says the activity never started and so nothing ran.
+  readonly isUnclaimed?: (err: unknown) => boolean;
   // Run the seal even though the turn was cancelled. Calls that finished have real results kept
   // for them, and abandoning the step tells the model they may have taken effect instead.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -50,6 +58,8 @@ export interface StepCalls {
   readonly calls: readonly DeferredToolCall[];
   readonly sequential: boolean;
   readonly ended: boolean;
+  /** The queue the worker that made this call polls on its own, when it has one. */
+  readonly queue?: string;
 }
 
 /**
@@ -110,7 +120,7 @@ export async function dispatchStepCalls(
 type SteppedStep = (input: RunStepInput) => Promise<RunStepResult>;
 
 export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
-  const { runModelCall, runToolCall, sealStep } = deps.activities;
+  const { runModelCall } = deps.activities;
 
   return async (input: RunStepInput): Promise<RunStepResult> => {
     const model = await runModelCall(input);
@@ -119,6 +129,41 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       // step: nothing to dispatch and nothing to close.
       return model.settled;
     }
+
+    // The worker that made the model call, when it offered a queue of its own. Everything else in
+    // this step is addressed there first: it is the host holding the directory the tools write.
+    const pinned = model.queue && deps.pinnedTo ? deps.pinnedTo(model.queue) : undefined;
+    let unclaimed = false;
+    // What is left of a step whose worker is gone goes to the shared queue one at a time. There it
+    // can land on two hosts again, which is what the tree store cannot take.
+    let shared: Promise<unknown> = Promise.resolve();
+    const onShared = <T>(run: (on: SteppedActivities) => Promise<T>): Promise<T> => {
+      const next = shared.then(
+        () => run(deps.activities),
+        () => run(deps.activities),
+      );
+      shared = next.then(
+        () => undefined,
+        () => undefined,
+      );
+      return next;
+    };
+    const viaPinned = async <T>(
+      run: (on: Pick<SteppedActivities, "runToolCall" | "sealStep">) => Promise<T>,
+    ): Promise<T> => {
+      if (!pinned || !deps.isUnclaimed) return run(deps.activities);
+      if (unclaimed) return onShared(run);
+      try {
+        return await run(pinned);
+      } catch (err) {
+        if (!deps.isUnclaimed(err)) throw err;
+        unclaimed = true;
+        deps.log?.("the worker that ran the model call is gone; the step moves to the shared queue", {
+          step: input.step,
+        });
+        return onShared(run);
+      }
+    };
 
     const stopped = await dispatchStepCalls(
       input.step,
@@ -130,7 +175,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
           step: input.step,
           call,
         };
-        return runToolCall(toolInput);
+        return viaPinned((on) => on.runToolCall(toolInput));
       },
       deps,
     );
@@ -138,14 +183,16 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     // Every call of the step is sealed, including the ones no dispatch answered for. A step that
     // leaves one open leaves a transcript the next model call cannot be made from.
     const seal = (interrupted: boolean): Promise<RunStepResult> =>
-      sealStep({
-        sessionId: input.sessionId,
-        sessionFile: input.sessionFile,
-        step: input.step,
-        calls: model.calls,
-        retryAttempt: input.retryAttempt,
-        interrupted,
-      });
+      viaPinned((on) =>
+        on.sealStep({
+          sessionId: input.sessionId,
+          sessionFile: input.sessionFile,
+          step: input.step,
+          calls: model.calls,
+          retryAttempt: input.retryAttempt,
+          interrupted,
+        }),
+      );
 
     if (stopped) {
       // The user stopped the turn, so close the step and then let the stop through. Skipping the
