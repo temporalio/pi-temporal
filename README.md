@@ -327,8 +327,15 @@ The rules that bound it:
   the work on a host that can do it. A refused *capture* is different: the tool has already run and
   a retry would find its result rather than run it again, so throwing there costs an attempt and
   still ships nothing. It sets the work aside instead, and says so.
-- **Tools of a step run one at a time** while the tree travels. Two on two hosts each publish a
-  tree without the other's work.
+- **A step stays on the worker that ran its model call.** Every worker polls a second queue of its
+  own, keyed by host and project directory, and the model call reports it; the tools and the seal
+  are addressed there. That worker is standing in the directory the tools are about to write, so
+  they see each other through the filesystem and the tree never moves between them, which is what
+  lets them run together while it travels. A pinned dispatch carries a 30 second
+  `scheduleToStartTimeout`, and that failure means the activity never started, so the work moves to
+  the shared queue with nothing run twice. What is left of that step then goes one at a time,
+  because on the shared queue it can land on two hosts again, which is what the tree store cannot
+  take.
 - **It is off by default.** On a laptop the tools already run in the directory you meant, and
   shipping it there is disk spent on a problem that host does not have.
 

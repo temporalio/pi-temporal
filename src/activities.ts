@@ -111,6 +111,9 @@ export interface ActivityOptions {
   // Ship the project's files with the session, so a worker on another machine finds the work the
   // last one did. Without it the transcript travels and the files do not.
   readonly shipTree?: boolean;
+  // The queue this worker polls on its own. Reported by the model call so the rest of the step can
+  // be sent back to this host, which is the one standing in the directory the tools will write.
+  readonly stepQueue?: string;
 }
 
 export function makeActivities(opts: ActivityOptions) {
@@ -261,8 +264,11 @@ export function makeActivities(opts: ActivityOptions) {
    * dispatch, one activity each. */
   // Tools of one step can be dispatched to different hosts, and each ships what its own directory
   // holds. Run two at once and the second to capture publishes a tree without the first one's
-  // work. Sequential is what the moving files cost.
-  const mustSerialize = (sequential: boolean) => sequential || opts.shipTree === true;
+  // work. That is what serializing them costs, and what pinning the step to this worker buys back:
+  // with a queue of our own they all land here, on one directory, and the tree never moves between
+  // them.
+  const mustSerialize = (sequential: boolean) =>
+    sequential || (opts.shipTree === true && opts.stepQueue === undefined);
 
   async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
     const stop = heartbeatEvery(3000);
@@ -284,6 +290,7 @@ export function makeActivities(opts: ActivityOptions) {
             calls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
             sequential: mustSerialize(outcome.sequential),
             ended: outcome.ended,
+            ...(opts.stepQueue === undefined ? {} : { queue: opts.stepQueue }),
           };
         } finally {
           session.dispose();

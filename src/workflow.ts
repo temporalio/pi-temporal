@@ -17,6 +17,8 @@ import {
   CancellationScope,
   isCancellation,
   log,
+  ActivityFailure,
+  TimeoutFailure,
 } from "@temporalio/workflow";
 import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS, WORKFLOW_ID_PREFIX } from "./protocol.js";
 import type {
@@ -69,6 +71,35 @@ function toolCallActivities(timeoutMinutes: number) {
 // that is itself a model call over the whole context. So it keeps the step-sized backstop.
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
+// How long a pinned activity waits for the worker that ran the model call to take it. That worker
+// polls the queue on its own, so this is the time to notice it is gone rather than a queueing
+// delay: while it stands, nobody else can take the work.
+const PINNED_SCHEDULE_TO_START = "30 seconds";
+
+/** The same two activities, addressed to one worker's own queue. Built per queue rather than once,
+ * because the queue is not known until the model call reports it, and that report comes out of
+ * history, so this is deterministic on replay. */
+const pinnedTo = (taskQueue: string) => ({
+  runToolCall: proxyActivities<SteppedActivities>({
+    ...cappedOptions,
+    retry: { maximumAttempts: 20 },
+    taskQueue,
+    scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
+  }).runToolCall,
+  sealStep: proxyActivities<SteppedActivities>({
+    ...cappedOptions,
+    taskQueue,
+    scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
+  }).sealStep,
+});
+
+/** Nobody took the work. The only failure a pinned dispatch answers by moving the work elsewhere:
+ * it means the activity never started, so no tool can have run. */
+const isUnclaimed = (err: unknown) =>
+  err instanceof ActivityFailure &&
+  err.cause instanceof TimeoutFailure &&
+  err.cause.timeoutType === "SCHEDULE_TO_START";
+
 // Retiring is housekeeping, so it gets a short leash: a session that has already stopped must not
 // keep a run open waiting for it, and the next prompt works whether or not this succeeded.
 const { retireSession } = proxyActivities<{
@@ -116,6 +147,8 @@ export async function piSession(
           sealStep,
         },
         isCancellation,
+        pinnedTo,
+        isUnclaimed,
         nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
         // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
         log: (message, attributes) => log.info(message, attributes),
