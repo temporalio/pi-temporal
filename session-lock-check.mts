@@ -68,10 +68,33 @@ async function main() {
   });
   check("a live holder's lock is not stolen", refused);
 
-  // Mutual exclusion when several contenders find one stale lock together. It does NOT cover the
-  // interleaving the rename-based reclaim exists for: that needs a contender stalled between
-  // reading the lock's age and reclaiming it, for longer than another takes to reclaim and
-  // acquire. Nothing here can hold the event loop at that point, so this passes either way.
+  // The interleaving the rename-based reclaim exists for, and the one nothing here could reach:
+  // a contender stalled between measuring a stale lock's age and reclaiming it, for longer than
+  // another takes to reclaim it and take it. The stall is the only thing injected, through
+  // `withSessionLock`'s last argument. What is asserted is the real outcome: the slow one must not
+  // move a lock the quick one is holding and then take it.
+  const late = join(dir, "late.jsonl");
+  await writeFile(`${late}.lock`, JSON.stringify({ token: "dead" }), "utf8");
+  const cold = new Date(Date.now() - STALE_ENOUGH);
+  await utimes(`${late}.lock`, cold, cold);
+
+  let insideLate = 0;
+  let overlappedLate = false;
+  const enterLate = async (hold: number) => {
+    insideLate++;
+    if (insideLate > 1) overlappedLate = true;
+    await sleep(hold);
+    insideLate--;
+  };
+  // Reads the stale lock, then stalls before it can rename it away.
+  const slow = withSessionLock(late, () => enterLate(300), 20_000, 1_500);
+  await sleep(200);
+  // Finds the same stale lock, reclaims it, and is still holding it when the slow one wakes up.
+  const quick = withSessionLock(late, () => enterLate(2_000), 20_000);
+  await Promise.all([slow, quick]);
+  check("a reclaim that lost the race does not take a live lock", !overlappedLate);
+
+  // Mutual exclusion when several contenders find one stale lock together, without the stall.
   let bothIn = false;
   for (let round = 0; round < 20 && !bothIn; round++) {
     const raced = join(dir, `raced-${round}.jsonl`);
