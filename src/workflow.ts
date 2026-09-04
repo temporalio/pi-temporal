@@ -85,6 +85,16 @@ const isUnclaimed = (err: unknown) =>
   err.cause instanceof TimeoutFailure &&
   err.cause.timeoutType === "SCHEDULE_TO_START";
 
+// Copying a project a client left for a scheduled session. Short, and it has to finish before the
+// first step, so a queue nobody polls must not hold the run open waiting for it.
+const { adoptProject } = proxyActivities<{
+  adoptProject(input: { sessionFile: string; template: string }): Promise<void>;
+}>({
+  startToCloseTimeout: "5 minutes",
+  scheduleToCloseTimeout: "30 minutes",
+  retry: { maximumAttempts: 10 },
+});
+
 // Retiring is housekeeping, so it gets a short leash: a session that has already stopped must not
 // keep a run open waiting for it, and the next prompt works whether or not this succeeded.
 const { retireSession } = proxyActivities<{
@@ -125,6 +135,11 @@ export async function piSession(
         log: (message, attributes) => log.info(message, attributes),
       })
     : runStep;
+  // A project the client left for this session, for a start nothing was running to send one to.
+  // Before any step, because every activity restores the tree before it runs and a session with
+  // nothing established refuses them all. Carried across a rollover with everything else, and a
+  // no-op once the session has a project of its own.
+  if (options?.template) await adoptProject({ sessionFile: file, template: options.template });
   // Seeded from the input, which is what lets a turn start with no client: the task is already in
   // the workflow when it begins, rather than arriving as a signal from something still running.
   // `queued` is the other source, from a run that rolled over with work still in hand.

@@ -118,15 +118,26 @@ async function schedule(args: string[]) {
   const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
-  // Every firing is its own session, and nothing is running at firing time to send the project. An
-  // activity cannot send it either, for the reason in `worktree.ensure`. So the two features do not
-  // compose yet, and saying so beats a scheduled session that fails on every activity.
-  if (fromEnv().shipTree) {
-    throw new Error(
-      "schedule does not carry the project yet: each firing is its own session and nothing is " +
-        "running to send it. Run with PI_TEMPORAL_SHIP_TREE unset, or point the workers at the " +
-        "project directly.",
-    );
+  // Every firing is its own session and nothing is running at firing time to send it a project, so
+  // the project is sent once, here, and each firing takes a copy of it. A worker may not establish
+  // a project from its own directory; copying a store a client wrote is a different thing, and it
+  // is the one that lets a schedule and the travelling tree compose.
+  const scheduled = fromEnv();
+  let template: string | undefined;
+  if (scheduled.shipTree) {
+    const projectDir = flag("project") ?? process.env.PI_PROJECT_DIR;
+    if (!projectDir) {
+      throw new Error(
+        "the tree is on, so a schedule needs the project: " +
+          'pi-temporal schedule "..." --every=1h --project=/path/to/repo',
+      );
+    }
+    template = sessionFileFor(scheduled.sessionDir, `schedule-${id}`);
+    await worktree.capture(projectDir, template, { seed: true });
+    // A template is not a session anything runs, so nothing ever retires it. Leaving this host's
+    // claim on the directory it came from would refuse every later session started there.
+    await worktree.unclaim(projectDir, template);
+    say(`  sent the project from ${projectDir}`);
   }
 
   const { cfg, client, connection } = await connect();
@@ -155,6 +166,7 @@ async function schedule(args: string[]) {
             idleTimeout: cfg.idleTimeout,
             stepped: cfg.stepped,
             sessionDir: cfg.sessionDir,
+            template,
             initialPrompt: { promptId: `scheduled-${id}`, text },
           },
         ],
@@ -318,6 +330,9 @@ async function main() {
       const { client, connection } = await connect();
       try {
         await client.schedule.getHandle(id).delete();
+        // And the copy of the project it was firing with. Nothing else reads it: every session it
+        // served took its own copy at its first step.
+        await worktree.forget(sessionFileFor(fromEnv().sessionDir, `schedule-${id}`));
         say(`deleted ${id}`);
       } finally {
         await connection.close();

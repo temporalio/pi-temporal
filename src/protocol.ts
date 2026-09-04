@@ -81,6 +81,9 @@ export interface SessionTurnOptions {
   // Where to keep the session log when the id is derived rather than given. A scheduled start has
   // no client to choose either, and the workflow may not read the environment.
   readonly sessionDir?: string;
+  // A project some client sent once, for a session that has nobody to send it. Every firing of a
+  // schedule is its own session, so each takes a copy of this store before its first activity.
+  readonly template?: string;
   // What a run that rolled over was still holding. The queue is the whole of the control state, so
   // handing it to the next run is what makes the rollover invisible to a client.
   readonly queued?: readonly PromptInput[];

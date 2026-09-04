@@ -441,7 +441,19 @@ export function makeActivities(opts: ActivityOptions) {
     if (freed) console.log(`handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
   }
 
-  return { runStep, runModelCall, runToolCall, sealStep, retireSession };
+  /** Take the copy of the project a client left for a session that has nobody to send it. Runs
+   * before the first step of a scheduled session, and does nothing once that session has a tip of
+   * its own, so a re-driven activity does not copy twice. */
+  async function adoptProject(input: {
+    readonly sessionFile: string;
+    readonly template: string;
+  }): Promise<void> {
+    if (!opts.shipTree) return;
+    const copied = await worktree.adopt(input.template, input.sessionFile);
+    if (copied) console.log(`took the project from ${input.template} for ${input.sessionFile}`);
+  }
+
+  return { runStep, runModelCall, runToolCall, sealStep, retireSession, adoptProject };
 }
 
 export type Activities = ReturnType<typeof makeActivities>;
