@@ -423,10 +423,11 @@ export function makeActivities(opts: ActivityOptions) {
 
   /** Give the project directory back when the session stops being driven. Without a caller for
    * this, a worker with one `PI_PROJECT_DIR` serves one session for as long as it lives and every
-   * later one is refused. */
+   * later one is refused. It also records that the session is over, which is the only way the hosts
+   * that do not draw this activity can hand their own directories back. */
   async function retireSession(input: { readonly sessionFile: string }): Promise<void> {
     if (!opts.shipTree) return;
-    const freed = await worktree.release(opts.projectDir, input.sessionFile).catch((err) => {
+    const freed = await worktree.retire(opts.projectDir, input.sessionFile).catch((err) => {
       console.warn(`could not hand back ${opts.projectDir}: ${String(err)}`);
       return false;
     });

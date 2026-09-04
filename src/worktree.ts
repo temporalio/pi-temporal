@@ -52,6 +52,10 @@ interface Held {
   // working copy, and what it holds includes files git ignores, which no bundle carries and nothing
   // else has a copy of. Absent means no, which is what an older note without the field should mean.
   readonly built?: boolean;
+  // Which session the note belongs to. The file name is a hash, so without this a host reading
+  // somebody else's note cannot ask the shared directory anything about it, and a note nothing can
+  // ask about is a claim nothing takes back.
+  readonly session?: string;
 }
 
 // What the shared directory says the newest state is. `seq` orders the bundles, because a host has
@@ -81,14 +85,14 @@ const heldName = (sessionFile: string) =>
 const heldPath = (projectDir: string, sessionFile: string) =>
   join(hostDir(projectDir), heldName(sessionFile));
 
-// Whether another session is using this directory. Derived from the per-session notes rather than
-// kept as a claim of its own, so it is released by the same thing that releases them: a claim with
-// its own lifetime is one nothing ever takes back.
-async function heldByOthers(projectDir: string, sessionFile: string) {
-  const mine = heldName(sessionFile);
-  const notes = await readdir(hostDir(projectDir)).catch(() => [] as string[]);
-  return notes.some((name) => name.startsWith("held-") && name !== mine);
-}
+// Said by the shared directory, so every host can read it and not only the one that ran the
+// retirement. This is what makes the per-host note a cache: without somewhere to ask whether the
+// session that wrote a note is over, the note is the only answer and nothing can correct it.
+const retiredPath = (sessionFile: string) => join(shareDir(sessionFile), "retired.json");
+const isRetired = async (sessionFile: string) =>
+  (await readJson<unknown>(retiredPath(sessionFile))) !== undefined;
+// A session doing work is not retired, whatever a marker from its last idle period says.
+const revive = (sessionFile: string) => rm(retiredPath(sessionFile), { force: true });
 // Host-local, because a project directory is. One worker running two steps of two sessions is the
 // case this excludes; two hosts cannot share the directory in the first place.
 const treeLockPath = (projectDir: string) => join(hostDir(projectDir), "tree");
@@ -227,7 +231,12 @@ async function publish(
   await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
   // `built` is carried, never invented here. A capture says what the directory now holds, not where
   // the directory came from, and the answer to that only changes when a restore creates one.
-  await writeJson(heldPath(projectDir, sessionFile), { tree, seq, built } satisfies Held);
+  await writeJson(heldPath(projectDir, sessionFile), {
+    tree,
+    seq,
+    built,
+    session: sessionFile,
+  } satisfies Held);
 }
 
 // Work this host holds that the session never shipped, put where it can be recovered instead of
@@ -255,6 +264,51 @@ async function salvage(projectDir: string, sessionFile: string, tree: string) {
   );
 }
 
+// Empty a directory this host built for a session, so the next one can have it. Refuses the two
+// cases where emptying costs something nobody can get back: a directory that was somebody's before
+// this session found it, and one holding work the session never shipped. Answers whether it came
+// out empty, because neither command below removes a `.git` at the root and a directory that is not
+// actually empty is one the next restore refuses.
+async function handBack(projectDir: string, sessionFile: string, held: Held) {
+  const tip = await readJson<Tip>(tipPath(sessionFile));
+  if (!tip || !held.built) return false;
+  if ((await treeHere(projectDir)) !== tip.tree) return false;
+  await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
+  // `-x` as well, because what the next session finds has to be an empty directory and not a nearly
+  // empty one. On a tree this host built there is nothing to lose, which is why only those get here.
+  await git(projectDir, ["clean", "-fdxq"]);
+  return await isEmptyDir(projectDir);
+}
+
+// Whether another session is using this directory, after handing back the ones that are over. A
+// session leaves a note on every host that served it, and the retirement runs on exactly one of
+// them, so the rest used to keep a directory nobody was using and refuse every later session with
+// it. The session says it is finished in the shared directory; each host repairs itself from that.
+// Called with the tree lock held.
+async function heldByOthers(projectDir: string, sessionFile: string) {
+  const mine = heldName(sessionFile);
+  const names = (await readdir(hostDir(projectDir)).catch(() => [] as string[])).filter(
+    (name) => name.startsWith("held-") && name !== mine,
+  );
+  let holdouts = 0;
+  for (const name of names) {
+    const path = join(hostDir(projectDir), name);
+    const note = await readJson<Held>(path);
+    // A note that names no session cannot be asked about, and a session still running holds what it
+    // holds. Both stay.
+    if (!note?.session || !(await isRetired(note.session))) {
+      holdouts++;
+      continue;
+    }
+    if (note.built && !(await handBack(projectDir, note.session, note))) {
+      holdouts++;
+      continue;
+    }
+    await rm(path, { force: true });
+  }
+  return holdouts > 0;
+}
+
 /**
  * Record the project's files against this session. Cheap when nothing changed: a tree id is
  * content-addressed, so an untouched directory produces the tree the tip already names.
@@ -271,6 +325,8 @@ export async function capture(
   // One at a time per directory. Two captures share an index and a shadow repository, so a second
   // one collides on `index.lock`, and that failure reads as a session that stopped shipping.
   await withSessionLock(treeLockPath(projectDir), async () => {
+    // Work of any kind means this session is not the finished one its last idle period marked.
+    await revive(sessionFile);
     const tip = await readJson<Tip>(tipPath(sessionFile));
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
 
@@ -305,6 +361,7 @@ export async function capture(
  */
 export async function ensure(projectDir: string, sessionFile: string): Promise<void> {
   await withSessionLock(treeLockPath(projectDir), async () => {
+    await revive(sessionFile);
     // Read inside the lock. A capture on this host between the read and the lock would leave this
     // deciding against a tip that has already moved, and resetting the directory to the older tree.
     const tip = await readJson<Tip>(tipPath(sessionFile));
@@ -361,6 +418,7 @@ export async function ensure(projectDir: string, sessionFile: string): Promise<v
       tree: tip.tree,
       seq: tip.seq,
       built: held ? held.built : true,
+      session: sessionFile,
     } satisfies Held);
   });
 }
@@ -380,30 +438,28 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
  */
 export async function release(projectDir: string, sessionFile: string): Promise<boolean> {
   return await withSessionLock(treeLockPath(projectDir), async () => {
-    const tip = await readJson<Tip>(tipPath(sessionFile));
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
-    if (!tip || !held) return false;
-    // Only a directory this host built out of an empty one. A directory that already had files when
-    // the session found it belongs to whoever put them there, and emptying it takes the files git
-    // ignores with it: a `.env`, an install, a build. No bundle carries those and nothing else has
-    // a copy. Keeping the directory is the lesser cost by a wide margin.
-    if (!held.built) return false;
-    // Anything unshipped is work only this host has.
-    if ((await treeHere(projectDir)) !== tip.tree) return false;
-
-    await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
-    // `-x` as well, because what the next session finds has to be an empty directory and not a
-    // nearly empty one: anything left is a directory the restore refuses to write over. On a tree
-    // this host built there is nothing to lose, which is exactly why only those get here.
-    await git(projectDir, ["clean", "-fdxq"]);
-
-    // Neither command above removes a `.git` at the root of the work tree, and git's walk skips it.
-    // A directory that is not actually empty is one the next session is refused, so dropping the
-    // note there would wedge this host instead of handing it back. Keep the note and say no.
-    if (!(await isEmptyDir(projectDir))) return false;
+    if (!held) return false;
+    // A directory that could not be emptied is one the next restore refuses, so dropping the note
+    // there would wedge this host instead of handing it back. Keep the note and say no.
+    if (!(await handBack(projectDir, sessionFile, held))) return false;
     await rm(heldPath(projectDir, sessionFile), { force: true });
     return true;
   });
+}
+
+/**
+ * The session is over. Say so where every host can read it, then hand this host's directory back.
+ *
+ * The marker is the half that matters: the retirement runs on one host, and the others are holding
+ * a directory each for a session nobody is driving. They read this the next time a session wants
+ * the directory, and hand their own back then.
+ */
+export async function retire(projectDir: string, sessionFile: string): Promise<boolean> {
+  if (await established(sessionFile)) {
+    await writeJson(retiredPath(sessionFile), { at: new Date().toISOString() });
+  }
+  return await release(projectDir, sessionFile);
 }
 
 /**

@@ -253,6 +253,27 @@ async function main() {
     { afterRestore, stillThere, stillIgnored },
   );
 
+  // Handing the directory back, from the two sides that are not the one host the retirement runs
+  // on. A session leaves a note wherever it ran, so without this a directory serves one session and
+  // refuses every later one, which is the failure the note was supposed to prevent for other
+  // sessions and caused for itself.
+  const s7 = join(shared, "s7.jsonl");
+  await worktree.retire(owned, s5);
+  const reseeded = await worktree
+    .capture(owned, s7, { seed: true })
+    .then(() => true, () => false);
+  check("a checkout the session adopted can start the next one", reseeded);
+
+  // And the worker that served the session but did not draw the retirement. Its directory is the
+  // one kind that may be emptied, and nothing was emptying it.
+  asHost(root, "s5-worker");
+  const servedAgain = await worktree.ensure(helper, s7).then(() => true, () => false);
+  const carried = (await read(join(helper, "src.txt"))) === "edited\n";
+  check("and a worker that served it can serve the next one", servedAgain && carried, {
+    servedAgain,
+    carried,
+  });
+
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
   const gone = await readdir(`${sessionFile}.tree`).then(() => false, () => true);
