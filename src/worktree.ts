@@ -354,11 +354,13 @@ export async function ensure(projectDir: string, sessionFile: string): Promise<v
     await git(projectDir, ["read-tree", "-u", "--reset", tip.tree]);
     // A restore into a directory this session had no note for is the one case that creates a
     // directory rather than adopting one, and `!held` only gets past the guard above when the
-    // directory was empty. Otherwise carry what the note already said.
+    // directory was empty. Otherwise carry what the note already said, including when it said
+    // nothing: an adopted directory's note has no `built` field, and reading that absence as a
+    // missing value to default hands somebody's checkout to `release`.
     await writeJson(heldPath(projectDir, sessionFile), {
       tree: tip.tree,
       seq: tip.seq,
-      built: held?.built ?? true,
+      built: held ? held.built : true,
     } satisfies Held);
   });
 }
