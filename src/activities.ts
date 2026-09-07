@@ -336,7 +336,7 @@ export function makeActivities(
         openSession(input.sessionFile, () => {
           if (opening) return writeGuard(ownedNow, "opening the session")();
           throw new Error(
-            "a tool activity must not write to the session: the seal is the step's only writer",
+            "a tool activity must not write to the session: the seal records what the step produced",
           );
         }),
       );
