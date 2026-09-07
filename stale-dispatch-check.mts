@@ -1,7 +1,8 @@
 // Dispatch admission has to outlive cleanup of the result it produced. An attempt that stalled
-// before taking its claim comes back after the seal has written the answer and the next step has
-// swept the results; if the sweep also took the admission, its call looks fresh and it runs the
-// tool a second time. A fifth review reproduced that; the sweep keeps the notes now.
+// before taking its claim comes back after the seal has written the answer and the cleanup has
+// taken the result; if that cleanup also took the admission, its call looks fresh and it runs the
+// tool a second time. A fifth review reproduced that. Both cleanups run here, the one a later step
+// of the turn does and the one a later turn does, because the stall is not bounded by either.
 //
 // Usage: npx tsx stale-dispatch-check.mts
 import assert from "node:assert/strict";
@@ -17,7 +18,13 @@ import type { ToolCallInput, ToolCallResult } from "./src/protocol.js";
 const root = await mkdtemp(join(tmpdir(), "pi-stale-dispatch-"));
 const file = join(root, "session.jsonl");
 const effectFile = join(root, "effects");
-const input: ToolCallInput = { sessionId: "session", sessionFile: file, step: 1, call: { id: "call", name: "probe" } };
+const input: ToolCallInput = {
+  sessionId: "session",
+  sessionFile: file,
+  turn: "prompt",
+  step: 1,
+  call: { id: "call", name: "probe" },
+};
 const activities = makeActivities({ projectDir: root }, {
   openSession: async () => ({
     state: { messages: [{ role: "assistant", content: [{ type: "toolCall", id: "call" }] }] },
@@ -37,7 +44,7 @@ let first: Promise<ToolCallResult> | undefined;
 try {
   let paused = false;
   fs.mkdir = (async (...args: Parameters<typeof fs.mkdir>) => {
-    if (!paused && args[0] === `${file}.pending/1`) {
+    if (!paused && args[0] === pending.stepDirFor(file, input.turn, 1)) {
       paused = true;
       reached();
       await gate;
@@ -49,7 +56,9 @@ try {
   await waiting;
   await activities.runToolCall(input);
   assert.equal(await readFile(effectFile, "utf8"), "effect\n");
-  await pending.sweep(file, 2);
+  await pending.sweep(file, input.turn, 2);
+  // And the cleanup a following turn does, which is the wider version of the same interleaving.
+  await pending.sweepResults(file);
   release();
   await first;
   const effects = await readFile(effectFile, "utf8");

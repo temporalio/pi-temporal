@@ -123,6 +123,10 @@ export interface ModelCallResult {
 export interface ToolCallInput {
   readonly sessionId: string;
   readonly sessionFile: string;
+  // The turn this call belongs to, which is the prompt's id. What a dispatch knows about a call is
+  // kept under it, and a turn numbers its steps from one again, so without it a step of the next
+  // turn reads the step before it as its own.
+  readonly turn: string;
   readonly step: number;
   readonly call: DeferredToolCall;
 }
@@ -142,6 +146,8 @@ export interface ToolCallResult {
 export interface SealStepInput {
   readonly sessionId: string;
   readonly sessionFile: string;
+  // Which turn's kept results to read. See `ToolCallInput`.
+  readonly turn: string;
   readonly step: number;
   readonly retryAttempt?: number;
   // The turn was stopped, so record the results and nothing else. A provider retry or a

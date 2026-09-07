@@ -13,6 +13,7 @@ const effectFile = join(root, "effects");
 const input: ToolCallInput = {
   sessionId: "session",
   sessionFile: join(root, "session.jsonl"),
+  turn: "prompt",
   step: 1,
   call: { id: "call", name: "probe" },
 };
@@ -61,8 +62,10 @@ try {
   console.log("PASS a failed dispatch write blocks the effect");
 
   const unreadable = join(root, "unreadable.jsonl");
-  await mkdir(`${unreadable}.pending/1/call.started`, { recursive: true });
-  await assert.rejects(pending.wasDispatched(unreadable, 1, "call"), { code: "EISDIR" });
+  await mkdir(join(pending.stepDirFor(unreadable, "prompt", 1), "call.started"), {
+    recursive: true,
+  });
+  await assert.rejects(pending.wasDispatched(unreadable, "prompt", 1, "call"), { code: "EISDIR" });
   console.log("PASS an unreadable dispatch note is not treated as absent");
 } finally {
   fs.writeFile = originalWriteFile;

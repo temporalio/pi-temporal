@@ -92,10 +92,15 @@ const danglingCallIds = (messages: Msg[]) =>
     (call) => call.id,
   );
 
-const noDispatchStarted = async (file: string, step: number, callIds: readonly string[]) => {
+const noDispatchStarted = async (
+  file: string,
+  turn: string,
+  step: number,
+  callIds: readonly string[],
+) => {
   if (callIds.length === 0) return false;
   for (const callId of callIds) {
-    if (await pending.wasDispatched(file, step, callId)) return false;
+    if (await pending.wasDispatched(file, turn, step, callId)) return false;
   }
   return true;
 };
@@ -199,12 +204,12 @@ export function makeActivities(
     const messages = () => session.state.messages as Msg[];
     // What the step before this one kept. Its own results stay until the step after it, so a
     // retried seal still reads real outcomes.
-    if (stepped) await pending.sweep(input.sessionFile, input.step);
+    if (stepped) await pending.sweep(input.sessionFile, input.promptId, input.step);
 
     if (!markerPresent(messages(), input.promptId)) {
       // Everything the last turn left. Steps are numbered per turn, so sweeping by step number
       // alone never reaches a turn that ran further than this one will.
-      if (stepped) await pending.sweepAll(input.sessionFile);
+      if (stepped) await pending.sweepResults(input.sessionFile);
       // Settle what the turn that stopped left behind first. A call with no result is a payload no
       // provider accepts, so a prompt recorded behind one makes every later turn of the session
       // fail rather than just the interrupted one.
@@ -222,7 +227,8 @@ export function makeActivities(
     // tell the model that tools which never ran may have taken effect, and pay for a second
     // response on top.
     const dangling = danglingCallIds(messages());
-    if (stepped && (await noDispatchStarted(input.sessionFile, input.step, dangling))) {
+    const started = noDispatchStarted(input.sessionFile, input.promptId, input.step, dangling);
+    if (stepped && (await started)) {
       return undefined;
     }
 
@@ -339,11 +345,11 @@ export function makeActivities(
         // The transcript first: a result in it means a whole dispatch and a seal already
         // happened, and the kept files for the call are what is left behind.
         if (answeredInTranscript(session.state.messages as Msg[], input.call.id)) {
-          await pending.forget(input.sessionFile, input.step, [input.call.id]);
+          await pending.forgetResults(input.sessionFile, input.turn, input.step, [input.call.id]);
           return { outcome: "already-settled" };
         }
 
-        if (await pending.readResult(input.sessionFile, input.step, input.call.id)) {
+        if (await pending.readResult(input.sessionFile, input.turn, input.step, input.call.id)) {
           return { outcome: "already-settled" };
         }
 
@@ -355,19 +361,26 @@ export function makeActivities(
           throw new Error(`no recorded tool call ${input.call.id} in ${input.sessionId}`);
         }
 
-        if (!(await pending.noteDispatch(input.sessionFile, input.step, input.call.id))) {
+        const { turn, step, call } = input;
+        if (!(await pending.noteDispatch(input.sessionFile, turn, step, call.id))) {
           // A dispatch was inside this tool when it stopped, so the tool can have taken effect.
           // Re-running a push or a delete that already happened is the worse failure, so the
           // model is told the outcome instead of the tool being asked again.
           const unknown = unknownToolCallOutcome(input.call);
-          await pending.keepResult(input.sessionFile, input.step, input.call.id, unknown);
+          await pending.keepResult(input.sessionFile, turn, step, call.id, unknown);
           return { outcome: "unknown" };
         }
 
         const outcome = await session.runToolCall(input.call.id);
         if (!outcome) return { outcome: "already-settled" };
 
-        await pending.keepResult(input.sessionFile, input.step, input.call.id, outcome);
+        await pending.keepResult(
+          input.sessionFile,
+          input.turn,
+          input.step,
+          input.call.id,
+          outcome,
+        );
         // Shipped from here, because this host ran the tool and is the only one holding what it
         // did. The seal can land anywhere, and capturing there would ship a directory that never
         // saw this tool. Under the shared lock, for the reason the restore above is.
@@ -395,7 +408,8 @@ export function makeActivities(
             // A call with nothing kept for it is one whose dispatch never came back. Sealing
             // without it would leave the transcript holding a call no result answers, which is a
             // payload no provider accepts.
-            const kept = await pending.readResult(input.sessionFile, input.step, call.id);
+            const { turn, step } = input;
+            const kept = await pending.readResult(input.sessionFile, turn, step, call.id);
             results.push(kept ?? unknownToolCallOutcome(call));
           }
 
