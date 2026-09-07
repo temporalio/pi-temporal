@@ -3,9 +3,10 @@
 // the model asking for a tool and the tool running, which is where a per-tool retry policy, a
 // per-tool timeout and a budget can live.
 //
-// The seal is the step's only writer. Two calls settling at once would each parent their entry off
-// the leaf they saw and branch the session tree, so a call reports its result and the seal records
-// them together, in the order the model asked.
+// The seal is the only writer of the step's results, though not of the transcript: the model call
+// writes the assistant message. Two calls settling at once would each parent their entry off the
+// leaf they saw and branch the session tree, so a call reports its result and the seal records them
+// together, in the order the model asked.
 //
 // Sandbox-safe: no SDK imports and no Node builtins, so the workflow bundle can hold it. What it
 // needs from the SDK is injected.

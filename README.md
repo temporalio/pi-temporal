@@ -163,13 +163,15 @@ The point is what can now sit between the model asking for a tool and the tool r
 
 Two things are load-bearing and were easy to get wrong.
 
-**The seal is the step's only writer.** Pi's session file is a tree, and every entry takes its parent from the leaf the writer last saw. Two calls settling at once would each parent off the leaf they saw and branch the transcript, and Pi's own parallel path appends results in call order after the batch, which per-call activities would lose. So a call reports its result and the seal records the step's results together, in the order the model asked. The transcript ends up the one Pi would have written, which its own tests pin.
+**The seal is the only writer of the step's results.** Not of the transcript: the model call writes the assistant message. Pi's session file is a tree, and every entry takes its parent from the leaf the writer last saw. Two calls settling at once would each parent off the leaf they saw and branch the transcript, and Pi's own parallel path appends results in call order after the batch, which per-call activities would lose. So a call reports its result and the seal records the step's results together, in the order the model asked. The transcript ends up the one Pi would have written, which its own tests pin.
 
-Two attempts of the same activity can still both be alive, so every activity that writes takes a lock beside the session file first. A holder that stops refreshing it is reclaimed on age, which keeps one dead worker from taking the session with it. The tool calls take no lock, because they do not write.
+Two attempts of the same activity can still both be alive, so every activity that writes takes a lock beside the session file first. A holder that stops refreshing it is reclaimed on age, which keeps one dead worker from taking the session with it. That includes the tool calls: they do not write the transcript, but they move the project's files, and the tree's own lock is host-local while two hosts publishing at once is the case that has to be excluded.
 
 **A call that already started is not silently repeated.** A dispatch writes a note beside the session file before the tool can have any effect, and keeps the result there when it comes back. A second dispatch that finds a result returns it; one that finds only the note reports the outcome as unknown rather than running a `git push` that may already have landed. The attempt number would answer the same question far less precisely: it counts every way a dispatch can die, including the ones that never reached the tool.
 
-The kept results live in `<session>.jsonl.pending/<step>/`, scoped by step because a call id is only unique within the message that asked for it, and the next step's model call drops the step before it. The seal deliberately does not drop its own: a seal whose answer never reached Temporal runs again, and a batch it reads as empty is a batch it reads as wanting another step, even when a tool asked the turn to stop.
+The kept results live in `<session>.jsonl.pending/<turn>/<step>/`, scoped by both because a call id is only unique within the message that asked for it and a turn numbers its steps from one again. The next step's model call drops the results of the steps before it. The seal deliberately does not drop its own: a seal whose answer never reached Temporal runs again, and a batch it reads as empty is a batch it reads as wanting another step, even when a tool asked the turn to stop.
+
+The notes are not dropped with the results, and that is the whole reason for the turn in the path. The attempt a note guards against is one that stalled: it comes back after the seal wrote the answer and after the cleanup that followed, and nothing else on disk can then tell its call from one nothing has run yet. An empty file per call is what keeping it costs. Under a scope of step alone the next turn's step 1 would read the last turn's step 1 as its own, and report a tool that never ran as already dispatched.
 
 Each tool call gets 30 minutes per attempt by default. A call that crosses it is not run again, since its note says it started, so it ends as an unknown outcome while the tool may still be running. A deployment with longer tools sets `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` on the client that starts the session.
 
@@ -199,6 +201,30 @@ What it costs: each activity opens the session file and builds an `AgentSession`
   compares timestamps rather than reading a flag a timer sets: a process whose event loop stopped
   runs no timers, and that stall is the one case the guard exists for. It also gives up ten seconds
   before the age a contender reclaims at, because those two are measured on two hosts' clocks.
+
+### What recovers, and what a person has to answer for
+
+A fifth review asked for this as a table rather than as prose, and it is the right ask: "durable"
+is not a property, it is a list of failures with an answer beside each one. Live-process mode is
+the turn running inside the `pi` you typed into; worker mode is a session the deployment owns.
+Every row names the check that fails without its answer.
+
+| What fails | Live-process mode | Worker mode | Pinned by |
+|---|---|---|---|
+| A prompt is accepted and nothing wakes to run it | the turn is the process that took it, so there is nothing to wake | the prompt is workflow state, so it waits with no worker up, and a schedule firing carries the task in the workflow's own input | `workflow-init-check.mts` |
+| The process running the turn dies between steps | the steps already sealed are on disk; the turn ends with the process | the next attempt reads the transcript and continues, on any worker, including one that never saw this session | `detached-check.mts`, `step-loop-check.mts` |
+| It dies with a tool in flight | the call is settled as an unknown outcome and the model decides | same, and a tool that had finished keeps its result rather than being asked again | `pending-check.mts`, `detached-check.mts` |
+| Two attempts of one writing activity are alive at once | one at a time through the lock beside the session file; a holder that was superseded is refused at the write rather than after it | same | `session-lock-check.mts`, `lock-gap-check.mts`, `stall-check.mts` |
+| An attempt stalls past its own timeout and comes back after the answer is recorded | its dispatch claim fails, so it reports an unknown outcome instead of running the tool again | same | `stale-dispatch-check.mts` |
+| The user stops the turn | the step is closed on the way out, so the calls that returned keep their results | same, and the project is not moved on the way out | `interrupted-seal-check.mts`, `l2-step-check.mts` |
+| A host publishes the project tree while it is behind | not reachable: one process, one directory | refused, and its own unshipped work is set aside rather than lost | `worktree-check.mts`, `storage-repair-check.mts` |
+| A host is left holding a directory for a session that is over | not reachable | the session records that it is over where every host reads it, and each hands its own directory back the next time one is wanted | `storage-repair-check.mts` |
+| The session's history outgrows its run | not reachable: one turn, one run | continue-as-new when nothing is in flight, carrying the queue | `rollover-check.mts` |
+| The worker a step was pinned to is gone | not reachable | the pin times out on schedule-to-start, which says the activity never started, so what is left of the step runs on the shared queue with nothing run twice | `l2-step-check.mts`, `workflow-init-check.mts` |
+
+What none of this recovers, and no version of it can: a tool that was inside its own execution when
+the process died. Nothing on disk says whether the `git push` landed. The model is told the outcome
+is unknown and decides, which is the only honest answer a wrapper can give.
 
 ## A session that outlives its client
 
