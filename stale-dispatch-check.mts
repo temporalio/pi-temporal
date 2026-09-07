@@ -1,4 +1,9 @@
-// Expected failure: dispatch admission must outlive cleanup of completed tool results.
+// Dispatch admission has to outlive cleanup of the result it produced. An attempt that stalled
+// before taking its claim comes back after the seal has written the answer and the next step has
+// swept the results; if the sweep also took the admission, its call looks fresh and it runs the
+// tool a second time. A fifth review reproduced that; the sweep keeps the notes now.
+//
+// Usage: npx tsx stale-dispatch-check.mts
 import assert from "node:assert/strict";
 import fs, { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -50,6 +55,7 @@ try {
   const effects = await readFile(effectFile, "utf8");
   console.log(`effect count after the stale attempt resumes: ${effects.trim().split("\n").length}`);
   assert.equal(effects, "effect\n", "a stale dispatch must not repeat a completed effect after cleanup");
+  console.log("stale-dispatch-check: OK");
 } finally {
   release();
   await first?.catch(() => {});
