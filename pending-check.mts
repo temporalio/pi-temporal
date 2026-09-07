@@ -71,8 +71,11 @@ async function main() {
   await pending.noteDispatch(file, 2, "c1");
   await pending.keepResult(file, 2, "c1", outcome("c1"));
   await pending.sweep(file, 2);
-  check("an earlier step is forgotten", (await pending.readResult(file, 1, "c1")) === undefined);
-  check("its note goes too", (await pending.wasDispatched(file, 1, "c1")) === false);
+  check("an earlier step's results are forgotten", (await pending.readResult(file, 1, "c1")) === undefined);
+  // And its notes are not. A note is what says the call was admitted, and an attempt that stalled
+  // before taking its claim comes back after the results are gone: without the note its call looks
+  // fresh and it runs the tool again. `stale-dispatch-check.mts` drives that interleaving.
+  check("its admission stays", (await pending.wasDispatched(file, 1, "c1")) === true);
   const reused = (await pending.readResult(file, 2, "c1"))?.message.toolCallId === "c1";
   check("the same id in this step is its own", reused);
   check("the whole earlier step goes", (await pending.readResult(file, 1, "c2")) === undefined);

@@ -137,6 +137,15 @@ export async function sweep(sessionFile: string, before: number): Promise<void> 
   for (const name of steps) {
     const step = Number(name);
     if (!Number.isInteger(step) || step >= before) continue;
-    await rm(join(rootFor(sessionFile), name), { recursive: true, force: true });
+    const dir = join(rootFor(sessionFile), name);
+    // The results go; the dispatch notes stay for the life of the session. A note is what says the
+    // call was admitted, and admission has to outlive the result: an attempt that stalled before
+    // taking its claim comes back long after the seal wrote the answer, and a swept directory made
+    // its call look fresh, so it ran the tool a second time. A fifth review reproduced that. An
+    // empty file per call is what keeping it costs, and `forget` takes them with the session.
+    for (const entry of await readdir(dir).catch(() => [] as string[])) {
+      if (entry.endsWith(STARTED)) continue;
+      await rm(join(dir, entry), { recursive: true, force: true });
+    }
   }
 }
