@@ -185,6 +185,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         const toolInput: ToolCallInput = {
           sessionId: input.sessionId,
           sessionFile: input.sessionFile,
+          turn: input.promptId,
           step: input.step,
           call,
         };
@@ -199,6 +200,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       const sealed: SealStepInput = {
         sessionId: input.sessionId,
         sessionFile: input.sessionFile,
+        turn: input.promptId,
         step: input.step,
         calls: model.calls,
         retryAttempt: input.retryAttempt,

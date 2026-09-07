@@ -51,8 +51,8 @@ try {
         const result = unknownToolCallOutcome(input.call);
         result.message.content = [{ type: "text", text: "finished tool output" }];
         result.message.isError = false;
-        await pending.noteDispatch(file, 1, input.call.id);
-        await pending.keepResult(file, 1, input.call.id, result);
+        await pending.noteDispatch(file, input.turn, 1, input.call.id);
+        await pending.keepResult(file, input.turn, 1, input.call.id, result);
         finished();
         return { outcome: "settled" };
       },
@@ -69,7 +69,7 @@ try {
     },
   });
   await assert.rejects(step({ sessionId: "session", sessionFile: file, step: 1, promptId: "prompt", text: "run" }), Cancelled);
-  await pending.sweepAll(file);
+  await pending.sweepResults(file);
   const results = JSON.parse(await readFile(file, "utf8")) as TurnToolCallOutcome[];
   assert.equal(results[0]?.message.toolCallId, "finished");
   assert.equal(results[0]?.message.isError, false);
