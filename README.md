@@ -335,10 +335,12 @@ The rules that bound it:
   are addressed there. That worker is standing in the directory the tools are about to write, so
   they see each other through the filesystem and the tree never moves between them, which is what
   lets them run together while it travels. A pinned dispatch carries a 30 second
-  `scheduleToStartTimeout`, and that failure means the activity never started, so the work moves to
-  the shared queue with nothing run twice. What is left of that step then goes one at a time,
-  because on the shared queue it can land on two hosts again, which is what the tree store cannot
-  take.
+  `scheduleToStartTimeout` and one attempt. Unstarted calls wait for all pinned siblings before
+  moving to the shared queue one at a time. A sibling with an uncertain failure prevents that
+  move, because its tool may still be writing on the pinned host. This bounds the first dispatch
+  at one attempt; it does not provide automatic failover for a started tool.
+  An interrupted step still records completed tool results. Its seal only writes the transcript,
+  with project restore, project capture, and post-run work disabled.
 - **It is off by default.** On a laptop the tools already run in the directory you meant, and
   shipping it there is disk spent on a problem that host does not have.
 
@@ -432,7 +434,9 @@ The client sends it once, into a store beside the sessions, and each firing copi
 its own session before its first step. A worker still may not establish a project from the directory
 it is standing in, which is the rule that keeps an empty `/project` from becoming the project
 everywhere; copying a store a client wrote is a different act, and it is the one that lets a
-schedule and the travelling tree compose. `unschedule` drops the copy with the schedule.
+schedule and the travelling tree compose. `unschedule` keeps the template because an accepted
+firing may still be waiting for a worker to copy it. After every started firing finishes,
+`pi-temporal forget schedule-<scheduleId>` removes the template.
 
 Each firing is its own session, because the workflow takes the task in its input and derives its
 own id from the firing it was given. Two things make that work rather than one. `initialPrompt` in

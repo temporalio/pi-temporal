@@ -279,6 +279,80 @@ async function main() {
     );
   }
 
+  for (const pinnedFails of [false, true]) {
+    let finishPinned!: () => void;
+    const held = new Promise<void>((resolve) => { finishPinned = resolve; });
+    let pinnedStarted!: () => void;
+    const started = new Promise<void>((resolve) => { pinnedStarted = resolve; });
+    let sharedStarted = false;
+    let pinnedActive = false;
+    let crossedHosts = false;
+    const unavailable = new Error("unclaimed");
+    const failed = new Error("started attempt timed out");
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({
+          calls: [call("held"), call("waiting")],
+          sequential: false,
+          ended: false,
+          queue: "host-a",
+        }),
+        runToolCall: async () => {
+          sharedStarted = true;
+          crossedHosts ||= pinnedActive;
+          return { outcome: "settled" };
+        },
+        sealStep: async () => SEALED,
+      },
+      pinnedTo: () => ({
+        runToolCall: async (input) => {
+          if (input.call.id === "waiting") throw unavailable;
+          pinnedActive = true;
+          pinnedStarted();
+          await held;
+          if (pinnedFails) throw failed;
+          pinnedActive = false;
+          return { outcome: "settled" };
+        },
+        sealStep: async () => SEALED,
+      }),
+      isCancellation,
+      isUnclaimed: (error) => error === unavailable,
+      nonCancellable: (fn) => fn(),
+    });
+    const result = step(INPUT).then(() => undefined, (error: unknown) => error);
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check("an unclaimed sibling waits for the pinned batch", !sharedStarted, { pinnedFails });
+    finishPinned();
+    const error = await result;
+    check("fallback never overlaps a pinned tool", !crossedHosts, { pinnedFails });
+    check(
+      pinnedFails ? "an uncertain pinned attempt refuses migration" : "fallback resumes after the pinned tool ships",
+      pinnedFails ? !sharedStarted && error === failed : sharedStarted && error === undefined,
+      { sharedStarted, error: String(error) },
+    );
+  }
+
+  {
+    const failed = new Error("pinned attempt timed out");
+    let seals = 0;
+    const seal = async () => { seals++; return SEALED; };
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({ calls: [call("held")], sequential: false, ended: false, queue: "host-a" }),
+        runToolCall: async () => ({ outcome: "settled" }),
+        sealStep: seal,
+      },
+      pinnedTo: () => ({ runToolCall: async () => { throw failed; }, sealStep: seal }),
+      isCancellation,
+      isUnclaimed: () => false,
+      nonCancellable: (fn) => fn(),
+    });
+    const error = await step(INPUT).then(() => undefined, (error: unknown) => error);
+    check("an uncertain pinned tool prevents its seal", seals === 0 && error === failed, { seals });
+  }
+
   const bad = failures.length;
   console.log(bad === 0 ? "l2-step-check: OK" : `l2-step-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);

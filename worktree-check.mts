@@ -389,7 +389,7 @@ async function main() {
 
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
-  const gone = await readdir(`${sessionFile}.tree`).then(() => false, () => true);
+  const gone = (await readdir(`${sessionFile}.tree`)).length === 0;
   check("forgetting a session drops what its tree cost", gone);
 
   // And hands the directory back. Otherwise a worker with one project directory serves exactly one

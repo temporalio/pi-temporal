@@ -56,9 +56,7 @@ const { runToolCall } = proxyActivities<SteppedActivities>({
 // that is itself a model call over the whole context. So it keeps the step-sized backstop.
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
-// How long a pinned activity waits for the worker that ran the model call to take it. That worker
-// polls the queue on its own, so this is the time to notice it is gone rather than a queueing
-// delay: while it stands, nobody else can take the work.
+// A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
 const PINNED_SCHEDULE_TO_START = "30 seconds";
 
 /** The same two activities, addressed to one worker's own queue. Built per queue rather than once,
@@ -67,19 +65,20 @@ const PINNED_SCHEDULE_TO_START = "30 seconds";
 const pinnedTo = (taskQueue: string) => ({
   runToolCall: proxyActivities<SteppedActivities>({
     ...cappedOptions,
-    retry: { maximumAttempts: 20 },
+    // A retry's queue timeout cannot rule out an earlier attempt still running.
+    retry: { maximumAttempts: 1 },
     taskQueue,
     scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
   }).runToolCall,
   sealStep: proxyActivities<SteppedActivities>({
     ...cappedOptions,
+    retry: { maximumAttempts: 1 },
     taskQueue,
     scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
   }).sealStep,
 });
 
-/** Nobody took the work. The only failure a pinned dispatch answers by moving the work elsewhere:
- * it means the activity never started, so no tool can have run. */
+/** The pinned policy permits one attempt, so this timeout excludes an earlier started attempt. */
 const isUnclaimed = (err: unknown) =>
   err instanceof ActivityFailure &&
   err.cause instanceof TimeoutFailure &&
@@ -135,11 +134,7 @@ export async function piSession(
         log: (message, attributes) => log.info(message, attributes),
       })
     : runStep;
-  // A project the client left for this session, for a start nothing was running to send one to.
-  // Before any step, because every activity restores the tree before it runs and a session with
-  // nothing established refuses them all. Carried across a rollover with everything else, and a
-  // no-op once the session has a project of its own.
-  if (options?.template) await adoptProject({ sessionFile: file, template: options.template });
+  let projectAdopted = options?.template === undefined;
   // Seeded from the input, which is what lets a turn start with no client: the task is already in
   // the workflow when it begins, rather than arriving as a signal from something still running.
   // `queued` is the other source, from a run that rolled over with work still in hand.
@@ -194,6 +189,7 @@ export async function piSession(
         // Carried as the queue, not as the initial prompt: that one is a schedule's task, and
         // repeating it on every rollover would ask for the same work again.
         initialPrompt: undefined,
+        template: projectAdopted ? undefined : options?.template,
         queued: queue,
         finished,
       });
@@ -209,6 +205,12 @@ export async function piSession(
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
+        if (!projectAdopted && options?.template) {
+          // Initialization is part of the turn, so stop and query apply while it waits.
+          running = { promptId: prompt.promptId, step: 0 };
+          await adoptProject({ sessionFile: file, template: options.template });
+          projectAdopted = true;
+        }
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
           const input: RunStepInput = { sessionId: id, sessionFile: file, step, retryAttempt, ...prompt };

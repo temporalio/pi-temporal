@@ -116,7 +116,10 @@ export interface ActivityOptions {
   readonly stepQueue?: string;
 }
 
-export function makeActivities(opts: ActivityOptions) {
+export function makeActivities(
+  opts: ActivityOptions,
+  dependencies: { openSession?: (file: string, guard?: () => void) => Promise<AgentSession> } = {},
+) {
   const provider = opts.provider ?? "openai";
 
   // Before anything the model asked for can run, and after the step that ran it is written down.
@@ -162,6 +165,7 @@ export function makeActivities(opts: ActivityOptions) {
   };
 
   async function openSession(sessionFile: string, guard?: () => void): Promise<AgentSession> {
+    if (dependencies.openSession) return dependencies.openSession(sessionFile, guard);
     await mkdir(dirname(sessionFile), { recursive: true });
     const sessionManager = SessionManager.open(sessionFile);
     sessionManager.setWriteGuard(guard);
@@ -351,7 +355,7 @@ export function makeActivities(opts: ActivityOptions) {
           throw new Error(`no recorded tool call ${input.call.id} in ${input.sessionId}`);
         }
 
-        if (await pending.wasDispatched(input.sessionFile, input.step, input.call.id)) {
+        if (!(await pending.noteDispatch(input.sessionFile, input.step, input.call.id))) {
           // A dispatch was inside this tool when it stopped, so the tool can have taken effect.
           // Re-running a push or a delete that already happened is the worse failure, so the
           // model is told the outcome instead of the tool being asked again.
@@ -360,10 +364,6 @@ export function makeActivities(opts: ActivityOptions) {
           return { outcome: "unknown" };
         }
 
-        // Before the tool can have any effect, so what follows reads as "a dispatch was inside
-        // it". A stop in the moment between costs one call an unknown outcome, which is the
-        // direction to be wrong in.
-        await pending.noteDispatch(input.sessionFile, input.step, input.call.id);
         const outcome = await session.runToolCall(input.call.id);
         if (!outcome) return { outcome: "already-settled" };
 
@@ -386,9 +386,8 @@ export function makeActivities(opts: ActivityOptions) {
     const stop = heartbeatEvery(3000);
     try {
       return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
-        // The seal writes the step down, so it needs the tree the tools worked in. It can land on
-        // a worker that ran none of them.
-        await bringTree(input.sessionFile);
+        // A cancelled tool may still be writing on another host.
+        if (!input.interrupted) await bringTree(input.sessionFile);
         const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the seal"));
         try {
           const results: TurnToolCallOutcome[] = [];
@@ -417,7 +416,7 @@ export function makeActivities(opts: ActivityOptions) {
           // reads as one that wants another step even when a tool asked the turn to stop.
           const answer = lastAssistantText(session.state.messages as Msg[]);
           // After the step is written down, so what ships is a tree whose transcript explains it.
-          await shipTree(input.sessionFile);
+          if (!input.interrupted) await shipTree(input.sessionFile);
           return { done, retryAttempt: sealed.retryAttempt, finalText: done ? answer : "" };
         } finally {
           session.dispose();

@@ -330,10 +330,9 @@ async function main() {
       const { client, connection } = await connect();
       try {
         await client.schedule.getHandle(id).delete();
-        // And the copy of the project it was firing with. Nothing else reads it: every session it
-        // served took its own copy at its first step.
-        await worktree.forget(sessionFileFor(fromEnv().sessionDir, `schedule-${id}`));
+        // A firing can be queued before any worker copies its project.
         say(`deleted ${id}`);
+        say("  kept the project template for firings already queued or running");
       } finally {
         await connection.close();
       }
