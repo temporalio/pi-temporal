@@ -3,13 +3,27 @@
 // step's own calls never write, but two attempts of the same activity can: a heartbeat that stalls
 // long enough for Temporal to start attempt 2 leaves attempt 1 alive and both appending.
 //
-// Advisory, and beside the session file, so it works wherever the session file works. A holder
-// that dies is reclaimed on age, which is why the lock is refreshed while it is held.
+// Advisory, and beside the session file, so it works wherever the session file works. A holder that
+// dies is reclaimed on age, which is why the lock is refreshed while it is held.
+//
+// Taking it over is the part that has to be exact. A lock is a directory of claims, each named for
+// the epoch it took, and the newest claim owns the lock. Taking over means creating the next epoch
+// with an exclusive create, which is a compare and set: it says "I saw epoch N, and I claim N+1",
+// and it fails if anybody else already claimed N+1 from the same reading.
+//
+// The shape this replaced moved the stale claim out of the way and created a new one at its path.
+// Two things were wrong with that, and a review reproduced both. `rename` acts on the path rather
+// than on the file whose age was measured, so a contender slow between the two moved whatever was
+// there by then, including a lock somebody had just taken. And while it was moved the path was
+// free, so a third contender could create one there. Reading the file back caught the theft and
+// could not undo it: putting it back is a second step, and by then the path can be somebody else's.
+// Nothing bounded by a timer fixes that, because the fault is that the takeover was not conditional
+// on the state it measured. This one is.
 
-import { link, mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, rmdir, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 // Longer than the activity heartbeat timeout, on purpose. A holder whose event loop is blocked
 // cannot refresh, and the writes this lock protects are the synchronous ones most likely to block
@@ -17,9 +31,9 @@ import { dirname } from "node:path";
 //
 // It does not make the lock safe on its own. Temporal giving up on an attempt stops it being
 // waited for, not being run: an attempt blocked past this window is still inside the body when the
-// next one reclaims. That is what `owned()` is for. Whoever is about to write asks whether the
-// lock is still theirs, which narrows the hole from the whole body to the gap between that
-// question and the write.
+// next one claims the following epoch. That is what `owned()` is for. Whoever is about to write
+// asks whether the lock is still theirs, which narrows the hole from the whole body to the gap
+// between that question and the write.
 //
 // `ownedNow()` is the same question for a writer that cannot await one. Pi's append path is
 // synchronous all the way down, and the write a model call ends with lands at the end of a stream
@@ -38,40 +52,35 @@ const MARGIN_MS = 10_000;
 // dead. The exclusive create is what actually excludes, which needs a filesystem where O_EXCL is
 // atomic: local disk, NFSv4, SMB. It is not reliable on NFSv3.
 
-const lockPath = (sessionFile: string) => `${sessionFile}.lock`;
+// A directory, holding one file per claim. The name is where the ordering lives, so deciding who
+// owns the lock is a listing rather than a read: a claim that cannot be read yet still counts.
+const lockDir = (sessionFile: string) => `${sessionFile}.lock`;
+// The epoch alone, because the name is what the exclusive create competes on. Putting the holder's
+// token in the name would give two contenders two different paths for the same epoch, and an
+// exclusive create of two different paths excludes nothing. The token goes inside the file.
+const claimName = (epoch: number) => String(epoch).padStart(8, "0");
 
 const held = (token: string) => JSON.stringify({ token, host: hostname(), pid: process.pid });
 
-// Reclaims by renaming out of the way rather than removing. Two contenders deciding the same lock
-// is stale at the same moment then move the same file, and only one of them wins.
-//
-// `rename` acts on the path, not on the file whose age was measured, so a contender slow between
-// the two moves whatever is there by then, including a lock somebody has just taken. What the
-// measurement can be pinned to is the content: a token changes only when a different holder writes
-// one. So the file is read before the move and the moved file after it, and a reclaim that finds it
-// changed puts it back and reports the lock as held rather than taking it. The restore is a `link`,
-// which fails instead of overwriting, so a third contender that created one meanwhile keeps it and
-// this one still loses. What is left is a lock briefly absent from its path, which is what `owned()`
-// covers and why writers ask again on the way to the write.
-async function taken(path: string, token: string, pauseMs = 0): Promise<boolean> {
-  try {
-    const info = await stat(path);
-    if (Date.now() - info.mtimeMs < STALE_MS) return true;
-    const before = await readFile(path, "utf8").catch(() => undefined);
-    if (pauseMs > 0) await new Promise((resolve) => setTimeout(resolve, pauseMs));
-    const corpse = `${path}.stale.${token}`;
-    await rename(path, corpse);
-    const moved = await readFile(corpse, "utf8").catch(() => undefined);
-    if (moved !== before) {
-      await link(corpse, path).catch(() => {});
-      await rm(corpse, { force: true });
-      return true;
-    }
-    await rm(corpse, { force: true });
-    return false;
-  } catch {
-    return false;
+interface Claim {
+  readonly epoch: number;
+  readonly name: string;
+  readonly mtimeMs: number;
+}
+
+// Oldest first, so the last one is the owner. A name nothing can parse is not a claim: it cannot
+// have been written by this code, and treating it as one would hand the lock to a stray file.
+async function claims(dir: string): Promise<Claim[]> {
+  const names = await readdir(dir);
+  const found: Claim[] = [];
+  for (const name of names) {
+    const epoch = Number.parseInt(name, 10);
+    if (!Number.isFinite(epoch)) continue;
+    // A claim that vanished between the listing and the stat is one that was released.
+    const info = await stat(join(dir, name)).catch(() => undefined);
+    if (info) found.push({ epoch, name, mtimeMs: info.mtimeMs });
   }
+  return found.sort((a, b) => a.epoch - b.epoch);
 }
 
 /**
@@ -85,107 +94,148 @@ export async function withSessionLock<T>(
   sessionFile: string,
   body: (owned: () => Promise<boolean>, ownedNow: () => boolean) => Promise<T>,
   waitMs = 60_000,
-  // How long to stall between measuring a stale lock's age and reclaiming it. Zero everywhere but
-  // the check that reproduces the reclaim race: that interleaving needs a contender held at exactly
-  // that point for longer than another takes to reclaim and acquire, and nothing outside this
-  // module can hold it there. Only the stall is injected; what the check asserts is the real
-  // outcome, one holder or two.
-  reclaimPauseMs = 0,
+  // How long to stall between reading the claims and taking the next epoch. Zero everywhere but the
+  // check that reproduces the takeover race: that interleaving needs a contender held at exactly
+  // that point for longer than another takes to claim and hold, and nothing outside this module can
+  // hold it there. Only the stall is injected; what the check asserts is the real outcome, one
+  // holder or two.
+  claimPauseMs = 0,
 ): Promise<T> {
-  const path = lockPath(sessionFile);
+  const dir = lockDir(sessionFile);
   const token = randomUUID();
   const deadline = Date.now() + waitMs;
+  let mine!: { readonly epoch: number; readonly name: string };
 
   // The session directory may not exist yet. The first activity of a session is what creates it,
   // and it does that inside the lock.
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(dir), { recursive: true });
 
   for (;;) {
-    try {
-      await writeFile(path, held(token), { flag: "wx" });
-      break;
-    } catch (err) {
-      const contended = await taken(path, token, reclaimPauseMs);
-      if (Date.now() >= deadline) {
-        // Only call it contention when it was. Anything else is the real error, and reporting a
-        // writer that does not exist sends the next reader looking for one.
-        throw contended ? new Error(`another writer has held ${path} for ${waitMs}ms`) : err;
+    await mkdir(dir, { recursive: true });
+    const existing = await claims(dir);
+    const owner = existing[existing.length - 1];
+    const contended = owner !== undefined && Date.now() - owner.mtimeMs < STALE_MS;
+    if (!contended) {
+      const epoch = (owner?.epoch ?? 0) + 1;
+      const name = claimName(epoch);
+      if (claimPauseMs > 0) await new Promise((resolve) => setTimeout(resolve, claimPauseMs));
+      try {
+        await writeFile(join(dir, name), held(token), { encoding: "utf8", flag: "wx" });
+        mine = { epoch, name };
+        // Everything below the epoch just taken is superseded by definition, and its holder finds
+        // that out the same way anybody does: something newer exists.
+        for (const stale of existing) {
+          if (stale.epoch < epoch) await rm(join(dir, stale.name), { force: true });
+        }
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        // Somebody claimed this epoch from the same reading, or removed the directory under us.
+        // Both mean look again; anything else is a real error and reporting it as contention would
+        // send the next reader looking for a writer that does not exist.
+        if (code !== "EEXIST" && code !== "ENOENT") throw err;
       }
-      // Always wait, including after clearing a stale lock. A failure that will not fix itself
-      // would otherwise spin here for the whole deadline.
-      await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
     }
+    if (Date.now() >= deadline) {
+      throw new Error(`another writer has held ${dir} for ${waitMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
   }
 
   // Set the moment the refresher finds the lock is somebody else's, and never unset: a lock taken
   // away does not come back.
   let lost = false;
-  // When this process last saw the lock file say the lock was ours. The flag above is not enough on
+  // When this process last saw the directory say the lock was ours. The flag above is not enough on
   // its own: it is set from inside a timer callback, and a process whose event loop stops does not
-  // run timers, so a holder that was paused past STALE_MS and reclaimed comes back to a flag that
+  // run timers, so a holder that was paused past STALE_MS and superseded comes back to a flag that
   // still says "mine". A clock read needs no event loop and no I/O, so it is the one thing a
   // synchronous caller can trust after a pause.
   let lastConfirmed = Date.now();
 
-  // Stops as soon as the lock is not ours. A holder reclaimed while it was blocked would
-  // otherwise keep the next holder's lock alive long after that one died.
+  const holderOf = async (name: string) => {
+    const text = await readFile(join(dir, name), "utf8").catch(() => undefined);
+    if (text === undefined) return undefined;
+    try {
+      return (JSON.parse(text) as { token?: string }).token;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // By token as well as by epoch. A directory that empties completely starts again at one, so the
+  // number on its own can name somebody else's claim.
+  const stillOurs = async (list: Claim[]) => {
+    const owner = list[list.length - 1];
+    if (!owner || owner.epoch !== mine.epoch) return false;
+    return (await holderOf(owner.name)) === token;
+  };
+
+  // Stops as soon as the lock is not ours. A holder superseded while it was blocked would otherwise
+  // keep refreshing a claim nothing reads.
   const refresh = setInterval(() => {
     void (async () => {
-      let owner: { token?: string };
-      try {
-        owner = JSON.parse(await readFile(path, "utf8")) as { token?: string };
-      } catch (err) {
-        // Gone means reclaimed. Anything else is one read that failed, and the shared storage this
-        // exists for is exactly where that happens. Stopping on it would let the lock age out from
-        // under a holder that is still writing.
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          lost = true;
-          clearInterval(refresh);
-        }
+      // One read that fails is not the lock being taken away, and the shared storage this exists
+      // for is exactly where that happens. Stopping on it would let the claim age out from under a
+      // holder that is still writing.
+      const list = await claims(dir).catch(() => undefined);
+      if (!list) return;
+      const owner = list[list.length - 1];
+      // Nothing there at all means this claim was removed, and something newer means it was
+      // superseded. Both are the lock being gone, and it does not come back.
+      if (!owner || owner.epoch > mine.epoch) {
+        lost = true;
+        clearInterval(refresh);
         return;
       }
-      if (owner.token !== token) {
+      const holder = await holderOf(owner.name);
+      // Unreadable is one bad read, not a lock taken away, and the shared storage this exists for
+      // is exactly where that happens. It is not a confirmation either, so the synchronous guard
+      // decays toward saying no while it lasts.
+      if (holder === undefined) return;
+      if (holder !== token) {
         lost = true;
         clearInterval(refresh);
         return;
       }
       lastConfirmed = Date.now();
       const now = new Date();
-      await utimes(path, now, now).catch(() => {});
+      await utimes(join(dir, mine.name), now, now).catch(() => {});
     })();
   }, REFRESH_MS);
   refresh.unref?.();
 
-  // Read rather than trusting the refresher, which only notices on its next tick and so answers
-  // for up to REFRESH_MS ago. A caller asking this is about to write.
+  // Read rather than trusting the refresher, which only notices on its next tick and so answers for
+  // up to REFRESH_MS ago. A caller asking this is about to write.
   const owned = async () => {
-    try {
-      const mine = JSON.parse(await readFile(path, "utf8")) as { token?: string };
-      return mine.token === token;
-    } catch {
-      return false;
-    }
+    const list = await claims(dir).catch(() => undefined);
+    return list !== undefined && (await stillOurs(list));
   };
 
   // For a writer that cannot await. Pi's append path is synchronous all the way down, so the one
-  // place that is always immediately before a write cannot read the lock file.
+  // place that is always immediately before a write cannot read the lock.
   //
   // Two questions, both answered without I/O: has the refresher seen the lock taken, and has this
   // process been away long enough for it to have been. The second is what covers a stall, which is
   // the only way a live holder loses a lock it is still refreshing. It gives up before the age a
-  // contender reclaims at rather than exactly at it, because the two are measured on two clocks.
+  // contender takes over at rather than exactly at it, because the two are measured on two clocks.
   const ownedNow = () => !lost && Date.now() - lastConfirmed < STALE_MS - MARGIN_MS;
 
   try {
     return await body(owned, ownedNow);
   } finally {
     clearInterval(refresh);
-    // Only our own. A lock reclaimed as stale belongs to whoever took it next.
-    try {
-      const mine = JSON.parse(await readFile(path, "utf8")) as { token?: string };
-      if (mine.token === token) await rm(path, { force: true });
-    } catch {
-      // Gone, or unreadable. Either way it is not ours to remove.
-    }
+    // A holder that has given the lock back does not own it, and the guard it handed out is what a
+    // writer asks. Pi's append path keeps that closure for the life of the session, so leaving it
+    // answering yes would wave through exactly the write this exists to stop.
+    lost = true;
+    // Only while it is still ours. A superseder removes lower claims, and a directory that emptied
+    // has started again at one, so removing by name alone can take a claim somebody else holds.
+    if ((await holderOf(mine.name)) === token) await rm(join(dir, mine.name), { force: true });
+    // And the directory, when nothing is left in it. A lock that leaves something behind is one
+    // every reader of the shared directory has to know to ignore, and the acquire path already
+    // treats a directory that vanished under it as a reason to look again.
+    await rmdir(dir).catch(() => {});
   }
 }
+
+export const lockDirFor = lockDir;
