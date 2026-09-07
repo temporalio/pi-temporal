@@ -4,9 +4,7 @@
 // calls settling at once would each parent their entry off the leaf they saw and branch the
 // session tree.
 //
-// A dropped file only ever costs work, never correctness: a missing note makes a dispatch look
-// fresh, and a missing result makes a call look unrun. Both are the safe direction for a caller
-// that checks the transcript first.
+// The dispatch note prevents a repeated side effect until the transcript settles the call.
 
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -31,9 +29,15 @@ export async function noteDispatch(
   sessionFile: string,
   step: number,
   callId: string,
-): Promise<void> {
+): Promise<boolean> {
   await mkdir(dirFor(sessionFile, step), { recursive: true });
-  await writeFile(dispatchPath(sessionFile, step, callId), "", "utf8");
+  try {
+    await writeFile(dispatchPath(sessionFile, step, callId), "", { encoding: "utf8", flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
 }
 
 /**
@@ -48,8 +52,9 @@ export async function wasDispatched(
   try {
     await readFile(dispatchPath(sessionFile, step, callId), "utf8");
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
 }
 

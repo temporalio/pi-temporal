@@ -23,7 +23,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -93,8 +93,15 @@ const heldPath = (projectDir: string, sessionFile: string) =>
 // retirement. This is what makes the per-host note a cache: without somewhere to ask whether the
 // session that wrote a note is over, the note is the only answer and nothing can correct it.
 const retiredPath = (sessionFile: string) => join(shareDir(sessionFile), "retired.json");
+// Payload deletion must leave enough evidence for hosts that have not released their directories.
+const forgottenPath = (sessionFile: string) => `${shareDir(sessionFile)}.forgotten.json`;
 const isRetired = async (sessionFile: string) =>
-  (await readJson<unknown>(retiredPath(sessionFile))) !== undefined;
+  (await readJson<unknown>(retiredPath(sessionFile))) !== undefined ||
+  ((await readJson<unknown>(forgottenPath(sessionFile))) !== undefined &&
+    await stat(tipPath(sessionFile)).then(
+      () => false,
+      (err: NodeJS.ErrnoException) => err.code === "ENOENT",
+    ));
 // A session doing work is not retired, whatever a marker from its last idle period says.
 const revive = (sessionFile: string) => rm(retiredPath(sessionFile), { force: true });
 // Two locks, because there are two questions and they have different answers.
@@ -274,6 +281,7 @@ async function publish(
   await rename(scratch, join(dir, bundleName(seq)));
 
   await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
+  await rm(forgottenPath(sessionFile), { force: true });
   // After the tip names the self-contained one, never before: a crash in between leaves bundles
   // nothing needs, and a crash the other way round leaves a session nobody can restore.
   if (restart) await dropBundlesBefore(dir, seq);
@@ -319,9 +327,9 @@ async function salvage(projectDir: string, sessionFile: string, tree: string) {
 // out empty, because neither command below removes a `.git` at the root and a directory that is not
 // actually empty is one the next restore refuses.
 async function handBack(projectDir: string, sessionFile: string, held: Held) {
-  const tip = await readJson<Tip>(tipPath(sessionFile));
-  if (!tip || !held.built) return false;
-  if ((await treeHere(projectDir)) !== tip.tree) return false;
+  if (!held.built) return false;
+  // A retired host may be behind the final tip. Its own accepted tree distinguishes local edits.
+  if ((await treeHere(projectDir)) !== held.tree) return false;
   await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
   // `-x` as well, because what the next session finds has to be an empty directory and not a nearly
   // empty one. On a tree this host built there is nothing to lose, which is why only those get here.
@@ -543,6 +551,7 @@ export async function adopt(template: string, sessionFile: string): Promise<bool
     // Last, so a copy that dies half way leaves a session with no project rather than one whose tip
     // names a bundle that is not there.
     await writeJson(tipPath(sessionFile), tip);
+    await rm(forgottenPath(sessionFile), { force: true });
     return true;
   });
 }
@@ -576,7 +585,12 @@ export async function sweep(): Promise<number> {
       const note = await readJson<Held>(path);
       if (!note?.session || !note.directory || !(await isRetired(note.session))) continue;
       const done = await withTreeLocks(note.directory, note.session, async () => {
-        if (note.built && !(await handBack(note.directory!, note.session!, note))) return false;
+        const current = await readJson<Held>(path);
+        if (
+          !current || current.session !== note.session || current.directory !== note.directory ||
+          !(await isRetired(note.session!))
+        ) return false;
+        if (current.built && !(await handBack(note.directory!, note.session!, current))) return false;
         await rm(path, { force: true });
         return true;
       }).catch(() => false);
@@ -611,6 +625,15 @@ export async function setAside(projectDir: string, sessionFile: string): Promise
  * what hands the directory back.
  */
 export async function forget(sessionFile: string, projectDir?: string): Promise<void> {
-  await rm(shareDir(sessionFile), { recursive: true, force: true });
-  if (projectDir) await rm(heldPath(projectDir, sessionFile), { force: true });
+  const drop = async () => {
+    await writeJson(forgottenPath(sessionFile), { at: new Date().toISOString() });
+    for (const name of await readdir(shareDir(sessionFile))) {
+      // Removing the held lock would admit another writer while deletion is still in progress.
+      if (name === "writers.lock") continue;
+      await rm(join(shareDir(sessionFile), name), { recursive: true, force: true });
+    }
+    if (projectDir) await rm(heldPath(projectDir, sessionFile), { force: true });
+  };
+  if (projectDir) await withTreeLocks(projectDir, sessionFile, drop);
+  else await withSessionLock(sharedLockPath(sessionFile), drop);
 }

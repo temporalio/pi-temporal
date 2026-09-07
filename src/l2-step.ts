@@ -134,14 +134,18 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     // this step is addressed there first: it is the host holding the directory the tools write.
     const pinned = model.queue && deps.pinnedTo ? deps.pinnedTo(model.queue) : undefined;
     let unclaimed = false;
+    const pinnedAttempts: Promise<void>[] = [];
+    let unsafeFallback: { error: unknown } | undefined;
     // What is left of a step whose worker is gone goes to the shared queue one at a time. There it
     // can land on two hosts again, which is what the tree store cannot take.
     let shared: Promise<unknown> = Promise.resolve();
     const onShared = <T>(run: (on: SteppedActivities) => Promise<T>): Promise<T> => {
-      const next = shared.then(
-        () => run(deps.activities),
-        () => run(deps.activities),
-      );
+      const next = shared.then(async () => {
+        // A queue timeout can leave sibling tools writing the pinned directory.
+        await Promise.all(pinnedAttempts);
+        if (unsafeFallback) throw unsafeFallback.error;
+        return run(deps.activities);
+      });
       shared = next.then(
         () => undefined,
         () => undefined,
@@ -151,14 +155,23 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     const viaPinned = async <T>(
       run: (on: Pick<SteppedActivities, "runToolCall" | "sealStep">) => Promise<T>,
     ): Promise<T> => {
+      if (unsafeFallback) throw unsafeFallback.error;
       if (!pinned || !deps.isUnclaimed) return run(deps.activities);
       if (unclaimed) return onShared(run);
       try {
-        return await run(pinned);
+        const attempt = run(pinned);
+        pinnedAttempts.push(attempt.then(
+          () => undefined,
+          (error: unknown) => {
+            // A failed started attempt can still have a live tool on that host.
+            if (!deps.isUnclaimed!(error)) unsafeFallback = { error };
+          },
+        ));
+        return await attempt;
       } catch (err) {
         if (!deps.isUnclaimed(err)) throw err;
         unclaimed = true;
-        deps.log?.("the worker that ran the model call is gone; the step moves to the shared queue", {
+        deps.log?.("pinned work was not taken; waiting for the step before using the shared queue", {
           step: input.step,
         });
         return onShared(run);
@@ -182,17 +195,19 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
 
     // Every call of the step is sealed, including the ones no dispatch answered for. A step that
     // leaves one open leaves a transcript the next model call cannot be made from.
-    const seal = (interrupted: boolean): Promise<RunStepResult> =>
-      viaPinned((on) =>
-        on.sealStep({
-          sessionId: input.sessionId,
-          sessionFile: input.sessionFile,
-          step: input.step,
-          calls: model.calls,
-          retryAttempt: input.retryAttempt,
-          interrupted,
-        }),
-      );
+    const seal = (interrupted: boolean): Promise<RunStepResult> => {
+      const sealed: SealStepInput = {
+        sessionId: input.sessionId,
+        sessionFile: input.sessionFile,
+        step: input.step,
+        calls: model.calls,
+        retryAttempt: input.retryAttempt,
+        interrupted,
+      };
+      // An interrupted seal only appends the transcript; it must not move the project.
+      if (interrupted) return deps.activities.sealStep(sealed);
+      return viaPinned((on) => on.sealStep(sealed));
+    };
 
     if (stopped) {
       // The user stopped the turn, so close the step and then let the stop through. Skipping the
