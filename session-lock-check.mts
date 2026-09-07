@@ -4,7 +4,7 @@
 //
 // Usage: npx tsx session-lock-check.mts
 
-import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withSessionLock } from "./src/session-lock.js";
@@ -16,6 +16,24 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// What another holder looks like on disk: a claim file named for its epoch, holding its token. The
+// lock is a directory of these and the newest one owns it, so a fixture that wants to be somebody
+// else takes a higher epoch rather than overwriting a path.
+const claimPath = (file: string, epoch = 1) =>
+  join(`${file}.lock`, String(epoch).padStart(8, "0"));
+async function claimAs(file: string, token: string, epoch = 1, ageMs = 0) {
+  await mkdir(`${file}.lock`, { recursive: true });
+  const path = claimPath(file, epoch);
+  await writeFile(path, JSON.stringify({ token }), "utf8");
+  if (ageMs > 0) {
+    const when = new Date(Date.now() - ageMs);
+    await utimes(path, when, when);
+  }
+  return path;
+}
+const claimsHeld = async (file: string) =>
+  (await readdir(`${file}.lock`).catch(() => [] as string[])).filter((n) => /^\d+$/.test(n));
 
 // Older than the refresh interval, so a tick that did touch the file is visible as a fresh mtime.
 const STALE_ENOUGH = 120_000;
@@ -46,13 +64,11 @@ async function main() {
   check("each one ran", order.length === 4, order);
 
   // The lock is not a leak: it has to be gone afterwards or the session is wedged for good.
-  check("the lock is released", !(await readdir(dir)).includes("session.jsonl.lock"));
+  check("the lock is released", (await claimsHeld(file)).length === 0, await claimsHeld(file));
 
   // A holder that died leaves the file behind. Reclaiming it on age is what stops one crashed
   // worker from taking the session with it.
-  await writeFile(`${file}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
-  const stale = new Date(Date.now() - 120_000);
-  await utimes(`${file}.lock`, stale, stale);
+  await claimAs(file, "someone-else", 1, 120_000);
   let reclaimed = false;
   await withSessionLock(file, async () => {
     reclaimed = true;
@@ -74,9 +90,7 @@ async function main() {
   // `withSessionLock`'s last argument. What is asserted is the real outcome: the slow one must not
   // move a lock the quick one is holding and then take it.
   const late = join(dir, "late.jsonl");
-  await writeFile(`${late}.lock`, JSON.stringify({ token: "dead" }), "utf8");
-  const cold = new Date(Date.now() - STALE_ENOUGH);
-  await utimes(`${late}.lock`, cold, cold);
+  await claimAs(late, "dead", 1, STALE_ENOUGH);
 
   let insideLate = 0;
   let overlappedLate = false;
@@ -86,7 +100,7 @@ async function main() {
     await sleep(hold);
     insideLate--;
   };
-  // Reads the stale lock, then stalls before it can rename it away.
+  // Reads the stale claim, then stalls before it can take the next epoch.
   const slow = withSessionLock(late, () => enterLate(300), 20_000, 1_500);
   await sleep(200);
   // Finds the same stale lock, reclaims it, and is still holding it when the slow one wakes up.
@@ -98,9 +112,7 @@ async function main() {
   let bothIn = false;
   for (let round = 0; round < 20 && !bothIn; round++) {
     const raced = join(dir, `raced-${round}.jsonl`);
-    await writeFile(`${raced}.lock`, JSON.stringify({ token: "dead" }), "utf8");
-    const old = new Date(Date.now() - STALE_ENOUGH);
-    await utimes(`${raced}.lock`, old, old);
+    await claimAs(raced, "dead", 1, STALE_ENOUGH);
 
     let inside = 0;
     await Promise.all(
@@ -125,8 +137,7 @@ async function main() {
   await withSessionLock(fenced, async (owned) => {
     sawOwned = await owned();
     // Somebody else reclaims and takes it. This is the state a slow holder wakes up in.
-    await rm(`${fenced}.lock`, { force: true });
-    await writeFile(`${fenced}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
+    await claimAs(fenced, "someone-else", 2);
     sawLost = await owned();
   });
   check("a holder can tell its lock is still its own", sawOwned === true);
@@ -141,8 +152,7 @@ async function main() {
   let syncLost: boolean | undefined;
   await withSessionLock(sync, async (_owned, ownedNow) => {
     syncHeld = ownedNow();
-    await rm(`${sync}.lock`, { force: true });
-    await writeFile(`${sync}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
+    await claimAs(sync, "someone-else", 2);
     await sleep(REFRESH_TICK + 500);
     syncLost = ownedNow();
   });
@@ -169,13 +179,12 @@ async function main() {
   let released = false;
   await withSessionLock(contested, async () => {
     // Reclaim it out from under the holder, the way a stalled holder is reclaimed on age.
-    await rm(`${contested}.lock`, { force: true });
-    await writeFile(`${contested}.lock`, JSON.stringify({ token: "someone-else" }), "utf8");
+    const taken = await claimAs(contested, "someone-else", 2);
     const stolen = new Date(Date.now() - STALE_ENOUGH);
-    await utimes(`${contested}.lock`, stolen, stolen);
+    await utimes(taken, stolen, stolen);
     // Long enough for at least one refresh tick to notice.
     await sleep(4000);
-    const info = await stat(`${contested}.lock`);
+    const info = await stat(claimPath(contested, 1)).catch(() => ({ mtimeMs: 0 }));
     released = Date.now() - info.mtimeMs > 3000;
   });
   check("a holder that lost the lock stops refreshing it", released);
@@ -186,7 +195,7 @@ async function main() {
   const flaky = join(dir, "flaky.jsonl");
   let kept = false;
   await withSessionLock(flaky, async () => {
-    const lock = `${flaky}.lock`;
+    const lock = claimPath(flaky, 1);
     const saved = await readFile(lock, "utf8");
     // Unreadable for one tick, then fine again. Overwritten in place rather than removed and
     // rewritten: absent means reclaimed, which the refresher is right to stop on, and a tick
