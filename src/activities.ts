@@ -133,9 +133,9 @@ export function makeActivities(
   // Deliberately not caught. A step that cannot get the project's files must not run against
   // whatever is in the directory: the model would be told those files are the project. Failing
   // sends the work to a host that can do it.
-  const bringTree = async (sessionFile: string) => {
+  const bringTree = async (sessionFile: string, current?: worktree.Writer) => {
     if (!opts.shipTree) return;
-    await worktree.ensure(opts.projectDir, sessionFile);
+    await worktree.ensure(opts.projectDir, sessionFile, current);
   };
   // A lock can be reclaimed while its holder is blocked, so the holder asks again on the way to
   // the write. Failing here is the right answer: Temporal retries, and the retry takes the lock.
@@ -155,13 +155,13 @@ export function makeActivities(
     }
   };
 
-  const shipTree = async (sessionFile: string) => {
+  const shipTree = async (sessionFile: string, current?: worktree.Writer) => {
     if (!opts.shipTree) return;
     // A capture that fails must not fail the step: the tool has already run and its result is
     // recorded, and a retry finds that result rather than running it again, so throwing here costs
     // an attempt and still ships nothing. What it must not do is lose the work. The files are the
     // only record of what the tool did, so they are kept where they can be recovered.
-    await worktree.capture(opts.projectDir, sessionFile).catch(async (err) => {
+    await worktree.capture(opts.projectDir, sessionFile, { current }).catch(async (err) => {
       console.error(`could not ship the project tree: ${String(err)}`);
       await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
         console.error(`and could not set it aside either: ${String(keepErr)}`);
@@ -323,7 +323,8 @@ export function makeActivities(
       // Under the session lease, so this session's transcript recovery and its tree restore are
       // ordered against each other. It is not what keeps two hosts from publishing at once: the
       // tree store takes its own host-directory and shared-store leases for that.
-      await withSessionLock(input.sessionFile, () => bringTree(input.sessionFile));
+      const writer: worktree.Writer = { turn: input.turn, step: input.step, callId: input.call.id };
+      await withSessionLock(input.sessionFile, () => bringTree(input.sessionFile, writer));
       // Opening a session can append to it (a first thinking-level entry), and two of these run at
       // once. The lock covers the open and is given back before the tool runs, which is the part
       // that has to stay parallel.
@@ -372,7 +373,14 @@ export function makeActivities(
           return { outcome: "unknown" };
         }
 
-        const outcome = await session.runToolCall(input.call.id);
+        // Said on this host before the tool can touch anything, and taken back below when the body
+        // returns. It is the only local record of a tool that is still inside its own execution,
+        // and what a later turn checks before it reuses this directory: Temporal giving up on this
+        // attempt stops it being waited for, not being run.
+        if (opts.shipTree) await worktree.beginWrite(opts.projectDir, writer);
+        const outcome = await session.runToolCall(input.call.id).finally(async () => {
+          if (opts.shipTree) await worktree.endWrite(opts.projectDir, input.call.id);
+        });
         if (!outcome) return { outcome: "already-settled" };
 
         await pending.keepResult(
@@ -385,7 +393,7 @@ export function makeActivities(
         // Shipped from here, because this host ran the tool and is the only one holding what it
         // did. The seal can land anywhere, and capturing there would ship a directory that never
         // saw this tool. Under the shared lock, for the reason the restore above is.
-        await withSessionLock(input.sessionFile, () => shipTree(input.sessionFile));
+        await withSessionLock(input.sessionFile, () => shipTree(input.sessionFile, writer));
         return { outcome: "settled" };
       } finally {
         session.dispose();
