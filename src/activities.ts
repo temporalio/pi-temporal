@@ -320,17 +320,18 @@ export function makeActivities(
       // call nor any sibling tool. Without this it runs against whatever files that host happens
       // to have, and reports the answer as if it were the project's.
       //
-      // Under the session lock, because the tip and the bundles live beside the session file and
-      // the tree's own lock is host-local. Two hosts publishing at once is the case that has to be
-      // excluded, and only the shared lock excludes it.
+      // Under the session lease, so this session's transcript recovery and its tree restore are
+      // ordered against each other. It is not what keeps two hosts from publishing at once: the
+      // tree store takes its own host-directory and shared-store leases for that.
       await withSessionLock(input.sessionFile, () => bringTree(input.sessionFile));
       // Opening a session can append to it (a first thinking-level entry), and two of these run at
       // once. The lock covers the open and is given back before the tool runs, which is the part
       // that has to stay parallel.
-      // The guard has to change when the lock does. While the lock is held it asks whether it is
-      // still ours; once it is given back, `ownedNow` can never go false again, so a guard closed
-      // over it would wave every later write through. A tool activity has no business writing at
-      // all, and an extension appending from `tool_execution_end` runs right here.
+      // The guard has to change when the lease does. Opening a session can append (a first
+      // thinking-level entry), so it is allowed while the lease is held; once the lease is given
+      // back, `ownedNow` can never go false again, so a guard closed over it would wave every
+      // later write through. A tool activity has no business appending at all, and an extension
+      // appending from `tool_execution_end` runs right here.
       let opening = true;
       const session = await withSessionLock(input.sessionFile, (_owned, ownedNow) =>
         openSession(input.sessionFile, () => {

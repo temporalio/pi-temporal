@@ -6,20 +6,20 @@
 // The shape is git's, because git already answers the hard parts: content addressing, an
 // incremental transfer, and a checkout that removes what a later tree dropped. Each capture writes
 // one bundle into a directory beside the session log; a host that is behind unbundles the ones it
-// has not seen and checks the newest tree out.
-//
-// Three things this deliberately does not do. It never touches the project's own `.git`: the
-// shadow repository is host-local and points at the work tree from outside, so a project that is
-// not a git repository works the same as one that is, and one that is keeps its own history. It
-// never writes over somebody's checkout, and never drops work a crash caught before it shipped:
-// that work is set aside under `salvage/` rather than reverted. And it never lets two sessions
-// share one directory, which means one project directory serves one session at a time.
+// has not seen and checks the newest tree out. The shadow repository is host-local and points at
+// the work tree from outside, so the project's own `.git` is never touched and a directory that is
+// not a repository works the same as one that is.
 //
 // Who may move the tip is the rule the rest follows from. Only a host standing on it may add to it,
 // and nothing running on a worker may establish it: every activity, the model call included, lands
 // on whichever worker Temporal had free, so an activity that adopts its own directory puts the
-// project wherever the first unit of work happened to go. The client sends it, before the session
-// starts, and a session with nothing established refuses every activity until it does.
+// project wherever the first unit of work happened to go. The client sends it, and a scheduled
+// session copies the template the client left.
+//
+// What these guards do not do is isolate a tool that outlived its activity. A host that is behind
+// is refused and its work set aside under `salvage/`, but a host the session later restores is
+// brought to the tip, and a stale tool writing after that restore publishes against a note that
+// now matches. That is why the driver refuses to move a step off a host whose attempt started.
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -71,8 +71,8 @@ interface Tip {
 
 const shareDir = (sessionFile: string) => `${sessionFile}.tree`;
 const tipPath = (sessionFile: string) => join(shareDir(sessionFile), "tip.json");
-// Wide enough that the lexical sort the restore depends on cannot run out. Four digits is about
-// three hours of steps.
+// Zero-padded because the restore sorts these names lexically. Eight digits, so the ordering holds
+// for every session a run can produce.
 const bundleName = (seq: number) => `${String(seq).padStart(8, "0")}.bundle`;
 
 // Host-local, and keyed by the path the tools run in. Two projects on one worker get a shadow
@@ -110,10 +110,10 @@ const revive = (sessionFile: string) => rm(retiredPath(sessionFile), { force: tr
 // two sessions in the same directory, and it is what makes the shadow repository's index safe.
 //
 // The second lives in the shared directory, so it crosses hosts, and it is what stops two machines
-// writing one session's bundles at once. That used to be nobody's job here: the activities happened
-// to hold the session's own lock around their tree writes, so the rule held for them and not for
-// the client, which seeds a project holding neither. A lock the callers have to remember is a rule
-// that is true until somebody adds a caller.
+// writing one session's bundles at once. The activities happened to hold the session's own lock
+// around their tree writes, so that rule held for them and not for the client, which seeds a
+// project holding neither. A lock the callers have to remember is a rule that is true until
+// somebody adds a caller.
 const treeLockPath = (projectDir: string) => join(hostDir(projectDir), "tree");
 const sharedLockPath = (sessionFile: string) => join(shareDir(sessionFile), "writers");
 
@@ -262,7 +262,8 @@ async function publish(
   // leaves a bundle nothing points at, and every host afterwards computes this same number, finds
   // it, and refuses. That wedges the session on every host for good: each refused capture then sets
   // its work aside and no host ever sees another's writes again. Take the orphan out and carry on.
-  // Safe because the callers hold the session lock, so no live writer is inside that window.
+  // Under the shared tree-store lease, which is what makes the decision safe: the session lock is
+  // not held by every caller that gets here, so it is not what excludes a live writer.
   if ((await readdir(dir).catch(() => [] as string[])).includes(bundleName(seq))) {
     const now = await readJson<Tip>(tipPath(sessionFile));
     if ((now?.seq ?? 0) >= seq) {
@@ -286,7 +287,8 @@ async function publish(
   // nothing needs, and a crash the other way round leaves a session nobody can restore.
   if (restart) await dropBundlesBefore(dir, seq);
   // `built` is carried, never invented here. A capture says what the directory now holds, not where
-  // the directory came from, and the answer to that only changes when a restore creates one.
+  // it came from, and only a restore that creates a directory may answer that this host built it.
+  // Inventing it here would give a later idle period permission to empty somebody's checkout.
   await writeJson(heldPath(projectDir, sessionFile), {
     tree,
     seq,
@@ -374,9 +376,9 @@ export async function capture(
   projectDir: string,
   sessionFile: string,
   // Whether this caller may establish the project when nothing has shipped yet. Off for everything
-  // except the client and the model call, because the first capture decides what the project *is*
-  // and a tool call is dispatched to whichever worker is free. Letting one do it meant an empty
-  // `/project` on the host that happened to draw the first tool became the project, on every host.
+  // a worker draws, because the first capture decides what the project *is* and a worker is chosen
+  // by whatever was free. Letting one do it meant an empty `/project` on the host that happened to
+  // draw the first tool became the project, on every host.
   opts: { readonly seed?: boolean } = {},
 ): Promise<void> {
   // One at a time per directory. Two captures share an index and a shadow repository, so a second

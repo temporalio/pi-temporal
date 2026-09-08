@@ -1,24 +1,27 @@
 // One writer at a time for a session file. Pi's session file is a tree, and every entry takes its
-// parent from the leaf its writer last saw, so two writers do not corrupt it, they branch it. The
-// step's own calls never write, but two attempts of the same activity can: a heartbeat that stalls
-// long enough for Temporal to start attempt 2 leaves attempt 1 alive and both appending.
+// parent from the leaf its writer last saw, so two writers do not corrupt it, they branch it. Two
+// attempts of the same activity are what does that: a heartbeat that stalls long enough for
+// Temporal to start attempt 2 leaves attempt 1 alive and both appending. The tool calls take it
+// too, because they move the project's files even though they do not write the transcript.
 //
-// Advisory, and beside the session file, so it works wherever the session file works. A holder that
-// dies is reclaimed on age, which is why the lock is refreshed while it is held.
+// It lives beside the session file, so it works wherever the session file works, and a holder that
+// dies is reclaimed on age, which is why it is refreshed while it is held.
+//
+// A lease, not a fence. It narrows the overlap; it does not remove it. Neither the awaited
+// ownership read nor the synchronous guard is atomic with the write it guards, and neither says
+// anything about a tool still running outside the process.
 //
 // Taking it over is the part that has to be exact. A lock is a directory of claims, each named for
 // the epoch it took, and the newest claim owns the lock. Taking over means creating the next epoch
 // with an exclusive create, which is a compare and set: it says "I saw epoch N, and I claim N+1",
-// and it fails if anybody else already claimed N+1 from the same reading.
+// and it fails if anybody else already claimed N+1 from the same reading. Competing takeovers
+// compete on one path, so nothing moves a live claim out of the way to make room.
 //
-// The shape this replaced moved the stale claim out of the way and created a new one at its path.
-// Two things were wrong with that, and a review reproduced both. `rename` acts on the path rather
-// than on the file whose age was measured, so a contender slow between the two moved whatever was
-// there by then, including a lock somebody had just taken. And while it was moved the path was
-// free, so a third contender could create one there. Reading the file back caught the theft and
-// could not undo it: putting it back is a second step, and by then the path can be somebody else's.
-// Nothing bounded by a timer fixes that, because the fault is that the takeover was not conditional
-// on the state it measured. This one is.
+// The shape this replaced moved the stale claim aside and created a new one at its path. `rename`
+// acts on the path rather than on the file whose age was measured, so a contender slow between the
+// two moved whatever was there by then, and while it was moved the path was free for a third. A
+// review reproduced both. Reading the file back caught the theft and could not undo it. The fault
+// was that the takeover was not conditional on the state it measured; this one is.
 
 import { mkdir, readdir, readFile, rm, rmdir, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -27,13 +30,12 @@ import { dirname, join } from "node:path";
 
 // Longer than the activity heartbeat timeout, on purpose. A holder whose event loop is blocked
 // cannot refresh, and the writes this lock protects are the synchronous ones most likely to block
-// it, so a shorter window would steal the lock from a holder that is alive and working.
+// it, so a shorter window would reclaim from a holder that is alive and working.
 //
-// It does not make the lock safe on its own. Temporal giving up on an attempt stops it being
-// waited for, not being run: an attempt blocked past this window is still inside the body when the
-// next one claims the following epoch. That is what `owned()` is for. Whoever is about to write
-// asks whether the lock is still theirs, which narrows the hole from the whole body to the gap
-// between that question and the write.
+// Expiry is not evidence that the holder stopped. A blocked event loop outlives any timeout here,
+// so an attempt Temporal has given up on can still be inside the body when the next one claims the
+// following epoch. That is what `owned()` is for: whoever is about to write asks whether the lock
+// is still theirs, which narrows the hole to the gap between the question and the write.
 //
 // `ownedNow()` is the same question for a writer that cannot await one. Pi's append path is
 // synchronous all the way down, and the write a model call ends with lands at the end of a stream
@@ -43,15 +45,16 @@ const REFRESH_MS = 3_000;
 const RETRY_MS = 250;
 // How much earlier than that a holder stops saying the lock is its own. Both sides measuring the
 // same threshold is wrong in the direction that costs something: the contender reads an mtime
-// another host's clock wrote, so a clock ahead by `d` reclaims `d` early, and the holder is still
-// answering yes to the one question asked immediately before a write. A refresh interval plus room
-// for the skew a machine drifts to without anybody noticing.
+// another host's clock wrote, so a clock ahead by `d` reclaims `d` early while the holder still
+// answers yes to the question asked immediately before a write. A refresh interval plus room for
+// drift. It is a margin, not a measured bound on skew.
 const MARGIN_MS = 10_000;
 
-// mtime comes from whichever host last touched the file, so a skewed clock reads a live lock as
-// dead. The exclusive create is what actually excludes, which needs a filesystem where O_EXCL is
-// atomic: local disk, NFSv4, SMB. It is not reliable on NFSv3.
-
+// What the deployment has to provide: an exclusive create that really excludes, and directory and
+// timestamp reads coherent enough that a listing does not miss a claim somebody just wrote. mtime
+// comes from whichever host last touched the file, so a skewed clock reads a live lock as dead.
+// Checked on local disk and on one NFSv4 mount. NFSv3 and SMB are untested here.
+//
 // A directory, holding one file per claim. The name is where the ordering lives, so deciding who
 // owns the lock is a listing rather than a read: a claim that cannot be read yet still counts.
 const lockDir = (sessionFile: string) => `${sessionFile}.lock`;
@@ -68,15 +71,12 @@ interface Claim {
   readonly mtimeMs: number;
 }
 
-// Oldest first, so the last one is the owner. A name nothing can parse is not a claim: it cannot
-// have been written by this code, and treating it as one would hand the lock to a stray file.
 async function claims(dir: string): Promise<Claim[]> {
   const names = await readdir(dir);
   const found: Claim[] = [];
   for (const name of names) {
     const epoch = Number.parseInt(name, 10);
     if (!Number.isFinite(epoch)) continue;
-    // A claim that vanished between the listing and the stat is one that was released.
     const info = await stat(join(dir, name)).catch(() => undefined);
     if (info) found.push({ epoch, name, mtimeMs: info.mtimeMs });
   }
@@ -84,11 +84,9 @@ async function claims(dir: string): Promise<Claim[]> {
 }
 
 /**
- * Run `body` as the only writer of this session file. Throws if the lock cannot be taken in time,
- * which is a retryable condition: the holder is another attempt that is still working.
- *
- * `body` is handed an `owned()` it should call immediately before it writes, and an `ownedNow()`
- * for a writer that cannot await one. See STALE_MS.
+ * Callers must check ownership before writing because an expired attempt can remain alive.
+ * `ownedNow()` uses the last confirmed timestamp for synchronous append paths; it cannot read
+ * shared storage at the write. Acquisition timeout permits a later retry, not proof of liveness.
  */
 export async function withSessionLock<T>(
   sessionFile: string,
@@ -145,11 +143,7 @@ export async function withSessionLock<T>(
   // Set the moment the refresher finds the lock is somebody else's, and never unset: a lock taken
   // away does not come back.
   let lost = false;
-  // When this process last saw the directory say the lock was ours. The flag above is not enough on
-  // its own: it is set from inside a timer callback, and a process whose event loop stops does not
-  // run timers, so a holder that was paused past STALE_MS and superseded comes back to a flag that
-  // still says "mine". A clock read needs no event loop and no I/O, so it is the one thing a
-  // synchronous caller can trust after a pause.
+  // A paused event loop runs no timer callbacks, so the guard must also expire by elapsed time.
   let lastConfirmed = Date.now();
 
   const holderOf = async (name: string) => {
@@ -211,13 +205,8 @@ export async function withSessionLock<T>(
     return list !== undefined && (await stillOurs(list));
   };
 
-  // For a writer that cannot await. Pi's append path is synchronous all the way down, so the one
-  // place that is always immediately before a write cannot read the lock.
-  //
-  // Two questions, both answered without I/O: has the refresher seen the lock taken, and has this
-  // process been away long enough for it to have been. The second is what covers a stall, which is
-  // the only way a live holder loses a lock it is still refreshing. It gives up before the age a
-  // contender takes over at rather than exactly at it, because the two are measured on two clocks.
+  // Synchronous appends cannot await shared storage. The margin accounts for some delay between
+  // this process's last confirmation and another host's reclaim decision, not every clock skew.
   const ownedNow = () => !lost && Date.now() - lastConfirmed < STALE_MS - MARGIN_MS;
 
   try {

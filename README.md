@@ -1,16 +1,20 @@
 # pi-temporal
 
-A Temporal-backed durable executor for the [Pi coding agent](https://github.com/earendil-works/pi), shipped as a plugin around Pi's SDK. Same pattern we proved on the OpenCode fork: the agent's own loop runs under a durable executor, while the session record stays in the app's own log.
+A Temporal executor for the [Pi coding agent](https://github.com/earendil-works/pi),
+packaged as an extension around the fork's SDK. Pi keeps its conversation record;
+Temporal drives execution. This package requires the fork APIs listed below.
 
-The durable unit is one step: a single model call and the tools it asks for. The workflow runs one Temporal activity per step, so a worker dying takes one step with it and every step before it stays done.
+Worker mode uses one activity per step by default in the `local` profile. A step
+contains a model call and its tools. `PI_TEMPORAL_STEPPED=1`, also the `fleet`
+profile default, separates the model call, tool calls, and seal into activities.
 
-Behind `PI_TEMPORAL_STEPPED=1` the unit is smaller still: the model call, each tool call, and the seal are activities of their own. See [A tool call per activity](#a-tool-call-per-activity).
-
-Status: verified end to end against a live Pi (SDK 0.84.2 fork). A turn that took three steps cost three activities. Killing the worker mid-step re-drove that step alone: the step before it stayed done and its `>>` append did not happen twice, the step in flight came back as attempt 2 on a fresh worker, the prompt was not re-added, and the turn ran on to its answer.
+Completed activity results replay from Temporal history. Retrying unfinished
+work still depends on the session record, dispatch claims, and project storage.
+A timeout does not prove that the old activity or its tool stopped.
 
 ## Depends on the Pi fork
 
-This needs three pull requests on the fork, none of which is in the published `@earendil-works/pi-coding-agent`. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
+This uses the fork APIs developed in three pull requests. The source used here is pinned in `fork.pin`; this review does not establish the API surface of the current published package. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
 
 - `recordPrompt(text)` puts a prompt in the transcript without running it.
 - `step()` runs one model call and its tools, and reports whether the turn is done.
@@ -28,9 +32,15 @@ npm ci
 npm run setup-fork
 ```
 
-`setup-fork` fetches that exact commit into `.fork/pi` (ignored), builds it, and links it into `node_modules`. CI runs the same two commands, so a fresh clone and a CI run get the same build. The linked package resolves its sibling `@earendil-works/pi-agent-core` (which carries `Agent.step`) from the fork's own workspace, so the whole fork API is picked up.
+`setup-fork` fetches that exact commit into `.fork/pi` (ignored), builds it, and links it into `node_modules`. CI uses the same setup commands. The pin selects fork source; the dependency lock and setup inputs also affect the build. The linked package resolves its sibling `@earendil-works/pi-agent-core` (which carries `Agent.step`) from the fork's own workspace, so the whole fork API is picked up.
 
-Run `setup-fork` after any `npm ci`, which wipes `node_modules` and takes the link with it. To move to a newer commit of the PR, edit `PI_FORK_REF` in `fork.pin` and run it again.
+Working in the fork itself needs one more thing, and it needs the network: its model catalog under
+`packages/ai/src/providers/data/` is generated and ignored, so a clone that has never fetched it
+fails `tsgo --noEmit` with errors about models nobody has heard of, and the fork's own pre-commit
+hook fails with it. `npm run -w @earendil-works/pi-ai hydrate-model-data` writes it, after which
+`npm run check` passes. That is upstream's arrangement, not something this pin can carry.
+
+Run `setup-fork` after any `npm ci`, which wipes `node_modules` and takes the link with it. To select different fork source, edit `PI_FORK_REF` in `fork.pin` and run it again.
 
 ## Install it into pi
 
@@ -42,24 +52,23 @@ pi install /path/to/pi-temporal      # a local checkout
 pi install -l /path/to/pi-temporal   # this project only
 ```
 
-Once it is installed, every turn of every session is durable. There is nothing to type and nothing
-to launch: the first turn registers a turn executor and starts a worker in this process, so each
-turn becomes a `piLocalTurn` workflow, and a turn a crash cut in half is finished when the session
-is opened again. `PI_TEMPORAL_DURABLE_TURNS=0` turns it off, and `PI_TEMPORAL_STEPPED=1` makes each
-tool call of a turn an activity of its own.
+When the fork exposes `registerTurnExecutor`, the extension registers a turn
+executor and starts a worker in the Pi process. A reachable Temporal server is
+still required. `PI_TEMPORAL_DURABLE_TURNS=0` disables this path;
+`PI_TEMPORAL_STEPPED=1` gives a live turn separate model, tool, and seal activities.
 
-Be clear about what that is and is not. The turn runs in your pi process, against the live session,
-so the transcript and the streaming are pi's own. It does not run somewhere else, and it cannot:
-the session it belongs to is in memory here. So the workflow is a record of the turn and a retry
-policy around it, and the recovery is "the next pi to open this session finishes the turn", not
-"the turn carries on without you".
+The activities use the in-memory session and a queue belonging to that process.
+They cannot migrate to another process in this implementation. After a crash,
+reopening the session can resume unfinished work through the executor hook.
+Unsealed tool results kept only in memory are lost; unanswered calls are settled
+as unknown outcomes before the model continues.
 
-A crash test shows the part that matters: kill pi during a tool call, reopen with `pi -c`, and the
-unanswered call is settled as "the outcome of this tool call is unknown", the turn runs on, and the
-model checks the state rather than blindly running the command again.
+The original live test killed Pi during a tool call and reopened it with `pi -c`.
+That is a historical test result, not evidence that every external effect can be
+recovered. The model can inspect the effect's destination when a tool supports it.
 
-If Temporal cannot be reached, the turn runs the way pi would have run it, and the session says so
-once. Durability is not worth losing a turn over.
+If Temporal setup fails, the extension reports the failure and runs the local
+Pi path. That fallback does not have Temporal recovery.
 
 ## Sending a task away: /background
 
@@ -69,26 +78,25 @@ Durability is not the same as offloading, so that has its own command:
 - `/background-status` shows what this session is waiting on.
 - `/background-stop` interrupts it.
 
-The difference from an ordinary turn is who owns the session. A background task belongs to the
-worker from the start, so it carries on after pi exits, and the durable unit is one step rather
-than one turn: a worker dying loses the step in flight and nothing before it. When the task
-finishes, the answer arrives as context for your next prompt, so you can just ask about it.
+A background task uses a separate worker-owned session. It can continue after Pi exits if
+another worker polls the queue and can access the record and project. When the task finishes,
+the answer arrives as context for your next prompt. The retry and migration limits below still apply.
 
-Quitting pi stops the worker inside it, but not the task. The workflow keeps it, and the next
-worker to poll the queue picks the step up, which can be the one your next pi starts.
+Quitting Pi stops its embedded worker. The workflow remains in Temporal, but progress waits
+for an eligible worker. An uncertain failure on a pinned tool ends that turn rather than moving
+remaining tools to a directory an old attempt might still modify.
 
-The worker calls `step()`, so this needs pi to be the fork build. The Temporal side does not, so on
-stock pi the commands still work against a worker running elsewhere: set
-`PI_TEMPORAL_EMBEDDED_WORKER=0` and run `npm run worker` from a clone. Do the same when a fleet
-worker owns the queue, or when you want tasks to keep moving with no pi open.
+The worker needs the fork build. Set `PI_TEMPORAL_EMBEDDED_WORKER=0` when a standalone
+worker owns the queue, and run `npm run worker` from the driver clone. Live-turn execution
+still requires the fork hook. Compatibility with an unmodified published Pi is not checked here.
 
 ## Why the session you type in cannot be handed to a worker
 
-An extension gets a read-only session manager and no handle on the running `AgentSession`, so it
-cannot drive the local loop itself. `registerTurnExecutor` is the way in, and it hands the turn
-over in this process. Moving the turn to a worker instead would mean a second `AgentSession`
-writing the same session file, which is two writers on one JSONL. That is why `/background` gives
-a task its own session rather than borrowing yours.
+The ordinary extension context exposes a read-only session manager. The fork's
+`registerTurnExecutor` hook supplies control of the current turn, not a transfer
+of session ownership. Moving it elsewhere would require transferring the
+transcript writer and workspace too. `/background` avoids that transfer by
+creating a worker-owned session.
 
 ## Try it
 
@@ -105,7 +113,7 @@ cd /path/to/your/project
 "$PI_TEMPORAL"/scripts/run-pi.sh
 ```
 
-Then just type. Every turn is a workflow: `temporal workflow list --address 127.0.0.1:7233` shows one
+With Temporal connected, each live turn gets a workflow: `temporal workflow list --address 127.0.0.1:7233` shows one
 `piLocalTurn` per prompt. To see the recovery, kill pi during a tool call (`Use the bash tool to run:
 sleep 45; echo late`), reopen with `scripts/run-pi.sh -c`, and watch the interrupted call get settled.
 
@@ -128,12 +136,14 @@ npx tsx step-loop-check.mts        # one activity per step, and interrupts; no m
 
 ## The idea
 
-Two parts of the state, two systems:
+Pi owns the conversation schema and its parent-linked JSONL record. Temporal
+keeps workflow progress and dispatches activities. The app's record also holds
+execution facts used when an activity retries.
 
-- **Durable storage** stays with Pi. Pi's `SessionManager` already persists the conversation (messages, tool results, the tree) to a JSONL session file. That file is the source of truth. We do not move it into Temporal.
-- **Durable execution** comes from Temporal. A per-session workflow drives Pi's turns and survives a crash: the turn re-runs on another worker and continues from the session file.
-
-This is the `storage` vs `execution` split from the AI-399 write-up, applied to a harness that (unlike OpenCode) has no swappable `SessionExecution` abstraction. So we drive Pi from the outside via its SDK rather than replacing an internal interface.
+There are more than two durable states. Worker mode keeps dispatch claims and
+results beside the transcript. Tree shipping adds shared bundles and host-local
+notes. Recovery depends on the agreement between those states and Temporal
+history, not just on each file surviving.
 
 ## Granularity: a step per activity
 
@@ -145,7 +155,10 @@ One `runStep` activity does one thing:
 
 The workflow loops that until a step reports done, so the number of activities is the number of steps. Nothing in the activity reads the workflow's step number: the transcript decides what runs next, and the workflow only counts so a runaway turn hits a ceiling.
 
-That makes a retry cheap and safe for a reason worth spelling out. A step that finished but never reported back is indistinguishable, on disk, from the step after it, so re-running it does exactly what the next step would have done anyway. No work is repeated. The one case that is not automatic is a crash between a tool starting and its result landing, and that is what `prepareStep` is for.
+If a completed step did not report back, its retry reads the transcript and may advance the
+next step. Temporal activity count therefore need not equal model-step count after recovery.
+A partially recorded tool batch needs separate handling: `prepareStep` reports unanswered
+calls as unknown outcomes. This does not make a whole step atomic.
 
 ## A tool call per activity
 
@@ -155,76 +168,92 @@ That makes a retry cheap and safe for a reason worth spelling out. A step that f
 runModelCall  ->  runToolCall (one per call)  ->  sealStep
 ```
 
-Off by default. It applies to both halves: a `/background` task on a worker, and every turn of the session you are typing in.
+Off by default in the `local` profile and on by default in `fleet`. It applies to both halves: a `/background` task on a worker, and every turn of the session you are typing in.
 
 The calls of a step overlap on the worker half, where each activity opens a session of its own. They do not on the live half: those calls all reach the one agent that pi process holds, and it admits a single unit of work at a time, so a second call arriving while the first runs would be refused and reported as an unknown outcome for a tool that never ran.
 
-The point is what can now sit between the model asking for a tool and the tool running. A per-tool retry policy, a per-tool timeout, an approval, a budget: under the whole-step mode there was nowhere to put any of them, because one activity covered the model call and the whole batch. It also makes a turn legible: history shows the tools by name, and a tool that hangs no longer holds the model call under the same timeout.
+The split exposes per-tool retry and timeout boundaries to workflow code. It also creates a
+place for durable approvals or budgets, but does not implement those features by itself.
+Whole-step mode can keep dispatch and approval state in application storage; it does not expose
+those pauses as separate workflow operations.
 
-Two things are load-bearing and were easy to get wrong.
+Two storage rules matter here.
 
-**The seal is the only writer of the step's results.** Not of the transcript: the model call writes the assistant message. Pi's session file is a tree, and every entry takes its parent from the leaf the writer last saw. Two calls settling at once would each parent off the leaf they saw and branch the transcript, and Pi's own parallel path appends results in call order after the batch, which per-call activities would lose. So a call reports its result and the seal records the step's results together, in the order the model asked. The transcript ends up the one Pi would have written, which its own tests pin.
+**The seal is the only writer of the step's results.** Not of the transcript: the model call writes the assistant message. Pi's session file is a tree, and every entry takes its parent from the leaf the writer last saw. Two calls settling at once would each parent off the leaf they saw and branch the transcript, and Pi's own parallel path appends results in call order after the batch, which per-call activities would lose. So a call reports its result and the seal records the step's results together, in the order the model asked. The fork tests compare selected split and whole-step transcripts.
 
-Two attempts of the same activity can still both be alive, so every activity that writes takes a lock beside the session file first. A holder that stops refreshing it is reclaimed on age, which keeps one dead worker from taking the session with it. That includes the tool calls: they do not write the transcript, but they move the project's files, and the tree's own lock is host-local while two hosts publishing at once is the case that has to be excluded.
+Worker activities that write the transcript take a lease beside the session file. Tree shipping
+also uses a lock for the host directory and a shared tree-store lock. These cooperate with write
+guards; they do not fence arbitrary tools or make a synchronous append atomic with lease validation.
 
-**A call that already started is not silently repeated.** A dispatch writes a note beside the session file before the tool can have any effect, and keeps the result there when it comes back. A second dispatch that finds a result returns it; one that finds only the note reports the outcome as unknown rather than running a `git push` that may already have landed. The attempt number would answer the same question far less precisely: it counts every way a dispatch can die, including the ones that never reached the tool.
+**Worker dispatches keep a persistent admission claim.** A dispatch writes a note beside the session file before the tool can have any effect, and keeps the result there when it comes back. A second dispatch that finds a result returns it; one that finds only the note reports the outcome as unknown rather than running a `git push` that may already have landed. The attempt number would answer the same question far less precisely: it counts every way a dispatch can die, including the ones that never reached the tool.
 
 The kept results live in `<session>.jsonl.pending/<turn>/<step>/`, scoped by both because a call id is only unique within the message that asked for it and a turn numbers its steps from one again. The next step's model call drops the results of the steps before it. The seal deliberately does not drop its own: a seal whose answer never reached Temporal runs again, and a batch it reads as empty is a batch it reads as wanting another step, even when a tool asked the turn to stop.
 
 The notes are not dropped with the results, and that is the whole reason for the turn in the path. The attempt a note guards against is one that stalled: it comes back after the seal wrote the answer and after the cleanup that followed, and nothing else on disk can then tell its call from one nothing has run yet. An empty file per call is what keeping it costs. Under a scope of step alone the next turn's step 1 would read the last turn's step 1 as its own, and report a tool that never ran as already dispatched.
 
-Each tool call gets 30 minutes per attempt by default. A call that crosses it is not run again, since its note says it started, so it ends as an unknown outcome while the tool may still be running. A deployment with longer tools sets `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` on the client that starts the session.
+Worker tool results stay beside the session file to reduce history payloads. Built-in tools
+truncate some outputs, but extensions can return different sizes. The driver must not assume
+that every result is bounded to 50 KB.
 
-They stay out of Temporal's history on purpose: tool output is capped at 50KB by Pi, but a step's worth of it per activity result, per step, for the life of a session, is a history nobody wants to read.
+Each tool call gets 30 minutes per attempt by default. A call that crosses it is not run again, since its note says it started, so it ends as an unknown outcome while the tool may still be running. A deployment with longer tools sets `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` on the client that starts the session.
 
 What it costs: each activity opens the session file and builds an `AgentSession` of its own, so a step with four calls pays six session opens instead of one. Against a model call that takes seconds, the boundaries measure in milliseconds (see below), but the cost is real and it grows with the transcript.
 
 ## What is durable, and what is not
 
-- **Between turns: clean.** A worker dying between turns loses nothing. The next prompt drives on any worker from the session file. A fresh worker that never saw the session serves it correctly.
-- **Between steps: clean.** Each step is its own activity, so a worker dying loses at most the step in flight. The steps before it are on disk and are not re-run.
-- **Mid-step: the tool is reported as unknown, not re-run.** A crash between a tool starting and its result landing leaves a tool call with no result. `prepareStep` settles it with "the outcome of this tool call is unknown", and the model decides whether to try again. Blindly re-running it is the wrong default for a coding agent: the `git push` may already have happened.
-- **A step is not atomic.** Pi runs the tools of one step as a batch, so a crash part way through that batch leaves some tools run and some not. Under the whole-step mode none of the batch is in the transcript until the step ends, so a crash costs the work of every tool that had finished. The stepped mode is where the finished ones keep their results.
-- **An interrupt keeps what finished.** The step is closed on the way out, so a call that returned before the stop keeps its result. Only the one that was still running reads as an unknown outcome.
-- **Stepped mode keeps what a call produced.** A crash between a tool finishing and its result reaching Temporal loses the work under the whole-step mode: nothing recorded it. With a tool call per activity the result is kept beside the session file the moment the tool returns, so the retry finds it and the tool is not asked again. What is still lost is a tool that was inside its own execution when the process died, which is what an unknown outcome is for.
+Completed activity outcomes survive through Temporal history. The app's record
+lets a retry identify some work that finished without reporting to Temporal.
+Neither record makes a tool effect and its result atomic.
 
-- **A long session rolls over.** History grows for the life of a run, and a run that outgrows it is
-  terminated by the server, mid-turn. The workflow continues as new when nothing is in flight,
-  carrying its queue, which is the whole of the control state. `continueAsNewSuggested` is what
-  drives it in production; `maxHistory` in the workflow options is a tighter bound for an operator
-  who wants one, and is what makes the rollover reachable in a check.
-- **The write at the end of a model call is guarded too.** The lock check used to sit before the
-  call, and the assistant message is written at the end of a stream that runs for minutes. The
-  session asks on its way to every append now, through the fork's `setWriteGuard`. It answers from
-  the last refresh the lock confirmed, because Pi's append path is synchronous and cannot await a
-  read of the lock file, so the window is a refresh interval rather than a whole model call. It
-  compares timestamps rather than reading a flag a timer sets: a process whose event loop stopped
-  runs no timers, and that stall is the one case the guard exists for. It also gives up ten seconds
-  before the age a contender reclaims at, because those two are measured on two hosts' clocks.
+Worker split mode saves a result after the tool returns. A later dispatch can
+reuse that file. If the process dies before saving it, the persistent dispatch
+claim leads to an unknown outcome. Whole-step mode and live-process mode can
+lose completed but unsealed results. Live split mode keeps its intermediate
+results in memory, not in the worker's pending directory.
+
+On interruption, the split workflow attempts a seal in a non-cancellable scope.
+The worker seal keeps completed results without restoring or capturing the
+project or running post-step compaction. A failed cleanup seal is logged; this
+path cannot promise that every cancellation records all results.
+
+The worker session workflow continues as new between turns when the server
+suggests it or `maxHistory` is reached. It carries queued input and the last
+outcome. The live-turn workflow has a step ceiling but no continue-as-new path.
+A single large turn can still exceed history or payload limits.
+
+Worker transcript writes use `setWriteGuard` with the session lease's last
+confirmed timestamp. The synchronous append path cannot read shared storage
+atomically with its write. The 50-second validity window and 60-second reclaim
+age leave an allowance for clock differences, not a storage-level fence or a
+validated bound on clock skew.
 
 ### What recovers, and what a person has to answer for
 
-A fifth review asked for this as a table rather than as prose, and it is the right ask: "durable"
-is not a property, it is a list of failures with an answer beside each one. Live-process mode is
-the turn running inside the `pi` you typed into; worker mode is a session the deployment owns.
-Every row names the check that fails without its answer.
+Live-process mode uses the `pi` process's session. Worker mode reconstructs its
+session per activity. The table separates their contracts and names the scope
+of each check. A listed check is not proof of every interleaving in its row.
+The review package records current execution and mutation evidence separately;
+older live runs are labelled below.
 
-| What fails | Live-process mode | Worker mode | Pinned by |
+| What fails | Live-process mode | Worker mode | Checks and scope |
 |---|---|---|---|
-| A prompt is accepted and nothing wakes to run it | the turn is the process that took it, so there is nothing to wake | the prompt is workflow state, so it waits with no worker up, and a schedule firing carries the task in the workflow's own input | `workflow-init-check.mts` |
-| The process running the turn dies between steps | the steps already sealed are on disk; the turn ends with the process | the next attempt reads the transcript and continues, on any worker, including one that never saw this session | `detached-check.mts`, `step-loop-check.mts` |
-| It dies with a tool in flight | the call is settled as an unknown outcome and the model decides | same, and a tool that had finished keeps its result rather than being asked again | `pending-check.mts`, `detached-check.mts` |
-| Two attempts of one writing activity are alive at once | one at a time through the lock beside the session file; a holder that was superseded is refused at the write rather than after it | same | `session-lock-check.mts`, `lock-gap-check.mts`, `stall-check.mts` |
-| An attempt stalls past its own timeout and comes back after the answer is recorded | its dispatch claim fails, so it reports an unknown outcome instead of running the tool again | same | `stale-dispatch-check.mts` |
-| The user stops the turn | the step is closed on the way out, so the calls that returned keep their results | same, and the project is not moved on the way out | `interrupted-seal-check.mts`, `l2-step-check.mts` |
-| A host publishes the project tree while it is behind | not reachable: one process, one directory | refused, and its own unshipped work is set aside rather than lost | `worktree-check.mts`, `storage-repair-check.mts` |
-| A host is left holding a directory for a session that is over | not reachable | the session records that it is over where every host reads it, and each hands its own directory back the next time one is wanted | `storage-repair-check.mts` |
-| The session's history outgrows its run | not reachable: one turn, one run | continue-as-new when nothing is in flight, carrying the queue | `rollover-check.mts` |
-| The worker a step was pinned to is gone | not reachable | what is left of the step runs on the shared queue with nothing run twice, once every pinned attempt has settled; a tree the stranded host publishes afterwards is refused and set aside | `l2-step-check.mts`, `worktree-check.mts`, `detached-check.mts` |
+| A prompt is accepted before execution starts | The hook records the prompt before checking its stop flag; process death before persistence is not covered. | Input accepted by Temporal waits for a worker. Initialization must register query and interrupt handlers before project adoption finishes. | `local-turn-check.mts` covers an early stop. `workflow-init-check.mts` covers initialization handlers, not every acceptance-to-wake crash. |
+| The process dies between steps | Sealed transcript entries remain; reopening starts recovery through the hook. | Completed activities replay. Retry reads the transcript on an eligible worker, subject to the pinned-failure rule below. | `step-loop-check.mts` uses stub activities and no process death. `detached-check.mts` is a model-backed process test reported by the package author. |
+| The process dies with a tool in flight | Unsealed in-memory results can be lost. Reopening reports unanswered calls as unknown. | The step is closed without that host: a recovery seal records the results it had, a claim without a result reports unknown, and the closure is written where every host reads it so the old one cannot publish for that step afterwards. The turn then goes on with the next step, on whatever worker is free. What does not move is the rest of that step, because the attempt started. | `pending-check.mts` checks file behavior. `lost-host-check.mts` covers the closure and the hand-back with fake activities and the real tree store. `detached-check.mts` kills a real worker mid-tool and asserts the turn is answered by another one, the results are recorded, and the tool runs once per time the model asked. |
+| Two attempts of a writing activity overlap | The agent admits one unit at a time. The worker lease checks do not exercise this path. | Lease claims and write guards reduce overlap. Timestamp guards do not atomically fence the append or external tools. | `session-lock-check.mts`, `lock-gap-check.mts`, and `stall-check.mts` cover selected worker-lease interleavings and a stopped event loop. |
+| A stale dispatch resumes after result cleanup | No persistent dispatch claim in this path. | Claims outlive result cleanup, so the same turn, step, and call cannot be freshly admitted again. | `stale-dispatch-check.mts` drives the worker activity with a fake session and stalls before claiming. |
+| The user stops a turn | The workflow attempts to seal in-memory results. Process death can still lose them. | The workflow attempts to seal saved results without moving the project. | `local-turn-check.mts` covers the live loop with fake turns. `interrupted-seal-check.mts` exercises the worker seal with fake session persistence. `l2-step-check.mts` covers cancellation routing. |
+| A host captures while behind the tree tip | Live activities do not ship the project. | Capture refuses; recovery can save unshipped work under `salvage/`. This guard is not tool isolation. | `worktree-check.mts` models two host directories. `storage-repair-check.mts` checks cleanup. `migration-rejoin-check.mts` covers a stale tool after host rejoin. |
+| A tool that outlived its dispatch publishes afterwards | Not reachable: nothing outlives the process holding the session. | Its step was closed without it, so the capture is refused wherever it comes from and what it wrote is kept under `salvage/`. The tip rule alone cannot answer this one: the stale writer is still standing on the tree it read, so it publishes cleanly and reverts what replaced it. | `lost-host-check.mts` runs that ordering against the real tree store and fails if the closure is not written, or if the seal that closes the step publishes. Those two clauses are the contract both forks are held to; OpenCode's `packages/temporal/test/lost-host.test.ts` runs the same scenario against its own fence. |
+| A host retains a directory for a retired session | No worker-owned directory note in this path. | Shared retirement state permits later cleanup. Changed local files can prevent release. | `storage-repair-check.mts` covers revival during sweep, a clean host behind the tip, and forgotten-session cleanup. |
+| A turn spends more than it was meant to | Nothing bounds it: the loop is in the process the model is answering. | An operator's budget stops the turn on tokens or on wall clock, and the session takes the next prompt. Each model call reports what the step spent and what the session has been billed in total, and a session's bound is measured against that total, which is read off the record and survives a rollover, an idle retirement, and a turn some other client ran. A deadline (`hardSeconds`) stops the turn where it is instead of where it can, which is what a user pressing stop does. Off unless somebody sets it: a bound that ends real work is worse than none. | `budget-check.mts` drives every bound against a real server with stub activities; `spend-check.mts` drives the real activity to check what it reports. Neither checks a provider's billing. Without a deadline, a call that has started is never stopped, so a turn overshoots by whatever was running: a serial batch stops at the next call, a parallel one finishes. |
+| History grows past one run | No continue-as-new. A step ceiling is not a payload bound. | Continue-as-new between turns carries accepted prompts and the last outcome. One long turn can still exceed history limits. | `rollover-check.mts` uses a small history threshold and stub activities; it does not exercise maximum payload size. |
+| The pinned worker stops answering | Its queue cannot move the in-memory session. Reopen to recover. | Initial schedule-to-start failures can move serially after every pinned sibling settles. Other pinned failures close the step where it is, because the old tool may still be alive; the turn continues with the next step rather than ending. | `l2-step-check.mts` and `workflow-init-check.mts` check dispatch policy. `migration-rejoin-check.mts` fails if uncertain failures are migrated and the old host rejoins. `replay-check.mts` replays a history from before each rule. |
+| A later turn reuses a directory an abandoned tool may still write | Not reachable: one process holds the session and its directory. | The host records each call that is inside its own execution and refuses the directory to any other step until that call returns. The refusal is an ordinary failure, so the work is scheduled again and another host takes it; only that directory is stranded. It clears itself where the host can show the call is over. Four readings answer that, because a tool can put down anything the worker gave it: its process is gone, nothing carrying the name the worker exported is running, nothing is left in its control group or its process group, and nothing is standing in the directory. The control group is Linux's and is readable whoever owns the process, which is what answers for a tool that went through `sudo`; standing in the directory means a working directory inside it or a file under it held open, which is what answers for a tool that daemonized and kept neither. The refusal says which of the four is keeping it. And where the directory is one this session built out of an empty one, there is no refusal at all: it is moved to `<dir>.stranded.<time>` and a fresh one is built here, so the writer nobody can account for goes on writing the directory it has open, under its new name, where nothing it does reaches what the session builds next. That is a closure rather than a narrowing, and it is why the four readings do not have to be conclusive. It needs a directory that can be renamed, which a project directory mounted as a volume is not, and it never moves a checkout the session adopted or a directory holding a call of the step now asking for it. Where it cannot move, the refusal stands and `pi-temporal release-tree` is what clears it, and a worker says so at startup rather than waiting for the failure: a project directory that is a mount point, or whose parent it may not write, is reported as a note when the worker comes up. The refusal itself carries a short retry delay rather than climbing the backoff a failing activity earns, because the host that refuses fastest would otherwise push the next attempt minutes out while a free host sits idle. | `quarantine-check.mts` drives the real tool activity and the tree store, covers each way a marker is retired, and asserts a refusal asks for a retry rather than a backoff. `quarantine-routing-check.mts` puts two hosts on one queue, in two processes, and watches the work land on the one that is not refused and the turn get its answer there. |
 
-What none of this recovers, and no version of it can: a tool that was inside its own execution when
-the process died. Nothing on disk says whether the `git push` landed. The model is told the outcome
-is unknown and decides, which is the only honest answer a wrapper can give.
+An unknown result can sometimes be resolved by querying the effect's destination
+or using its idempotency key. This driver has no general resolver for arbitrary
+commands. It reports uncertainty to the model, which may make a new call.
 
 ## A session that outlives its client
 
@@ -246,15 +275,15 @@ npx tsx src/cli.ts watch task-1a2b3c4d
 npx tsx src/cli.ts stop task-1a2b3c4d
 ```
 
-There is no server in this picture, because a worker-owned session has none. The workflow holds the
+There is no application HTTP server in this path. A Temporal server is still required. The workflow holds the
 control state and answers `turnState`; the session file holds the conversation. So following a
 session is a query plus a tail of its file, and both work from any machine that can reach the
 cluster and `PI_SESSION_DIR`. Point that directory at shared storage and the machine that starts a
 task, the machine that runs it, and the machine that watches it need not be the same one.
 
-Three things worth knowing about the shape:
+The follower distinguishes these states:
 
-- **A closed run is a finished session, not a live one.** A closed workflow answers a query by
+- **A closed run cannot keep a turn live.** A closed workflow answers a query by
   default, with the state it held when it closed, so a run the server terminated reported its turn
   as still running and a follower polled it forever. The client rejects queries against a run that
   is not open.
@@ -268,11 +297,13 @@ Three things worth knowing about the shape:
 
 ### Verified
 
-`detached-check.mts` runs the claim against real processes: a client hands over a task and exits,
+`detached-check.mts` is the model-backed process check. The package author reported this run: a client hands over a task and exits,
 worker A starts the turn, A is killed with the tool still in flight, and worker B, which never saw
 this session, finishes it. `running` lists the session and `watch` follows it across the handover
 from a process that is only ever a client. The tool that was cut off is reported to the model as an
-unknown outcome rather than re-run, which is the rule this repo already holds everywhere else.
+unknown outcome rather than re-run, and the model answered without asking for it again, so the
+command ran once. What does not move is the rest of that step: its calls stay with the host that
+has them, and the step is closed without it.
 
 Two things that check gets right only because getting them wrong was silent. It kills on observing
 a tool in flight rather than after a fixed delay, because a slow command in between pushes the kill
@@ -280,20 +311,30 @@ past the end of the turn and then no handover happens at all. And it runs the wo
 single processes (`node --import tsx`), because `npx` spawns `tsx` spawns node, so killing the
 process you hold leaves the one that matters running.
 
+### Sessions that are already running
+
+Which activities a step schedules is what a workflow writes down, so changing that rule changes
+histories that already exist and a worker carrying this code would replay one into a nondeterminism
+error. Both rules that changed it are behind `patched()`, so a run recorded under the old one keeps
+what it recorded and a new one gets the current rule. Nothing has to be drained before the deploy.
+`replay-check.mts` replays a history this code writes and a kept one from before each rule; removing
+a patch fails it.
+
 ### Across two machines
 
 On one host "another worker" is another process reading the same disk, which proves less than it
 looks like. `docker/cross-host-check.sh` puts each worker in its own container: its own filesystem,
 its own hostname, and no way to reach the other except through Temporal and the shared session
-directory. The evidence is Temporal's own, because the worker identity is the container's hostname:
+directory. The original test recorded these worker identities in Temporal history:
 
 ```
 06:15:49  attempt 1  1@89cc9c4fa607     <- worker A, killed mid-tool
 06:16:30  attempt 2  1@252525771cd2     <- worker B, which had never seen this session
 ```
 
-`/sessions` is a local volume, so this shows separate hosts rather than a separate filesystem
-implementation. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
+`/sessions` is a local volume in that run. Separate containers exercise separate project
+filesystems, but do not establish network-filesystem lock behavior. The later NFSv4 variant is
+described below; these historical results were not repeated in this documentation pass.
 
 ## Taking the project with it
 
@@ -320,23 +361,24 @@ The rules that bound it:
 - **Only a host standing on the tip may move it.** A host that had fallen behind used to publish
   its own tree over the tip, which reverted everything shipped since on every host at their next
   restore. That was the worst bug this thing has had, and it was silent.
-- **It never writes over somebody's checkout.** Before a reset it compares what is on disk with
-  what it last agreed the directory held. An empty directory holds nothing, and treating that as a
-  working copy is how the tree ends up never travelling.
-- **Work a crash left behind is set aside, not dropped and not published.** A host that wrote and
-  died before shipping holds files nothing else has, and the session has moved on without them.
+- **Restore requires an empty directory or a note from this session.** A host behind the tip
+  compares its snapshot-visible files with that note before resetting. Local changes can be
+  saved to salvage. This comparison does not cover files excluded from snapshots.
+- **A host behind the tip can save unshipped changes.** Its snapshot-visible files may hold
+  work that no other host received.
   They go to `<session>.jsonl.tree/salvage/` as a self-contained bundle, and the host comes to the
-  tip. Recover one with `git bundle unbundle`. Nothing prunes them.
-- **Only a client may establish the project.** Nothing running on a worker can: every activity, the
+  tip. Recover one with `git bundle unbundle`. Automatic chain pruning leaves them; `forget`
+  removes the tree store, including its salvage bundles.
+- **Only client-provided project data may establish the project.** A worker must not seed from its own directory: every activity, the
   model call included, lands on whichever worker Temporal had free, so an activity that adopts its
   own directory puts the project wherever the first unit of work happened to go. `start --project=`
   sends it (the flag is required with the tree on, so nothing ships a home directory by accident),
   and `/background` sends the directory you asked from. A session with nothing established refuses
   every activity until a client sends it, which is loud rather than wrong.
-- **A schedule cannot carry the project yet.** Each firing is its own session and nothing is running
-  at firing time to send one, so `schedule` refuses with the tree on rather than creating sessions
-  that fail on every activity.
-- **A worker hands back what it held for finished sessions when it starts**, and lazily after that: a directory is freed when another session asks for that same one. Between the two, a worker that served fifty sessions is not sitting on fifty directories.
+- **A schedule copies a client-provided template.** Each firing adopts that shared store before
+  its first step. It does not discover the project from the worker's directory.
+- **A worker attempts cleanup at startup and when another session needs the directory.** It
+  rechecks retirement under the locks. A revived session or changed local files prevent cleanup.
 - **The chain restarts rather than growing for ever.** Every fortieth capture carries the whole tree
   and stands on nothing, and the bundles before it are removed once the tip names it. A session that
   runs for hours would otherwise keep every state it has ever been in, and a host joining late would
@@ -346,7 +388,7 @@ The rules that bound it:
   same number. Refusing it wedged the session everywhere rather than on the host that crashed.
 - **One session per directory.** A second is refused while the first is using it, in both
   directions. A session hands its directory back when it goes idle, and only then if this host built
-  that directory out of an empty one, everything in it has shipped, and it actually comes out empty.
+  that directory out of an empty one, its captured tree matches the held note, and it comes out empty.
   A directory the host already had is somebody's working copy: what it holds includes the files git
   ignores, which no bundle carries and nothing else has a copy of, so that one keeps its files and
   only the note goes. The retirement runs on one host, and it says the session is over in the shared
@@ -354,55 +396,52 @@ The rules that bound it:
   hands its own back then. Without somewhere shared to ask, the note is the only answer and nothing
   can correct it, so a directory served one session and refused every later one.
 - **A refused restore stops the step.** Running against files that are not the project tells the
-  model those files are the project, which is worse than not running, so it fails and Temporal puts
-  the work on a host that can do it. A refused *capture* is different: the tool has already run and
+  model those files are the project, which is worse than not running, so it fails. A retry can reach another eligible host, but the shared queue does not guarantee
+  selection of a suitable one. A refused *capture* is different: the tool has already run and
   a retry would find its result rather than run it again, so throwing there costs an attempt and
   still ships nothing. It sets the work aside instead, and says so.
-- **A step stays on the worker that ran its model call.** Every worker polls a second queue of its
-  own, keyed by host and project directory, and the model call reports it; the tools and the seal
-  are addressed there. That worker is standing in the directory the tools are about to write, so
-  they see each other through the filesystem and the tree never moves between them, which is what
-  lets them run together while it travels. A pinned dispatch carries a 30 second
-  `scheduleToStartTimeout` and one attempt. Unstarted calls wait for all pinned siblings before
-  moving to the shared queue one at a time. A pinned attempt that fails moves too, once
-  every pinned attempt of the step is over. What makes that safe is not a judgement about the host,
-  which the workflow cannot see: the dispatch note has the retry report the call as unknown rather
-  than run it again, and the tree store refuses a publish from a host that is not standing on the
-  tip, setting its work aside instead. Refusing to move was the other answer, and it ended the turn
-  on a worker dying mid-tool, which strands exactly the same work and loses the rest of the step as
-  well. The one failure that does not move is the turn being stopped, which is not a failure.
-  An interrupted step still records completed tool results. Its seal only writes the transcript,
-  with project restore, project capture, and post-run work disabled.
-- **It is off by default.** On a laptop the tools already run in the directory you meant, and
+- **A step is pinned to the worker that ran its model call.** The worker polls a queue keyed by
+  host and project directory. Its tools share that directory and may overlap. Pinned dispatches
+  have a 30-second `scheduleToStartTimeout` and one attempt. If an initial dispatch never starts,
+  the workflow waits for all pinned siblings to settle before sending remaining work serially to
+  the shared queue. An uncertain pinned failure ends the turn. A timeout cannot distinguish a
+  dead host from one whose old tool can still modify the directory. The tip guard does not solve
+  this after that host rejoins and accepts the latest tip. Safe migration of that case needs
+  workspace isolation or evidence that the old process and tool stopped.
+  An interrupted step still attempts to record completed tool results. Its seal skips project
+  restore, capture, and post-step work.
+
+- **It is off by default in the `local` profile.** On a laptop the tools already run in the directory you meant, and
   shipping it there is disk spent on a problem that host does not have.
 
-What it does not carry is what git would not: anything the project ignores. So a rebuilt tree may
-want an install step, the same as a fresh clone would.
+The snapshot excludes files ignored by the project. A rebuilt directory may need an install
+step. Cleanup of a directory built by the worker can remove ignored files too; copy anything
+that must survive outside that managed directory.
 
 ### Verified
 
-`worktree-check.mts` covers the mechanics with two fake hosts and needs neither a server nor a key:
+`worktree-check.mts` covers the mechanics with two host directories and needs neither a server nor a key:
 a file and a nested file arrive, a deletion arrives, an unchanged capture ships nothing, a
 directory holding work nothing shipped is left alone, a second session cannot take one that is
 already in use in either direction, a tool call cannot establish the project, a host behind the tip
-comes to it with its own work kept rather than published, a directory is handed back only once
-everything in it has shipped, a restore does not turn a directory this host adopted into one it may
+comes to it with unshipped snapshot-visible work kept rather than published, a directory is
+handed back only when its captured tree matches its note, a restore does not turn an adopted directory into one it may
 empty, and a host that did not run the retirement can still serve the next session.
 
 The assertion worth naming is "nothing the other host shipped is reverted". The check used to set
 up exactly the interleaving that loses data, read the one file that survived it, and stay green
 while the rest reverted one line away.
 
-`docker/tree-check.sh` runs it for real: worker A writes a file, worker A's container is killed,
+`docker/tree-check.sh` is the model-backed container check. The package author reported this run: worker A writes a file, worker A's container is killed,
 and worker B, whose `/project` has never held anything, continues the same session and reads both
-that file and the rest of the project back. With `PI_TEMPORAL_SHIP_TREE=0` exactly the three tree
-assertions fail.
+that file and the rest of the project back. The earlier reported mutation with `PI_TEMPORAL_SHIP_TREE=0` failed three tree assertions.
+That mutation was not repeated in this documentation pass.
 
-`NFS=1 docker/tree-check.sh` runs the same ten assertions with `/sessions` on a real NFSv4 server
-rather than a local volume. That is the part the lock rests on: an exclusive create has to be
-exclusive and a rename has to be atomic, and a local volume answers both by construction, which is
-no answer at all for the filesystem a fleet actually shares. The mount is the daemon's, so no worker
-needs privileges of its own. NFSv3 still answers neither, and nothing here pretends to test it.
+`NFS=1 docker/tree-check.sh` uses an NFSv4 server for `/sessions`. The package author reported
+ten passing assertions on that setup. The lease uses exclusive claim creation and coherent
+directory and timestamp reads; bundle publication also uses rename. One tested NFSv4 mount does
+not prove those properties for every server or mount configuration. NFSv3 is untested here. Its
+absence from the tests is not evidence that it lacks exclusive create or atomic rename.
 
 ## Deploying it
 
@@ -417,10 +456,11 @@ picks one and the rest follow:
 | unit of work | a whole step | the model call, each tool call, the seal |
 
 Anything above can still be set on its own; the profile only decides what it is when you do not.
-What a fleet cannot be talked out of is the two that make it a fleet: a session directory only one
-machine can see is a worker that never picks anything up, and files that do not travel are a model
-being told an empty directory is the project. `preflight` refuses both, and a worker that fails it
-exits rather than accepting work it cannot do.
+`preflight` requires an explicit `PI_SESSION_DIR` and tree shipping in the `fleet` profile. It
+does not test that the directory is shared, that hosts resolve the same path, or that their
+filesystem and clock behavior meet the lease assumptions. Operators must check those properties.
+The profile also refuses a shared-workspace deployment with shipping disabled, even if that
+deployment could work under a different placement contract.
 
 Reaching a server that is not the dev server:
 
@@ -432,19 +472,18 @@ TEMPORAL_ADDRESS=temporal.internal:7233 \
   PI_TEMPORAL_TLS_CA=/run/secrets/ca.crt                  # a cluster with mTLS
 ```
 
-The key is read from a file rather than passed in argv, and nothing prints it. Both halves build the
-connection from the same function, so a client and a worker cannot disagree about how to reach the
-cluster or which namespace they are in.
+The key is read from a file rather than passed in argv, and nothing prints it. Clients and workers use the same connection helper. Different environment values can still
+point them at different clusters, namespaces, or queues.
 
-Ask before deploying rather than after:
+Print the resolved configuration:
 
 ```bash
 npx tsx src/cli.ts doctor
 ```
 
-It prints what this process resolved and names what is wrong with it, including the mistakes that
-read as something else later: an API key against a dev server, a Cloud key with the `default`
-namespace, an address that is not loopback with no credentials at all, half a certificate pair.
+It reports the profile checks, API-key checks, and incomplete certificate pairs. Plaintext
+to a non-loopback address is a note, not a refusal. It also calls `getSystemInfo` to check server reachability. It does not verify
+fleet agreement or shared-storage semantics.
 
 ## A turn nobody started
 
@@ -458,7 +497,7 @@ npx tsx src/cli.ts unschedule morning
 With the tree on it also needs the project, which nothing is running at firing time to send:
 
 ```bash
-npx tsx src/cli.ts schedule "review yesterday.s merges" --cron="0 9 * * *" --id=morning \
+npx tsx src/cli.ts schedule "review yesterday's merges" --cron="0 9 * * *" --id=morning \
   --project=/path/to/repo
 ```
 
@@ -479,74 +518,168 @@ recognise, and the only sessions anyone could see would be the ones a client sta
 
 ## Reproducing
 
-Helpers are at the repo root, none of which needs a model key:
+The following checks need no model key:
 
-- `submit.mts` submits one prompt, `inspect.mts` summarizes a session file.
-- `step-loop-check.mts` runs the executor against a Temporal server with the activities stubbed, in both modes: one step at a time and in order, an interrupt that ends the turn and not the session.
-- `local-turn-check.mts` does the same for a turn of a live session, with the turn itself faked: handed over once in whole-turn mode, and a model call, its calls and a seal per step in stepped mode. It also holds the two rules that half depends on: the calls of a step do not overlap there, and an interrupt stops the loop instead of buying another model call.
-- `l2-step-check.mts` needs no server either. It drives the stepped step body against fake activities: calls overlap unless the batch says otherwise, a failed tool still lets the step close, and an interrupt is not swallowed.
-- `session-lock-check.mts` covers the one-writer-at-a-time lock: two writers do not overlap, a dead holder's lock is reclaimed on age, a live holder's is not stolen, and a holder can tell it has lost the lock both ways it needs to ask (awaited, and synchronously from the refresher's last tick, which is what the session's own append path uses). It also covers the late reclaim itself: a contender stalled between measuring a stale lock's age and reclaiming it, while another reclaims it and takes it. The stall is injected, through `withSessionLock`'s last argument, because nothing outside the module can hold a contender at that point. What is asserted is the outcome rather than the stall: the slow one must not move a lock the quick one is holding and then take it. Reverting the content check makes it fail.
-- `detached-check.mts` needs a server and a key. It is the only one that does, because what it
-  proves is a session surviving the process holding it, which does not show up inside one process.
-- `worktree-check.mts` needs neither a server nor a key. It covers moving the project between hosts,
-  with the hosts faked as separate data directories over one shared session directory.
-- `stall-check.mts` needs neither a server nor a key, and takes about 70 seconds: it stops a holder's event loop past the lock's stale window and asks what the holder believes when it comes back.
-- `rollover-check.mts` needs a server, no key. It drives a session past a small `maxHistory` and holds the two things a rollover must not break: the run really does change, and every prompt it accepted is still answered afterwards.
-- `pending-check.mts` needs neither a server nor a key. It covers the files a step keeps about its calls, which is what "a call that already started is not silently repeated" rests on: a fresh call looks fresh, scratch never reads as a result, and a sweep drops what the transcript answers and keeps what it does not.
+- `step-loop-check.mts`, `local-turn-check.mts`, `workflow-init-check.mts`, and
+  `rollover-check.mts` need a Temporal server. They use stub activities or turns
+  to check workflow control, initialization, and continue-as-new.
+- `l2-step-check.mts` checks tool overlap, fallback policy, and cancellation with
+  fake activities. `migration-rejoin-check.mts` also uses fake activities but real
+  temporary project directories to test the stale-host migration case.
+- `pending-check.mts` checks claims, result files, and cleanup.
+  `stale-dispatch-check.mts` drives a worker dispatch through cleanup while a
+  competing attempt waits before claiming.
+- `session-lock-check.mts` covers selected acquisition, expiry, and refresh
+  interleavings. `lock-gap-check.mts` adds a third contender.
+  `stall-check.mts` stops a child process's event loop past the lease window and
+  takes about 70 seconds. Passing them is not proof of strict mutual exclusion
+  under arbitrary storage delays or clock skew.
+- `worktree-check.mts` and `storage-repair-check.mts` use separate host data
+  directories over a shared session directory. `quarantine-check.mts` covers the
+  writer markers, including each way one is retired: the call returns, the
+  writer left nothing running that carries its name and nothing in its group,
+  the machine restarted, or an operator ran `release-tree`. It spawns and kills
+  real processes to say so, including one that leaves its worker's group and one
+  that is given no environment of its own, which is what says the name reaches a
+  tool at all.
+- `docker/liveness-check.sh` asks those same questions inside a container, because the readings
+  are made from `/proc` on Linux and from `ps` and `lsof` everywhere else, and a laptop only ever
+  runs the second. It needs neither a server nor a key. Both container checks build the image
+  every run and refuse to start when `.fork/pi` is not the commit `fork.pin` names, or has
+  uncommitted changes: the driver's source is mounted over the image, the fork is not, so a
+  checkout left behind would be built in and read as current.
+- `lost-host-check.mts` closes a step without its host, then lets the abandoned
+  tool finish and try to publish. It uses fake activities and the real tree store,
+  and asserts the turn is handed back rather than ended.
+- `interrupted-seal-check.mts` exercises the worker seal with fake session
+  persistence and checks that interruption does not touch project storage, and
+  that a stop leaves the step open to its host where a lost host does not.
+- `budget-check.mts` needs a Temporal server. It bounds a turn and a session by
+  tokens, by wall clock and by a deadline, and checks where each stopped, with
+  stubs reporting the spend. `spend-check.mts` needs neither: it drives the real
+  activity against a faked session to check the two numbers it reports, the
+  difference this step made and what the session has been billed in total.
+- `replay-check.mts` needs a Temporal server. It records a history, replays it,
+  and replays the histories under `histories/`, each recorded by the code that
+  predates a rule that changed what a step schedules. Record another by
+  reverting that rule, running this check with `REPLAY_HISTORY=` pointing at a
+  file to keep, and putting it there.
+- `unschedule-check.mts` checks that deleting a schedule retains a template an
+  accepted firing can still need.
 
-To see what a session is doing without reading its file, ask the workflow: `temporal workflow query --workflow-id pi-session-<id> --name turnState` reports the queue, the step in flight, and how the last turn ended.
+`detached-check.mts`, the smoke helpers, and container checks also need a model
+key. Their historical runs are described above. `submit.mts` submits a prompt;
+`inspect.mts` reads a session file.
 
-The crash test: start a worker; submit a turn that appends to a file with one bash call and sleeps in the next, one at a time; poll the session file until `toolCalls > toolResults` (a tool call in flight); `pkill -9 -f "pi-temporal.*src/worker.ts"`; wait past the 30s heartbeat timeout; start a fresh worker. `temporal workflow show` will have the earlier step completed on attempt 1 and the interrupted one on attempt 2, and the appended file will have one line, not two.
+To inspect workflow state, run
+`temporal workflow query --workflow-id pi-session-<id> --name turnState`. It
+reports queued input, the current step, and the last turn outcome.
+
+For a process-death test, use `detached-check.mts`. It owns the worker process
+IDs and kills their process groups. A name-based `pkill` can kill an unrelated
+worker or leave a wrapper's child alive, invalidating the test.
 
 ## Layout
 
-- `extensions/temporal.ts` — the pi extension: the turn executor, and `/background`.
-- `src/config.ts` — Temporal + Pi wiring from env.
-- `src/protocol.ts` — workflow ids, signal/query names, shared types.
-- `src/local-turn-workflow.ts` — `piLocalTurn`: one workflow per turn of a live session.
-- `src/local-turn-activity.ts` — works on the turn the pi process is holding: the whole turn, or its parts.
-- `src/activities.ts` — `runStep`, and the `runModelCall` / `runToolCall` / `sealStep` that split it, via `@earendil-works/pi-coding-agent`, session file as the log.
-- `src/l2-step.ts` — the stepped step body: how a step's calls are fanned out and how an interrupt reaches them.
-- `src/pending.ts` — what a step knows about its calls before it is sealed, beside the session file.
-- `src/workflow.ts` — `piSession`: per-session durable executor (submit prompt, step to the end of the turn, interrupt, idle-terminate).
-- `src/session-worker.ts` — builds the worker; used by the standalone process and by the extension.
-- `src/worker.ts` — the standalone worker process.
-- `src/client.ts` — helpers to submit a prompt / interrupt a session.
-- `src/demo.ts` — end-to-end smoke once a model key is set.
+- `extensions/temporal.ts`: the pi extension: the turn executor, and `/background`.
+- `src/config.ts`: Temporal + Pi wiring from env.
+- `src/protocol.ts`: workflow ids, signal/query names, shared types.
+- `src/local-turn-workflow.ts`: `piLocalTurn`: one workflow per turn of a live session.
+- `src/local-turn-activity.ts`: works on the turn the pi process is holding: the whole turn, or its parts.
+- `src/activities.ts`: `runStep`, and the `runModelCall` / `runToolCall` / `sealStep` that split it, via `@earendil-works/pi-coding-agent`, session file as the log.
+- `src/l2-step.ts`: the stepped step body: how a step's calls are fanned out and how an interrupt reaches them.
+- `src/pending.ts`: what a step knows about its calls before it is sealed, beside the session file.
+- `src/workflow.ts`: `piSession`: per-session durable executor (submit prompt, step to the end of the turn, interrupt, idle-terminate).
+- `src/session-worker.ts`: builds the worker; used by the standalone process and by the extension.
+- `src/worker.ts`: the standalone worker process.
+- `src/client.ts`: helpers to submit a prompt / interrupt a session.
+- `src/demo.ts`: end-to-end smoke once a model key is set.
+
+## What upstream would have to take
+
+A sixth review measured this against the harness it forks rather than against
+itself, which nobody had done. The seam is three methods; the patch is not.
+
+Pi's fork, against a `main` level with `earendil-works/pi`:
+
+| | files | lines |
+|---|---|---|
+| production | 9 | +1356 / -213 |
+| tests it adds | 8 | +2088 |
+| documentation | 1 | +49 |
+
+That production figure moved twice this round. The review's reduction took an
+unused stream adapter and seven internal exports out, from +1324 to +1258. The
+preparation fix put +98 back, because carrying the completed turn and what its
+preparation returned through the model call, the tools and the seal is state the
+host has to hold. Net it is 32 lines above where the round started, and correct
+where it was not.
+
+The order to ask for it in, smallest first:
+
+1. **`feat(coding-agent): reject session appends through a write guard`**, on
+   branch `moe/session-write-guard`. Two files, 85 lines, no Temporal anywhere in
+   it. Useful to anyone with a stale or read-only writer of a session file.
+   Built on `main`, tested there, and its three tests were checked by removing
+   the guard call to watch two of them fail.
+2. **Share the model and tool phases of a turn.** The extraction, with the
+   completed turn travelling through it. No replay, no executor registration.
+   The ordinary `prompt()` path is the acceptance test.
+3. **Expose the step cursor.** What 2 makes possible: pause after the model,
+   settle tools, then close the step. This is the contract the preparation fix
+   defines, and the one an external driver actually needs.
+4. **Let an extension drive a turn.** Executor registration and `recordPrompt`,
+   on top of 3.
+5. **Resume an interrupted local turn.** The host's own crash recovery, if the
+   maintainers want it. Dispatch claims, durable retry counts and Temporal's
+   retry classification stay here, in the driver.
+
+Only the first is built and tested in isolation. The rest is an order of
+dependency, not four more branches.
 
 ## Status
 
-- [x] Design + scaffold against Pi's real SDK (`createAgentSession`, `SessionManager`, `ModelRuntime`), typechecks.
-- [x] Live happy-path turn (OpenAI via `ModelRuntime.getAvailable` + `setRuntimeApiKey`).
-- [x] Crash test: turn re-executes on a fresh worker (activity attempt 2), no duplicate prompt.
-- [x] Found the turn-level limit: mid-turn crash cannot resume cleanly on the stock SDK.
-- [x] Added the fix on the Pi fork (`resumeInterruptedTurn`, `step`); proven by the fork's mock-model tests.
-- [x] Wired `runPrompt` to call `resumeInterruptedTurn()` on retry instead of re-prompting.
-- [x] Live re-verification: mid-turn crash recovers via `resumeInterruptedTurn()`, no duplicate prompt, tool balance intact.
-- [x] Pinned the dependency to [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) by commit, so CI builds it too.
-- [x] Added `recordPrompt` and `prepareStep` to the fork, so a driver can step without ever running a whole turn.
-- [x] A step per activity, checked against Temporal with a stubbed activity (`step-loop-check.mts`).
-- [x] Live crash test on the stepped executor: step 1 not re-run, step 2 on attempt 2, tool balance intact, no duplicate prompt.
-- [x] Packaged as a pi package: `pi install` registers the commands, and a task submitted from the TUI came back as context for the next prompt.
-- [x] A worker inside pi, so a task runs with nothing else launched (verified with no worker process anywhere).
-- [x] Every turn durable by default via `registerTurnExecutor`, with a crash mid tool call finished on reopen.
-- [x] A tool call per activity, behind `PI_TEMPORAL_STEPPED=1`, on both halves.
-- [x] The project's files travel with the session, behind `PI_TEMPORAL_SHIP_TREE=1`.
-- [x] An independent review of the whole stack, and its findings closed: who may move the tree's tip, how a project enters the system, a fence on the tree store that crosses hosts, a directory that is handed back, history that is bounded, and the write at the end of a model call.
+The supplied tree contains both execution modes, detached commands, project
+shipping, schedule templates, and deployment profiles. `fork.pin` selects the
+fork required by the driver. The recovery table distinguishes implementation
+contracts from what each named check exercises.
 
-Still open, and named rather than buried:
+The review history changed several claims. A tool result is not recorded
+atomically with its effect. The seal writes tool results, while the model call
+writes the assistant message. Tree-store exclusion uses both host-local and
+shared locks. A pinned timeout can leave a writer alive, so it cannot promise
+migration merely because Temporal stopped waiting for that attempt.
 
-- Nothing removes a finished session's `<session>.jsonl.tree/` on its own, because a session that went idle can be prompted again and those bundles are what its next turn restores from. `pi-temporal forget <sessionId>` does it for a session that is over, and refuses one that is still running or that nobody could answer for. Anything under `salvage/` stays either way: nothing else has a copy of it.
-- The tree lock is host-local; what excludes two hosts is the session lock the activities take around their tree writes.
-- The checks over NFSv4 answer the exclusive-create and atomic-rename questions the lock rests on. NFSv3 does not answer them, and nothing here tests it: `session-lock.ts` says so and means it.
+Limits that remain:
 
-Live, on `gpt-4o-mini`, with the stepped mode on:
+- `forget` is explicit. It removes the tree store, including `salvage/`, so copy
+  wanted recovery bundles first. A forgotten-session marker remains to permit
+  cleanup of host-local notes.
+- A schedule copies its template for every firing. `unschedule` retains the
+  template for accepted firings. Remove it only after those firings no longer
+  need it.
+- The session lease depends on storage and clock behavior. The NFSv4 test covers
+  one setup; NFSv3 and arbitrary clock skew are not covered.
+- Live intermediate results are in memory. Worker pending claims remain after
+  result cleanup. Those paths have different retention and recovery behavior.
+- Whole-step worker retries rebuild the session, so the session's retry budget
+  resets between activities. The workflow's step ceiling is the fallback bound.
 
-- A worker-owned turn that read two files cost six activities: `runModelCall`, two `runToolCall`, `sealStep`, then `runModelCall` and `sealStep`. The two tool calls were scheduled 17 microseconds apart and ran in the same 31ms window. The seal took 8ms; the model calls took 3.1s and 2.6s, which is where a turn's time actually goes.
-- Crash mid tool call: a bash call that appended one line and then slept for 60 seconds, with every worker killed while it slept. On a fresh worker the call came back as attempt 2, found its dispatch note, and reported the outcome as unknown rather than running again. The model then ran `cat counter.txt` itself, saw the one line, and answered. The file had one line, not two.
-- Interrupt: with a `sleep 90` in flight, the signal and `ActivityTaskCancelRequested` landed in the same second, the turn was recorded as interrupted, and the workflow stayed running. The next prompt settled the unanswered call before it was recorded, so the session kept serving instead of failing on every later turn.
-- A turn of the session you type in cost five activities: `runLocalModelCall`, `runLocalToolCall`, `runLocalSeal`, then `runLocalModelCall` and `runLocalSeal`. The transcript is the one pi writes without an executor.
-- Crash mid tool call on that half too: pi killed while a tool slept, reopened with `-c`. The unanswered call was settled as an unknown outcome, the model checked the file rather than re-running the command, the interrupted turn finished, and the new prompt was answered.
+Historical live measurements, reported during development with `gpt-4o-mini`:
+
+- A worker turn reading two files used six activities. The tool calls were
+  scheduled 17 microseconds apart and overlapped in a 31 ms interval. The seal
+  took 8 ms; model calls took 3.1 and 2.6 seconds. These are one placement's
+  measurements, not a deployment latency estimate.
+- A worker killed after appending a line and while sleeping left one line. The
+  recovered dispatch reported an unknown outcome. The model checked the file.
+- An interrupted `sleep 90` left the workflow serving another prompt. The
+  signal and `ActivityTaskCancelRequested` appeared in the same second.
+- A live turn used five split activities. A separate live crash test reopened
+  Pi with `-c` and reported the unanswered call as unknown before continuing.
+
+Those runs document earlier behavior. They were not repeated by this prose
+pass, and their retry outcomes do not override the current pinned-failure policy.
 
 ## Prior art
 

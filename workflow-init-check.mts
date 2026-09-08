@@ -60,9 +60,7 @@ const worker = await Worker.create({
     },
   },
 });
-// One tool per queue, so what is being counted is where the work went rather than how often it ran.
-// The pinned one always fails; the shared one settles, which is what lets the turn finish and makes
-// "the step carried on somewhere else" observable rather than inferred from a workflow that hangs.
+// A started failure must remain distinguishable from an unclaimed dispatch.
 const pinned = await Worker.create({
   connection: native,
   namespace,
@@ -114,11 +112,10 @@ try {
   const tool = history.events?.find((event) =>
     event.activityTaskScheduledEventAttributes?.activityType?.name === "runToolCall",
   )?.activityTaskScheduledEventAttributes;
-  check("pinned dispatch has one attempt before queue fallback", tool?.retryPolicy?.maximumAttempts === 1);
+  check("pinned dispatch permits only one attempt", tool?.retryPolicy?.maximumAttempts === 1);
   await Promise.race([retried.result(), sleep(30_000)]);
   check("a failed pinned attempt is not started again", pinnedAttempts === 1);
-  // And the step is not lost with the host it was addressed to.
-  check("the rest of the step ran on the shared queue", sharedTools >= 1);
+  check("a started failure does not migrate the step", sharedTools === 0);
 } finally {
   releaseAdoption();
   for (const handle of handles) await handle.terminate("check cleanup").catch(() => {});
