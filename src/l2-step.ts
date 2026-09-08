@@ -36,17 +36,9 @@ export interface SteppedStepDeps {
   // them run at once: they see each other through the filesystem rather than through the tree
   // store. Offered only the queue that worker reported.
   readonly pinnedTo?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
-  // Whether a failure means nobody took the work. It is the one kind a pinned dispatch answers by
-  // trying the shared queue, because it says the activity never started and so nothing ran.
+  // Whether a failure means nobody took the work. Kept for the log line, which reads differently
+  // when the dispatch never started than when the host took it and stopped answering.
   readonly isUnclaimed?: (err: unknown) => boolean;
-  // Whether the worker that took the work stopped reporting. A dispatch heartbeats every few
-  // seconds while it is alive, so the server declaring the heartbeat dead says the host is gone,
-  // not that a tool is still running there. That is the difference between this and a failure of
-  // unknown kind: what makes moving on safe is not knowing the tool finished, it is that the
-  // dispatch note reports the call as unknown rather than running it again, and that the tree
-  // store refuses a publish from a host that is behind. Without this a worker dying mid-tool ends
-  // the turn instead of moving it, which is the failure the whole level exists to survive.
-  readonly isHostLost?: (err: unknown) => boolean;
   // Run the seal even though the turn was cancelled. Calls that finished have real results kept
   // for them, and abandoning the step tells the model they may have taken effect instead.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -144,15 +136,14 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     const pinned = model.queue && deps.pinnedTo ? deps.pinnedTo(model.queue) : undefined;
     let unclaimed = false;
     const pinnedAttempts: Promise<void>[] = [];
-    let unsafeFallback: { error: unknown } | undefined;
     // What is left of a step whose worker is gone goes to the shared queue one at a time. There it
     // can land on two hosts again, which is what the tree store cannot take.
     let shared: Promise<unknown> = Promise.resolve();
     const onShared = <T>(run: (on: SteppedActivities) => Promise<T>): Promise<T> => {
       const next = shared.then(async () => {
-        // A queue timeout can leave sibling tools writing the pinned directory.
+        // A queue timeout can leave sibling tools writing the pinned directory, so nothing starts
+        // here until every pinned attempt of this step is over, one way or the other.
         await Promise.all(pinnedAttempts);
-        if (unsafeFallback) throw unsafeFallback.error;
         return run(deps.activities);
       });
       shared = next.then(
@@ -161,31 +152,34 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       );
       return next;
     };
-    // Either way the work can move: nobody took it, or whoever did is not there any more.
-    const movable = (err: unknown) =>
-      deps.isUnclaimed?.(err) === true || deps.isHostLost?.(err) === true;
+    // Everything except the turn being stopped moves to the shared queue. What makes that safe is
+    // not a judgement about the pinned host, which cannot be observed from here: it is the barrier
+    // above, which starts nothing shared until every pinned attempt has settled, and then the two
+    // guards on the durable things. A stranded host that publishes late is refused by the tree
+    // store, because only a host standing on the tip may add to it, and its work is set aside
+    // rather than dropped. A stale seal is refused by the session lock, which compares the epoch it
+    // took. Refusing to move instead ended the turn, and that strands exactly the same work while
+    // losing the rest of the step as well.
     const viaPinned = async <T>(
       run: (on: Pick<SteppedActivities, "runToolCall" | "sealStep">) => Promise<T>,
     ): Promise<T> => {
-      if (unsafeFallback) throw unsafeFallback.error;
-      if (!pinned || !deps.isUnclaimed) return run(deps.activities);
+      if (!pinned) return run(deps.activities);
       if (unclaimed) return onShared(run);
+      const attempt = run(pinned);
+      // Recorded whether it settles or fails: what the barrier waits for is that it is over, not
+      // that it worked.
+      pinnedAttempts.push(attempt.then(() => undefined, () => undefined));
       try {
-        const attempt = run(pinned);
-        pinnedAttempts.push(attempt.then(
-          () => undefined,
-          (error: unknown) => {
-            // A failed started attempt can still have a live tool on that host.
-            if (!movable(error)) unsafeFallback = { error };
-          },
-        ));
         return await attempt;
       } catch (err) {
-        if (!movable(err)) throw err;
+        if (deps.isCancellation(err)) throw err;
         unclaimed = true;
-        deps.log?.("the pinned worker is not answering; the rest of the step goes to the shared queue", {
-          step: input.step,
-        });
+        deps.log?.(
+          deps.isUnclaimed?.(err) === true
+            ? "the pinned queue did not take the work; the rest of the step goes to the shared queue"
+            : "the pinned attempt did not come back; the rest of the step goes to the shared queue",
+          { step: input.step },
+        );
         return onShared(run);
       }
     };

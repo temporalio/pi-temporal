@@ -25,7 +25,8 @@ const adoption = new Promise<void>((resolve) => { releaseAdoption = resolve; });
 let startedAdoption!: () => void;
 const adoptionStarted = new Promise<void>((resolve) => { startedAdoption = resolve; });
 let modelCalls = 0;
-let toolAttempts = 0;
+let pinnedAttempts = 0;
+let sharedTools = 0;
 const activities = {
   async adoptProject() {
     startedAdoption();
@@ -40,8 +41,7 @@ const activities = {
     return { calls: [{ id: "call", name: "probe" }], sequential: false, ended: false, queue: pinnedQueue };
   },
   async runToolCall() {
-    toolAttempts = Math.max(toolAttempts, Context.current().info.attempt);
-    throw new Error("retryable probe");
+    throw new Error("a tool call must be answered by the queue it was addressed to");
   },
   async sealStep() {
     return { done: true, retryAttempt: 0, finalText: "closed" };
@@ -52,9 +52,29 @@ const worker = await Worker.create({
   namespace,
   taskQueue: queue,
   workflowsPath: fileURLToPath(new URL("./src/workflow.ts", import.meta.url)),
-  activities,
+  activities: {
+    ...activities,
+    async runToolCall() {
+      sharedTools++;
+      return { outcome: "unknown" as const };
+    },
+  },
 });
-const pinned = await Worker.create({ connection: native, namespace, taskQueue: pinnedQueue, activities });
+// One tool per queue, so what is being counted is where the work went rather than how often it ran.
+// The pinned one always fails; the shared one settles, which is what lets the turn finish and makes
+// "the step carried on somewhere else" observable rather than inferred from a workflow that hangs.
+const pinned = await Worker.create({
+  connection: native,
+  namespace,
+  taskQueue: pinnedQueue,
+  activities: {
+    ...activities,
+    async runToolCall() {
+      pinnedAttempts = Math.max(pinnedAttempts, Context.current().info.attempt);
+      throw new Error("retryable probe");
+    },
+  },
+});
 const running = worker.run();
 const runningPinned = pinned.run();
 const handles: Array<ReturnType<typeof client.workflow.getHandle>> = [];
@@ -89,15 +109,16 @@ try {
     }],
   });
   handles.push(retried);
-  for (let i = 0; i < 50 && toolAttempts === 0; i++) await sleep(100);
+  for (let i = 0; i < 50 && pinnedAttempts === 0; i++) await sleep(100);
   const history = await retried.fetchHistory();
   const tool = history.events?.find((event) =>
     event.activityTaskScheduledEventAttributes?.activityType?.name === "runToolCall",
   )?.activityTaskScheduledEventAttributes;
   check("pinned dispatch has one attempt before queue fallback", tool?.retryPolicy?.maximumAttempts === 1);
-  if (tool?.retryPolicy?.maximumAttempts === 1) await retried.result();
-  else await sleep(1200);
-  check("a failed pinned attempt is not started again", toolAttempts === 1);
+  await Promise.race([retried.result(), sleep(30_000)]);
+  check("a failed pinned attempt is not started again", pinnedAttempts === 1);
+  // And the step is not lost with the host it was addressed to.
+  check("the rest of the step ran on the shared queue", sharedTools >= 1);
 } finally {
   releaseAdoption();
   for (const handle of handles) await handle.terminate("check cleanup").catch(() => {});
