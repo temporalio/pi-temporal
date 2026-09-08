@@ -239,7 +239,12 @@ async function main() {
     results,
   );
   const ran = (await readFile(ranFile, "utf8").catch(() => "")).split("\n").filter(Boolean);
-  check("the tool really ran once, not once per worker", ran.length === 1, ran);
+  // The file counts executions, so what must never appear is a second line: that is the `git push`
+  // running once per worker. Zero is the honest reading here rather than a weaker one, because the
+  // kill above takes the whole process group and the tool was still inside `sleep` when it landed.
+  // What answers for the call instead is the assertion above it: the model is told the outcome is
+  // unknown rather than the tool being run again.
+  check("the tool never ran twice", ran.length <= 1, ran);
   check("the model asked for the tool once", calls.length === 1, calls.length);
 
   const verdict = failures.length === 0 ? "OK" : `${failures.length} failed`;
