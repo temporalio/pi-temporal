@@ -128,13 +128,21 @@ async function main() {
     });
     check("a worker on this code replays a history this code wrote", ownReplay === undefined, String(ownReplay));
 
-    // And one from before the rule. Recorded by running this file against the pre-patch policy and
-    // keeping its export; without the patch this is where the nondeterminism appeared.
-    const old = process.env.OLD_POLICY_HISTORY ?? "/tmp/old-policy-history.json";
-    const before = await readFile(old, "utf8").catch(() => undefined);
-    if (before === undefined) {
-      console.log(`SKIP a history from before the rule (${old} is not here)`);
-    } else {
+    // And the ones from before each rule. Recorded by running this file against the code that
+    // predates it and keeping the export; without its patch, each is where the nondeterminism
+    // appeared. A rule that changes which activities a step schedules needs one of these, and a
+    // patch nothing replays through is a patch nobody knows is wired up.
+    for (const older of [
+      { path: process.env.OLD_POLICY_HISTORY ?? "/tmp/old-policy-history.json",
+        what: "before a started failure stopped migrating" },
+      { path: process.env.END_TURN_HISTORY ?? "/tmp/end-turn-history.json",
+        what: "before a lost host stopped ending the turn" },
+    ]) {
+      const before = await readFile(older.path, "utf8").catch(() => undefined);
+      if (before === undefined) {
+        console.log(`SKIP a history from ${older.what} (${older.path} is not here)`);
+        continue;
+      }
       let oldReplay: unknown;
       await Worker.runReplayHistory(
         { workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)) },
@@ -142,7 +150,7 @@ async function main() {
       ).catch((err) => {
         oldReplay = err;
       });
-      check("and one written before the rule, through the patch", oldReplay === undefined, String(oldReplay).slice(0, 200));
+      check(`and one written ${older.what}, through its patch`, oldReplay === undefined, String(oldReplay).slice(0, 200));
     }
 
     console.log(

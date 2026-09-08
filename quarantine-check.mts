@@ -4,15 +4,16 @@
 // still inside its own execution. A settled workflow promise says Temporal stopped waiting. It does
 // not say the body stopped.
 //
-// What is asserted here is the directory being refused, and what makes the refusal honest is that
-// it survives the process: nothing here asks whether a pid is alive, because a tool's children can
-// outlive the worker that spawned them and a dead pid would license reuse anyway.
+// What is asserted here is the directory being refused, and how much of that refusal the host can
+// take back on its own. A dead pid alone licenses nothing, because a tool's children outlive the
+// worker that spawned them and pids come round again after a restart. A dead writer, an empty
+// process group and the same boot together do.
 //
 // Usage: npx tsx quarantine-check.mts
 
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -26,6 +27,46 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
   console.log(`${ok ? "PASS" : "FAIL"} ${what}${ok ? "" : ` (${JSON.stringify(detail)})`}`);
   if (!ok) failures.push(what);
 };
+
+// A process in a group of its own, which is what a worker somebody's supervisor started has. The
+// group is the part that matters: it is where the children of a dead writer stay.
+async function spawned() {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  // Not unref'd: killing it and waiting for the exit is what this is for, and an unref'd handle
+  // lets the whole check exit while that wait is still outstanding.
+  return { child, pid: child.pid!, pgid: child.pid! };
+}
+
+async function ended(started: Awaited<ReturnType<typeof spawned>>) {
+  const exited = new Promise((resolve) => started.child.once("exit", resolve));
+  started.child.kill("SIGKILL");
+  await exited;
+  return started;
+}
+
+// Markers are host-local and keyed by a hash of the directory, so this walks to the one directory
+// this check made rather than repeating the naming scheme.
+async function writersHere() {
+  const trees = join(process.env.PI_TEMPORAL_DATA!, "trees");
+  const [dir] = await readdir(trees).catch(() => [] as string[]);
+  return dir ? join(trees, dir, "writers") : undefined;
+}
+
+const markers = async () => {
+  const dir = await writersHere();
+  return dir ? await readdir(dir).catch(() => [] as string[]) : [];
+};
+
+/** Say the marker was written by some other process, or before a restart. */
+async function editMarker(patch: Record<string, unknown>) {
+  const dir = (await writersHere())!;
+  const [name] = await readdir(dir);
+  const note = JSON.parse(await readFile(join(dir, name), "utf8"));
+  await writeFile(join(dir, name), JSON.stringify({ ...note, ...patch }));
+}
 
 async function main() {
   const root = await mkdtemp(join(tmpdir(), "pi-quarantine-"));
@@ -97,21 +138,46 @@ async function main() {
   });
   check("a writer that comes back releases the directory", reusable);
 
-  // A worker that died mid-tool leaves the marker behind for good, which is the case that needs a
-  // person. What that person has is a command, and it says how many writers it forgot.
+  // A worker that died mid-tool leaves its marker behind, and the marker is what a person used to
+  // have to clear by hand. Most of that is answerable without one: the process that wrote it is
+  // gone, nothing it started is left in its group, and the machine has not restarted underneath the
+  // pids that say those two things.
+  const later = { turn: "turn-4", step: 1, callId: "call-e" };
+  const usable = async () =>
+    await worktree.ensure(project, sessionFile, later).then(() => true, () => false);
+
+  // Written by this process, which is running. Nothing to conclude, so the refusal stands.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
-  let refusedAfterDeath = false;
-  await worktree.ensure(project, sessionFile, { turn: "turn-4", step: 1, callId: "call-e" }).catch(() => {
-    refusedAfterDeath = true;
-  });
-  check("a marker no process removes keeps the directory refused", refusedAfterDeath);
+  check("a marker whose writer is still running keeps the directory refused", !(await usable()));
+
+  // The worker died and left nothing behind. A group of its own is what a worker a supervisor
+  // started has, and an empty one is the whole of the proof that its tools are over.
+  const gone = await ended(await spawned());
+  await editMarker({ pid: gone.pid, pgid: gone.pgid });
+  check("a marker whose writer and group are gone clears itself", await usable());
+  check("and the marker is taken off the host", (await markers()).length === 0);
+
+  // The worker died and something it started did not. That is the case the refusal is for, and no
+  // pid check licenses reuse while it holds.
+  const orphan = await spawned();
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ pid: gone.pid, pgid: orphan.pgid });
+  check("a marker whose group still has a process keeps the directory refused", !(await usable()));
+  await ended(orphan);
+  check("and releases it once that process is over", await usable());
+
+  // A pid means nothing across a restart, so a marker from before one is not read as a live writer.
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ bootAt: 0 });
+  check("a marker from before the machine restarted clears itself", await usable());
+
+  // What is left is a tool that put itself in a group of its own, which nothing here can follow.
+  // That one needs a person, and what the person has is a command that says what it forgot.
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  check("a live writer still needs an operator", !(await usable()));
   const cleared = await worktree.clearWriters(project);
   check("clearing it says what it forgot", cleared === 1, cleared);
-  let afterClear = true;
-  await worktree.ensure(project, sessionFile, { turn: "turn-4", step: 1, callId: "call-e" }).catch(() => {
-    afterClear = false;
-  });
-  check("and the directory works again", afterClear);
+  check("and the directory works again", await usable());
 
   // And the activity is what writes the marker. Driven through the real tool activity, with the
   // session faked: what is asserted is that the marker exists while the tool body runs and is gone

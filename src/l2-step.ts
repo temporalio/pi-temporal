@@ -44,6 +44,10 @@ export interface SteppedStepDeps {
   // dispatch where this code seals, and replaying it against this code is a nondeterminism error.
   // A run that predates the change answers false here and keeps the behaviour it recorded.
   readonly refusesStartedFailures?: () => boolean;
+  // Whether this run was started after a lost host stopped ending the turn. Same reason as above:
+  // a step that hands the turn back schedules a model call where the old one failed the run, so
+  // only a run recorded under the new rule may take it.
+  readonly resumesAfterLostHost?: () => boolean;
   // Run the seal even though the turn was cancelled. Calls that finished have real results kept
   // for them, and abandoning the step tells the model they may have taken effect instead.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -216,7 +220,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
 
     // Every call of the step is sealed, including the ones no dispatch answered for. A step that
     // leaves one open leaves a transcript the next model call cannot be made from.
-    const seal = (interrupted: boolean): Promise<RunStepResult> => {
+    const seal = (interrupted: boolean, lost = false): Promise<RunStepResult> => {
       const sealed: SealStepInput = {
         sessionId: input.sessionId,
         sessionFile: input.sessionFile,
@@ -225,18 +229,37 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         calls: model.calls,
         retryAttempt: input.retryAttempt,
         interrupted,
+        ...(lost ? { lost: true } : {}),
       };
       // A recovery seal must not move a project that an abandoned tool may still write.
       if (interrupted) return deps.activities.sealStep(sealed);
       return viaPinned((on) => on.sealStep(sealed));
     };
 
-    const recover = async (failure: unknown): Promise<never> => {
+    const recover = async (failure: unknown): Promise<RunStepResult> => {
+      // Nobody asked for this to stop, so the host that was running it is the one thing the rest of
+      // the session has to be protected from. The seal says so where every host reads it.
+      const lost = !deps.isCancellation(failure);
       // Completed results would be swept by the next prompt unless they reach the transcript.
       // The original failure still decides the turn's outcome if this recovery cannot finish.
-      await deps.nonCancellable(() => seal(true)).catch((err: unknown) => {
+      const sealed = await deps.nonCancellable(() => seal(true, lost)).catch((err: unknown) => {
         deps.log?.("could not record results before ending the step", { step: input.step, error: String(err) });
+        return undefined;
       });
+      // The step is written down and the host it was on can no longer publish for it, so what that
+      // host still has inside cannot reach the session. There is nothing left for the turn to be
+      // protected from by ending it, and a turn that ends here is one a worker dying mid-tool costs
+      // the user. It goes on with the next step, which the model makes from a transcript saying
+      // which calls have an outcome nobody can vouch for.
+      if (sealed && lost && (deps.resumesAfterLostHost?.() ?? false)) {
+        deps.log?.("the step lost its host; recorded what it had and carrying the turn on", {
+          step: input.step,
+        });
+        // Not the seal's own answer: a step closed this way did not finish, and the turn asks the
+        // model what to do about it. A transcript that is already complete settles on the next
+        // model call, which is where a turn that had nothing left to do ends.
+        return { done: false, retryAttempt: sealed.retryAttempt, finalText: "" };
+      }
       throw failure;
     };
     const failure = stopped ?? unsafeFailure;
