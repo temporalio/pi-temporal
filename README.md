@@ -218,7 +218,7 @@ Every row names the check that fails without its answer.
 | A host publishes the project tree while it is behind | not reachable: one process, one directory | refused, and its own unshipped work is set aside rather than lost | `worktree-check.mts`, `storage-repair-check.mts` |
 | A host is left holding a directory for a session that is over | not reachable | the session records that it is over where every host reads it, and each hands its own directory back the next time one is wanted | `storage-repair-check.mts` |
 | The session's history outgrows its run | not reachable: one turn, one run | continue-as-new when nothing is in flight, carrying the queue | `rollover-check.mts` |
-| The worker a step was pinned to is gone | not reachable | the pin times out on schedule-to-start, which says the activity never started, so what is left of the step runs on the shared queue with nothing run twice | `l2-step-check.mts`, `workflow-init-check.mts` |
+| The worker a step was pinned to is gone | not reachable | two ways, and both move the work to the shared queue with nothing run twice: the pin times out on schedule-to-start, which says nothing started, or the worker stops heartbeating, which says the host is gone | `l2-step-check.mts`, `workflow-init-check.mts`, `detached-check.mts` |
 
 What none of this recovers, and no version of it can: a tool that was inside its own execution when
 the process died. Nothing on disk says whether the `git push` landed. The model is told the outcome
@@ -363,8 +363,13 @@ The rules that bound it:
   lets them run together while it travels. A pinned dispatch carries a 30 second
   `scheduleToStartTimeout` and one attempt. Unstarted calls wait for all pinned siblings before
   moving to the shared queue one at a time. A sibling with an uncertain failure prevents that
-  move, because its tool may still be writing on the pinned host. This bounds the first dispatch
-  at one attempt; it does not provide automatic failover for a started tool.
+  move, because its tool may still be writing on the pinned host. A worker that stops heartbeating
+  is not that case and does move: a dispatch heartbeats every few seconds while it is alive, so the
+  server declaring the heartbeat dead says the host is gone. What makes moving safe is not knowing
+  the tool finished, it is that the dispatch note has the retry report the call as unknown rather
+  than run it again, and that the tree store refuses a publish from a host that is behind. Without
+  that distinction a worker dying mid-tool ended the turn instead of moving it, which is the failure
+  the level exists to survive.
   An interrupted step still records completed tool results. Its seal only writes the transcript,
   with project restore, project capture, and post-run work disabled.
 - **It is off by default.** On a laptop the tools already run in the directory you meant, and

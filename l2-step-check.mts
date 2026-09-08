@@ -334,6 +334,44 @@ async function main() {
     );
   }
 
+  // A worker that dies mid-tool is the case the level exists to survive, and it arrives as a
+  // failure of a started attempt rather than as one nobody took. Refusing to move it ends the turn.
+  {
+    const gone = new Error("the pinned worker stopped heartbeating");
+    let sharedTools = 0;
+    let sharedSeals = 0;
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({ calls: [call("c1")], sequential: false, ended: false, queue: "w-1" }),
+        runToolCall: async () => {
+          sharedTools++;
+          return { outcome: "unknown" };
+        },
+        sealStep: async () => {
+          sharedSeals++;
+          return SEALED;
+        },
+      },
+      pinnedTo: () => ({
+        runToolCall: async () => {
+          throw gone;
+        },
+        sealStep: async () => SEALED,
+      }),
+      isCancellation,
+      isUnclaimed: () => false,
+      isHostLost: (error) => error === gone,
+      nonCancellable: (fn) => fn(),
+    });
+    const result = await step(INPUT).then(() => undefined, (error: unknown) => error);
+    check("a step whose worker is gone moves to the shared queue", sharedTools === 1 && sharedSeals === 1, {
+      sharedTools,
+      sharedSeals,
+    });
+    // The dispatch note is what keeps the tool from running twice; the step must not also die.
+    check("and the turn is not ended by it", result === undefined, String(result));
+  }
+
   {
     const failed = new Error("pinned attempt timed out");
     let seals = 0;

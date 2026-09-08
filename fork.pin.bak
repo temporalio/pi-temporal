@@ -1,0 +1,19 @@
+# The Pi build this executor depends on.
+#
+# temporalio/pi PR #4 (branch moe/turn-steps), which stacks on PR #3, which stacks on PR #2:
+#   #2 adds recordPrompt, prepareStep, step and resumeInterruptedTurn on AgentSession, which the
+#      worker needs to drive a session one step at a time.
+#   #3 adds pi.registerTurnExecutor, which the extension needs to make a session's own turns
+#      durable.
+#   #4 adds modelCall, runToolCall and sealStep, which split a step so each tool call is its own
+#      unit of work, and hands the same three to an executor as turn.steps.
+#   #4 also adds SessionManager.setWriteGuard, which is the only place a driver can be sure it
+#      still owns the file: the write a model call ends with lands minutes after anything else
+#      could have checked.
+# None of it is in the published @earendil-works/pi-coding-agent, so the dependency is a build of
+# the fork.
+#
+# Bump PI_FORK_REF when the PR moves, then re-run scripts/setup-fork.sh.
+
+PI_FORK_REPO=https://github.com/temporalio/pi.git
+PI_FORK_REF=8c8e4934580c29a1cbda69b9897eebce6b0279aa

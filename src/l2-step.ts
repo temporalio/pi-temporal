@@ -39,6 +39,14 @@ export interface SteppedStepDeps {
   // Whether a failure means nobody took the work. It is the one kind a pinned dispatch answers by
   // trying the shared queue, because it says the activity never started and so nothing ran.
   readonly isUnclaimed?: (err: unknown) => boolean;
+  // Whether the worker that took the work stopped reporting. A dispatch heartbeats every few
+  // seconds while it is alive, so the server declaring the heartbeat dead says the host is gone,
+  // not that a tool is still running there. That is the difference between this and a failure of
+  // unknown kind: what makes moving on safe is not knowing the tool finished, it is that the
+  // dispatch note reports the call as unknown rather than running it again, and that the tree
+  // store refuses a publish from a host that is behind. Without this a worker dying mid-tool ends
+  // the turn instead of moving it, which is the failure the whole level exists to survive.
+  readonly isHostLost?: (err: unknown) => boolean;
   // Run the seal even though the turn was cancelled. Calls that finished have real results kept
   // for them, and abandoning the step tells the model they may have taken effect instead.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -153,6 +161,9 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       );
       return next;
     };
+    // Either way the work can move: nobody took it, or whoever did is not there any more.
+    const movable = (err: unknown) =>
+      deps.isUnclaimed?.(err) === true || deps.isHostLost?.(err) === true;
     const viaPinned = async <T>(
       run: (on: Pick<SteppedActivities, "runToolCall" | "sealStep">) => Promise<T>,
     ): Promise<T> => {
@@ -165,14 +176,14 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
           () => undefined,
           (error: unknown) => {
             // A failed started attempt can still have a live tool on that host.
-            if (!deps.isUnclaimed!(error)) unsafeFallback = { error };
+            if (!movable(error)) unsafeFallback = { error };
           },
         ));
         return await attempt;
       } catch (err) {
-        if (!deps.isUnclaimed(err)) throw err;
+        if (!movable(err)) throw err;
         unclaimed = true;
-        deps.log?.("pinned work was not taken; waiting for the step before using the shared queue", {
+        deps.log?.("the pinned worker is not answering; the rest of the step goes to the shared queue", {
           step: input.step,
         });
         return onShared(run);
