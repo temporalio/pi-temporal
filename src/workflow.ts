@@ -6,6 +6,7 @@
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
 import {
+  patched,
   proxyActivities,
   defineSignal,
   defineQuery,
@@ -130,6 +131,8 @@ export async function piSession(
         isCancellation,
         pinnedTo,
         isUnclaimed,
+        // False only while replaying a history written before this rule existed. See the dep.
+        refusesStartedFailures: () => patched("pinned-started-failure-does-not-migrate"),
         nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
         // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
         log: (message, attributes) => log.info(message, attributes),
