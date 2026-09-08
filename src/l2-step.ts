@@ -38,6 +38,12 @@ export interface SteppedStepDeps {
   readonly pinnedTo?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
   // Migration requires evidence that no attempt started on the pinned queue.
   readonly isUnclaimed?: (err: unknown) => boolean;
+  // Whether this run was started after a step stopped moving off a host whose attempt began.
+  // Which activities a step schedules is what a workflow writes down, so changing that rule
+  // changes histories that already exist: a run recorded under the old one scheduled a shared
+  // dispatch where this code seals, and replaying it against this code is a nondeterminism error.
+  // A run that predates the change answers false here and keeps the behaviour it recorded.
+  readonly refusesStartedFailures?: () => boolean;
   // Run the seal even though the turn was cancelled. Calls that finished have real results kept
   // for them, and abandoning the step tells the model they may have taken effect instead.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -180,7 +186,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
           stopFailure = err;
           throw err;
         }
-        if (deps.isUnclaimed?.(err) !== true) {
+        if (deps.isUnclaimed?.(err) !== true && (deps.refusesStartedFailures?.() ?? true)) {
           unsafeFailure = err;
           throw err;
         }

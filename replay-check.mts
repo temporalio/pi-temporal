@@ -1,15 +1,18 @@
 // Whether a session that is already running can be served by a worker carrying this code.
 //
 // The migration policy decides which activities a step schedules after a pinned dispatch fails, so
-// it decides the command sequence a workflow produced. A history recorded under the old policy
-// contains a shared-queue activity this code would not schedule, and Temporal checks that on
-// replay. What this does is record such a history and replay it, so the answer is an outcome
-// rather than an argument.
+// it decides the command sequence a workflow already wrote down. A history recorded before that
+// rule existed holds a shared dispatch where this code seals, and replaying it is a nondeterminism
+// error unless the rule is behind a patch. It is: the workflow asks `patched()`, which answers
+// false for exactly those runs, so they keep the behaviour they recorded.
+//
+// Both directions are checked here, because a patch that is never exercised is a patch nobody
+// knows is wired up: a history this code wrote, and one from before the change.
 //
 // Needs a Temporal server; no model key. Usage: npx tsx replay-check.mts
 
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { Worker, NativeConnection } from "@temporalio/worker";
@@ -125,16 +128,26 @@ async function main() {
     });
     check("a worker on this code replays a history this code wrote", ownReplay === undefined, String(ownReplay));
 
-    // What this cannot assert from inside one process: a history written by the previous policy,
-    // which scheduled a shared `runToolCall` where this code seals. Replaying one of those against
-    // this code gives `Activity type of scheduled event 'runToolCall' does not match activity type
-    // of activity command 'sealStep'`, measured by recording a history on the old code and feeding
-    // it to `Worker.runReplayHistory` here. So a session that already hit a started pinned failure
-    // cannot be served by a worker carrying this code: drain those sessions, or gate the policy
-    // behind a patch, before deploying it to a fleet with runs in flight.
+    // And one from before the rule. Recorded by running this file against the pre-patch policy and
+    // keeping its export; without the patch this is where the nondeterminism appeared.
+    const old = process.env.OLD_POLICY_HISTORY ?? "/tmp/old-policy-history.json";
+    const before = await readFile(old, "utf8").catch(() => undefined);
+    if (before === undefined) {
+      console.log(`SKIP a history from before the rule (${old} is not here)`);
+    } else {
+      let oldReplay: unknown;
+      await Worker.runReplayHistory(
+        { workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)) },
+        historyFromJSON(JSON.parse(before)),
+      ).catch((err) => {
+        oldReplay = err;
+      });
+      check("and one written before the rule, through the patch", oldReplay === undefined, String(oldReplay).slice(0, 200));
+    }
+
     console.log(
       failures.length === 0
-        ? "replay-check: OK (a history from the migrating policy is a known nondeterminism, see the comment)"
+        ? "replay-check: OK"
         : `replay-check: ${failures.length} failed`,
     );
   } finally {
