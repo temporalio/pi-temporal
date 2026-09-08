@@ -20,11 +20,17 @@
 // is refused and its work set aside under `salvage/`, but a host the session later restores is
 // brought to the tip, and a stale tool writing after that restore publishes against a note that
 // now matches. That is why the driver refuses to move a step off a host whose attempt started.
+//
+// Two things answer for the tool itself, because the tip rule alone cannot. A marker says which
+// calls are inside their own execution here, so the directory is refused to anything else until
+// they come back or this host can show they are gone. And a step the session closed without its
+// host is named in the shared directory, so what that host publishes for it afterwards is refused
+// wherever it comes from, rather than winning because it happened to capture first.
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { withSessionLock } from "./session-lock.js";
@@ -190,9 +196,11 @@ class WrongTree extends Error {}
 //
 // A marker still here when another turn wants this directory is a writer nobody can account for, so
 // the directory is refused rather than shared with it. The refusal outlives the process that made
-// it: a marker whose writer died without removing it keeps the directory refused until somebody
-// clears it. That does not strand the session, which another host can serve. It strands the
-// directory, which is the trade this makes on purpose.
+// it, and takes itself back where this host can show that it is over: the writer's process is gone,
+// nothing it started is left in its group, and the machine has not restarted underneath the pids
+// that say so. What is left after that is a tool that put itself in another group, which nothing
+// here can follow, and `release-tree` is the answer to that one. Until then the directory is
+// refused, which does not strand the session, since another host can serve it.
 const writersDir = (projectDir: string) => join(hostDir(projectDir), "writers");
 const writerPath = (projectDir: string, callId: string) =>
   join(writersDir(projectDir), `${createHash("sha256").update(callId).digest("hex").slice(0, 16)}.json`);
@@ -207,8 +215,76 @@ export interface Writer {
 interface WriterNote extends Writer {
   readonly host: string;
   readonly pid: number;
+  // The group the writer's process was in. What a tool starts stays in it, so this is what answers
+  // for the children a dead writer left behind.
+  readonly pgid?: number;
+  // When this machine last started, so a pid from before a restart is not read as a live one.
+  readonly bootAt?: number;
   readonly started: string;
 }
+
+// os.uptime has second granularity and drifts a little between reads, so this is a stamp to compare
+// with a tolerance, not an identifier. A restart moves it by the whole of the last uptime.
+const bootAt = () => Math.round(Date.now() - uptime() * 1000);
+const SAME_BOOT = 60_000;
+
+const running = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // Somebody else's process is still a process.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+// Every process group with something in it, or undefined when this host cannot be asked. `ps` is
+// not installed on a slim container image, which is where most of these run, so Linux is read from
+// `/proc` and everything else asks `ps`.
+async function groupsHere(): Promise<Set<number> | undefined> {
+  const groups = new Set<number>();
+  try {
+    if (process.platform === "linux") {
+      for (const name of await readdir("/proc")) {
+        if (!/^\d+$/.test(name)) continue;
+        const stat = await readFile(`/proc/${name}/stat`, "utf8").catch(() => undefined);
+        // A command can hold spaces and brackets, so the fields after it are counted from the last
+        // close bracket: state, ppid, pgrp.
+        const after = stat?.slice(stat.lastIndexOf(")") + 2).split(" ");
+        const pgrp = after ? Number.parseInt(after[2], 10) : NaN;
+        if (Number.isFinite(pgrp)) groups.add(pgrp);
+      }
+      return groups;
+    }
+    const { stdout } = await execFileAsync("ps", ["-A", "-o", "pgid="], { maxBuffer: 8 * 1024 * 1024 });
+    for (const line of stdout.split("\n")) {
+      const pgid = Number.parseInt(line.trim(), 10);
+      if (Number.isFinite(pgid)) groups.add(pgid);
+    }
+    return groups;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readGroup(pid: number): Promise<number | undefined> {
+  try {
+    if (process.platform === "linux") {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      const pgrp = Number.parseInt(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2], 10);
+      return Number.isFinite(pgrp) ? pgrp : undefined;
+    }
+    const { stdout } = await execFileAsync("ps", ["-o", "pgid=", "-p", String(pid)]);
+    const pgid = Number.parseInt(stdout.trim(), 10);
+    return Number.isFinite(pgid) ? pgid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Once per process: a process cannot change the group it is in.
+let ourGroup: Promise<number | undefined> | undefined;
+const group = () => (ourGroup ??= readGroup(process.pid));
 
 /** Say a tool call is about to write this directory. `endWrite` says it came back. */
 export async function beginWrite(projectDir: string, writer: Writer): Promise<void> {
@@ -217,6 +293,8 @@ export async function beginWrite(projectDir: string, writer: Writer): Promise<vo
     ...writer,
     host: hostname(),
     pid: process.pid,
+    ...((await group()) === undefined ? {} : { pgid: await group() }),
+    bootAt: bootAt(),
     started: new Date().toISOString(),
   } satisfies WriterNote);
 }
@@ -226,12 +304,42 @@ export async function endWrite(projectDir: string, callId: string): Promise<void
   await rm(writerPath(projectDir, callId), { force: true });
 }
 
+/**
+ * Whether this marker can still be a tool inside its own execution, which is the only thing the
+ * refusal is worth its cost for. Everything here is a reason to stop refusing, never a reason to
+ * start: what cannot be answered is answered as still running.
+ */
+async function maybeInside(note: WriterNote, groups: Set<number> | undefined): Promise<boolean> {
+  // A pid from another machine says nothing here, and two hosts sharing one data directory is the
+  // only way to get one. Neither of them can see the other's processes.
+  if (note.host !== hostname()) return true;
+  // Written by a worker that did not date its marker, so there is nothing to tell a live pid from
+  // a reused one.
+  if (note.bootAt === undefined) return true;
+  // The machine restarted. Nothing it was running came back with it.
+  if (Math.abs(note.bootAt - bootAt()) > SAME_BOOT) return false;
+  if (running(note.pid)) return true;
+  // The writer is gone, and what a tool starts can outlive it. Those stay in the group the writer
+  // was in, so an empty group is the rest of the proof. It only answers for the writer while this
+  // process is somewhere else: a worker restarted from the same shell is in the group its
+  // predecessor was in, and finding ourselves there is not evidence about anything.
+  if (note.pgid === undefined || groups === undefined) return true;
+  return note.pgid === (await group()) ? false : groups.has(note.pgid);
+}
+
+// Markers that cannot be a live tool any more are dropped rather than reported: the refusal exists
+// because nothing could prove the tool stopped, so where something can, it stops standing.
 async function writersHere(projectDir: string): Promise<WriterNote[]> {
   const names = await readdir(writersDir(projectDir)).catch(() => [] as string[]);
+  if (names.length === 0) return [];
+  const groups = await groupsHere();
   const found: WriterNote[] = [];
   for (const name of names) {
-    const note = await readJson<WriterNote>(join(writersDir(projectDir), name));
-    if (note) found.push(note);
+    const path = join(writersDir(projectDir), name);
+    const note = await readJson<WriterNote>(path);
+    if (!note) continue;
+    if (await maybeInside(note, groups)) found.push(note);
+    else await rm(path, { force: true });
   }
   return found;
 }
@@ -256,6 +364,49 @@ async function refuseWhenStranded(projectDir: string, current?: Writer): Promise
       `${one.started}). Stop them, then clear it with \`pi-temporal release-tree ${projectDir}\`.`,
   );
 }
+
+/** Which step a capture belongs to, for a step whose host was taken off it. */
+export interface Fence {
+  readonly turn: string;
+  readonly step: number;
+}
+
+// Steps that were closed without their host. Said in the shared directory, because the host that
+// has to hear it is the one nobody can reach: a tool the driver stopped waiting for keeps running,
+// keeps holding a directory the session still names as current, and publishes when it finishes.
+// Nothing local to that host knows the step ended, so the tip it publishes against looks live and
+// the work that replaced it is reverted. A step named here has been recorded without that host, so
+// a capture belonging to it is refused wherever it comes from.
+const closedPath = (sessionFile: string) => join(shareDir(sessionFile), "closed.json");
+// Long enough that a session's abandoned steps all stay named, short enough that this stays a file
+// somebody can read. A step drops off the end only after hundreds of later ones closed the same way.
+const CLOSED_KEPT = 500;
+
+interface ClosedStep extends Fence {
+  readonly at: string;
+}
+
+/**
+ * Record that a step was closed without the host that was running it, so nothing that host still
+ * has inside that step can move the project afterwards. Written before the work that replaces it
+ * starts, which is what makes the order safe either way round: a capture that beat this note left
+ * a tip the replacement reads, and one that comes after it is refused.
+ */
+export async function closeStep(sessionFile: string, fence: Fence): Promise<void> {
+  await withSessionLock(sharedLockPath(sessionFile), async () => {
+    const closed = (await readJson<ClosedStep[]>(closedPath(sessionFile))) ?? [];
+    if (closed.some((c) => c.turn === fence.turn && c.step === fence.step)) return;
+    const now = [...closed, { ...fence, at: new Date().toISOString() }];
+    await writeJson(closedPath(sessionFile), now.slice(-CLOSED_KEPT));
+  });
+}
+
+// Called with the shared lock held, so a capture cannot pass this check against a note that is
+// being written for it.
+const isClosed = async (sessionFile: string, fence: Fence) =>
+  ((await readJson<ClosedStep[]>(closedPath(sessionFile))) ?? []).some(
+    (c) => c.turn === fence.turn && c.step === fence.step,
+  );
 
 /** Clear the refusal, for an operator who has stopped whatever was left running. */
 export async function clearWriters(projectDir: string): Promise<number> {
@@ -461,7 +612,13 @@ export async function capture(
   // a worker draws, because the first capture decides what the project *is* and a worker is chosen
   // by whatever was free. Letting one do it meant an empty `/project` on the host that happened to
   // draw the first tool became the project, on every host.
-  opts: { readonly seed?: boolean; readonly current?: Writer } = {},
+  opts: {
+    readonly seed?: boolean;
+    readonly current?: Writer;
+    // Which step this capture belongs to. A step the session closed without this host is one this
+    // host may no longer publish for.
+    readonly fence?: Fence;
+  } = {},
 ): Promise<void> {
   // One at a time per directory. Two captures share an index and a shadow repository, so a second
   // one collides on `index.lock`, and that failure reads as a session that stopped shipping.
@@ -469,6 +626,15 @@ export async function capture(
     // What this directory holds is not this session's to publish while a writer from another step
     // is unaccounted for: its files are in there too.
     await refuseWhenStranded(projectDir, opts.current);
+    // Nor is it this step's to publish once the session has closed that step somewhere else. This
+    // is the case the tip check cannot answer: a tool that outlived its dispatch is still standing
+    // on the tip it read, so it publishes cleanly and reverts whatever replaced it.
+    if (opts.fence && (await isClosed(sessionFile, opts.fence))) {
+      throw new WrongTree(
+        `not shipping ${projectDir}: turn ${opts.fence.turn} step ${opts.fence.step} was closed ` +
+          `without this host, and what it produced is kept rather than published`,
+      );
+    }
     // Work of any kind means this session is not the finished one its last idle period marked.
     await revive(sessionFile);
     const tip = await readJson<Tip>(tipPath(sessionFile));

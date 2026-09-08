@@ -157,6 +157,11 @@ export interface SealStepInput {
   // The turn was stopped, so record the results and nothing else. A provider retry or a
   // compaction on the way out is work nobody asked for, and the interrupt waits for it.
   readonly interrupted?: boolean;
+  // This step is being closed without the host that was running it, which is not the same as being
+  // stopped: nobody asked for it to end, and a tool over there may still be inside its execution.
+  // Recorded where every host reads it, so what that one produces afterwards is kept rather than
+  // published over the step that replaces this one.
+  readonly lost?: boolean;
   // The step's calls, in the order the model asked for them. A call with no result is settled as
   // an unknown outcome, because a step that leaves one unanswered leaves a transcript no
   // provider accepts.

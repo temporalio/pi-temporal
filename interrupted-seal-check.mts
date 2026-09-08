@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome, type AgentSession, type TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
@@ -87,9 +87,26 @@ for (const { failure, atSeal } of [
     assert.equal(pinnedSeals, atSeal ? 1 : 0);
     console.log(`PASS a completed result survives ${failure instanceof Cancelled ? "cancellation" : "a started-attempt failure"} during the ${atSeal ? "seal" : "tools"} and the next pending sweep`);
     assert.equal(await readFile(join(project, "local.txt"), "utf8"), "local work\n");
-    await assert.rejects(stat(`${file}.tree`), { code: "ENOENT" });
+    // Nothing was restored or captured: no bundle, no tip, and no host directory at all.
+    assert.deepEqual(
+      (await readdir(`${file}.tree`).catch(() => [])).filter((name) => name !== "closed.json"),
+      [],
+    );
     await assert.rejects(stat(join(root, "host")), { code: "ENOENT" });
     console.log("PASS the recovery seal does not restore or capture the project");
+    // A step nobody stopped was closed without its host, so that host may not publish for it
+    // afterwards. A stop is the other case: the tools were told to end and the work they did is
+    // still theirs to ship.
+    const closed = JSON.parse(await readFile(`${file}.tree/closed.json`, "utf8").catch(() => "[]"));
+    assert.deepEqual(
+      closed.map((entry: { turn: string; step: number }) => `${entry.turn}/${entry.step}`),
+      failure instanceof Cancelled ? [] : ["prompt/1"],
+    );
+    console.log(
+      failure instanceof Cancelled
+        ? "PASS a stop leaves the step open to the host that was running it"
+        : "PASS a step that lost its host is closed to it",
+    );
   } finally {
     if (originalData === undefined) delete process.env.PI_TEMPORAL_DATA;
     else process.env.PI_TEMPORAL_DATA = originalData;

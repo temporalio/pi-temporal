@@ -133,6 +133,7 @@ export async function piSession(
         isUnclaimed,
         // False only while replaying a history written before this rule existed. See the dep.
         refusesStartedFailures: () => patched("pinned-started-failure-does-not-migrate"),
+        resumesAfterLostHost: () => patched("lost-host-does-not-end-the-turn"),
         nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
         // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
         log: (message, attributes) => log.info(message, attributes),

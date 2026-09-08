@@ -155,13 +155,16 @@ export function makeActivities(
     }
   };
 
-  const shipTree = async (sessionFile: string, current?: worktree.Writer) => {
+  const shipTree = async (
+    sessionFile: string,
+    of: { readonly current?: worktree.Writer; readonly fence?: worktree.Fence } = {},
+  ) => {
     if (!opts.shipTree) return;
     // A capture that fails must not fail the step: the tool has already run and its result is
     // recorded, and a retry finds that result rather than running it again, so throwing here costs
     // an attempt and still ships nothing. What it must not do is lose the work. The files are the
     // only record of what the tool did, so they are kept where they can be recovered.
-    await worktree.capture(opts.projectDir, sessionFile, { current }).catch(async (err) => {
+    await worktree.capture(opts.projectDir, sessionFile, of).catch(async (err) => {
       console.error(`could not ship the project tree: ${String(err)}`);
       await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
         console.error(`and could not set it aside either: ${String(keepErr)}`);
@@ -393,7 +396,9 @@ export function makeActivities(
         // Shipped from here, because this host ran the tool and is the only one holding what it
         // did. The seal can land anywhere, and capturing there would ship a directory that never
         // saw this tool. Under the shared lock, for the reason the restore above is.
-        await withSessionLock(input.sessionFile, () => shipTree(input.sessionFile, writer));
+        await withSessionLock(input.sessionFile, () =>
+          shipTree(input.sessionFile, { current: writer, fence: { turn, step } }),
+        );
         return { outcome: "settled" };
       } finally {
         session.dispose();
@@ -408,6 +413,13 @@ export function makeActivities(
     const stop = heartbeatEvery(3000);
     try {
       return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+        // Before the step is written down, and before anything else takes the project on: a host
+        // the driver stopped waiting for is still standing on the tip it read, so what it publishes
+        // afterwards reverts whatever replaced it. Saying the step is closed is what makes that
+        // capture refusable on the host it comes from.
+        if (input.lost && opts.shipTree) {
+          await worktree.closeStep(input.sessionFile, { turn: input.turn, step: input.step });
+        }
         // A cancelled tool may still be writing on another host.
         if (!input.interrupted) await bringTree(input.sessionFile);
         const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the seal"));
@@ -439,7 +451,9 @@ export function makeActivities(
           // reads as one that wants another step even when a tool asked the turn to stop.
           const answer = lastAssistantText(session.state.messages as Msg[]);
           // After the step is written down, so what ships is a tree whose transcript explains it.
-          if (!input.interrupted) await shipTree(input.sessionFile);
+          if (!input.interrupted) {
+            await shipTree(input.sessionFile, { fence: { turn: input.turn, step: input.step } });
+          }
           return { done, retryAttempt: sealed.retryAttempt, finalText: done ? answer : "" };
         } finally {
           session.dispose();
