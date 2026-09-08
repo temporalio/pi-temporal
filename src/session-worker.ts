@@ -1,8 +1,9 @@
 // Builds the worker that drives Pi steps. Two callers: the standalone worker process, and the pi
-// extension, which runs one inside pi so /durable works without a worker you started yourself.
+// extension, which runs one inside pi so `/background` works without a worker you started
+// yourself. Both get the same workflow and the same activities.
 //
-// Both get the same workflow and the same activity. The difference is only where the process
-// lives, and how long it lives for.
+// The difference is lifetime. The extension's worker stops when pi does; a standalone one outlives
+// whoever submitted the work.
 
 import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";

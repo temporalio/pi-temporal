@@ -3,9 +3,13 @@
 // streaming stay pi's own. They run in the pi process, which is why the workflow pins them to that
 // process's queue.
 //
-// A step's tool results are kept in memory here rather than beside the session file. The turn
-// cannot outlive this process anyway (a workflow that comes back to a process that is gone gets
-// TurnGone), so there is nothing a file would survive that the turn itself would.
+// A step's tool results are kept in memory here rather than beside the session file, because the
+// turn belongs to the pi process that owns the session and cannot move to another one.
+//
+// That is a different contract from worker mode, and worth saying plainly: a crash of this process
+// loses every result the seal had not recorded yet. Reopening the session resumes from the
+// transcript, so what was sealed survives and what was in flight does not. The worker path's
+// dispatch claims and result files are not in play here.
 
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import type { TurnSteps, TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";

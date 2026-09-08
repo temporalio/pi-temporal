@@ -36,8 +36,7 @@ export interface SteppedStepDeps {
   // them run at once: they see each other through the filesystem rather than through the tree
   // store. Offered only the queue that worker reported.
   readonly pinnedTo?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
-  // Whether a failure means nobody took the work. Kept for the log line, which reads differently
-  // when the dispatch never started than when the host took it and stopped answering.
+  // Migration requires evidence that no attempt started on the pinned queue.
   readonly isUnclaimed?: (err: unknown) => boolean;
   // Run the seal even though the turn was cancelled. Calls that finished have real results kept
   // for them, and abandoning the step tells the model they may have taken effect instead.
@@ -135,16 +134,24 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     // this step is addressed there first: it is the host holding the directory the tools write.
     const pinned = model.queue && deps.pinnedTo ? deps.pinnedTo(model.queue) : undefined;
     let unclaimed = false;
+    let unsafeFailure: unknown;
+    let stopFailure: unknown;
     const pinnedAttempts: Promise<void>[] = [];
     // What is left of a step whose worker is gone goes to the shared queue one at a time. There it
     // can land on two hosts again, which is what the tree store cannot take.
     let shared: Promise<unknown> = Promise.resolve();
     const onShared = <T>(run: (on: SteppedActivities) => Promise<T>): Promise<T> => {
       const next = shared.then(async () => {
-        // A queue timeout can leave sibling tools writing the pinned directory, so nothing starts
-        // here until every pinned attempt of this step is over, one way or the other.
+        // A sibling may have started even when this dispatch timed out in the queue.
         await Promise.all(pinnedAttempts);
-        return run(deps.activities);
+        if (stopFailure !== undefined) throw stopFailure;
+        if (unsafeFailure !== undefined) throw unsafeFailure;
+        try {
+          return await run(deps.activities);
+        } catch (err) {
+          if (deps.isCancellation(err)) stopFailure = err;
+          throw err;
+        }
       });
       shared = next.then(
         () => undefined,
@@ -152,17 +159,14 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       );
       return next;
     };
-    // Everything except the turn being stopped moves to the shared queue. What makes that safe is
-    // not a judgement about the pinned host, which cannot be observed from here: it is the barrier
-    // above, which starts nothing shared until every pinned attempt has settled, and then the two
-    // guards on the durable things. A stranded host that publishes late is refused by the tree
-    // store, because only a host standing on the tip may add to it, and its work is set aside
-    // rather than dropped. A stale seal is refused by the session lock, which compares the epoch it
-    // took. Refusing to move instead ended the turn, and that strands exactly the same work while
-    // losing the rest of the step as well.
+    // A timed-out body can keep writing. If the shared queue selects that host for another call,
+    // restoring its directory also advances the tip note that the stale body would publish under.
+    // Until workspaces are isolated, only a conclusively unstarted dispatch can move automatically.
     const viaPinned = async <T>(
       run: (on: Pick<SteppedActivities, "runToolCall" | "sealStep">) => Promise<T>,
     ): Promise<T> => {
+      if (stopFailure !== undefined) throw stopFailure;
+      if (unsafeFailure !== undefined) throw unsafeFailure;
       if (!pinned) return run(deps.activities);
       if (unclaimed) return onShared(run);
       const attempt = run(pinned);
@@ -172,14 +176,18 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       try {
         return await attempt;
       } catch (err) {
-        if (deps.isCancellation(err)) throw err;
+        if (deps.isCancellation(err)) {
+          stopFailure = err;
+          throw err;
+        }
+        if (deps.isUnclaimed?.(err) !== true) {
+          unsafeFailure = err;
+          throw err;
+        }
         unclaimed = true;
-        deps.log?.(
-          deps.isUnclaimed?.(err) === true
-            ? "the pinned queue did not take the work; the rest of the step goes to the shared queue"
-            : "the pinned attempt did not come back; the rest of the step goes to the shared queue",
-          { step: input.step },
-        );
+        deps.log?.("the pinned queue did not take the work; the rest of the step goes to the shared queue", {
+          step: input.step,
+        });
         return onShared(run);
       }
     };
@@ -212,24 +220,27 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         retryAttempt: input.retryAttempt,
         interrupted,
       };
-      // An interrupted seal only appends the transcript; it must not move the project.
+      // A recovery seal must not move a project that an abandoned tool may still write.
       if (interrupted) return deps.activities.sealStep(sealed);
       return viaPinned((on) => on.sealStep(sealed));
     };
 
-    if (stopped) {
-      // The user stopped the turn, so close the step and then let the stop through. Skipping the
-      // seal would throw away the calls that finished, and the next prompt would be told their
-      // outcome is unknown. The stop is what the caller hears about either way: a seal that fails
-      // on the way out is not the thing worth reporting.
+    const recover = async (failure: unknown): Promise<never> => {
+      // Completed results would be swept by the next prompt unless they reach the transcript.
+      // The original failure still decides the turn's outcome if this recovery cannot finish.
       await deps.nonCancellable(() => seal(true)).catch((err: unknown) => {
-        // The stop is what the caller asked about, so it is what propagates. But the results of
-        // every call that finished are lost with this, and the next prompt will tell the model
-        // their outcome is unknown, so it does not go unsaid.
-        deps.log?.("could not close a stopped step", { step: input.step, error: String(err) });
+        deps.log?.("could not record results before ending the step", { step: input.step, error: String(err) });
       });
-      throw stopped;
+      throw failure;
+    };
+    const failure = stopped ?? unsafeFailure;
+    if (failure !== undefined) return recover(failure);
+    try {
+      return await seal(false);
+    } catch (err) {
+      const sealFailure = stopFailure ?? unsafeFailure;
+      if (sealFailure !== undefined) return recover(sealFailure);
+      throw err;
     }
-    return seal(false);
   };
 }

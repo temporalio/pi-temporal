@@ -1,11 +1,14 @@
 // Temporal + Pi wiring, read from env. Nothing here is read at module load by the workflow
 // (workflow code must stay deterministic); the client and worker read it.
 //
-// Two deployments, not a dozen knobs. `PI_TEMPORAL_PROFILE` picks one and everything that has to
-// agree follows from it, because the settings are not independent: a fleet whose session directory
-// is not shared, or whose project files do not travel, is not a fleet that works. It is one that
-// answers with the wrong files. `preflight` says so before any work is accepted rather than after,
-// and `pi-temporal doctor` prints what a process resolved.
+// Two deployments, not a dozen knobs. `PI_TEMPORAL_PROFILE` picks one and the settings that go
+// with it follow, because they are not independent: a fleet whose session directory is not shared,
+// or whose project files do not travel, answers with the wrong files rather than failing.
+//
+// What a profile cannot do is check the fleet. `preflight` reads this process's own configuration
+// and refuses what one process can be refused for, before it accepts work rather than after, and
+// `pi-temporal doctor` prints what this process resolved. That the storage is really shared, that
+// placement is what you think, and that the other hosts agree are the operator's to verify.
 
 import { readFileSync } from "node:fs";
 
@@ -27,8 +30,8 @@ export interface Config {
   // there is disk spent on a problem that host does not have.
   readonly shipTree: boolean;
   // How a server that is not the dev server is reached. An API key is what Temporal Cloud takes; a
-  // certificate pair is what a self-hosted cluster with mTLS takes. Neither is a file path in the
-  // process's argv or logs, because both are credentials.
+  // certificate pair is what a self-hosted cluster with mTLS takes. Both are read from files rather
+  // than carried as values, so what `describe` prints is the path and never the secret.
   readonly apiKey?: string;
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
 }
@@ -90,12 +93,7 @@ export function connectionOptions(cfg: Config) {
 
 const LOOPBACK = /^(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(:|$)/;
 
-/**
- * What is wrong with this deployment, in the operator's words rather than in the failure it would
- * otherwise produce hours later. Every one of these has a failure that reads as something else: a
- * session directory nobody else can see reads as a worker that never picks anything up, and a
- * fleet with the tree off reads as a model that keeps being told the project is empty.
- */
+/** Configuration checks cannot establish that a directory is shared or that hosts agree. */
 export function preflight(cfg: Config): string[] {
   const problems: string[] = [];
   if (cfg.profile === "fleet") {
@@ -124,12 +122,7 @@ export function preflight(cfg: Config): string[] {
   return problems;
 }
 
-/**
- * Worth saying, not worth refusing. The difference matters: a process that exits takes a deployment
- * with it, so only what cannot work belongs in `preflight`. Plaintext to an address that is not
- * loopback is a private network in most deployments and a mistake in some, and nothing here can
- * tell which.
- */
+/** Plaintext can be intentional on a private network, so it is a note rather than a refusal. */
 export function notes(cfg: Config): string[] {
   const said: string[] = [];
   if (!LOOPBACK.test(cfg.address) && !cfg.apiKey && !cfg.tls) {

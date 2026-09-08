@@ -2,12 +2,16 @@
 // and what the ones that finished produced. It lives beside the session file rather than in it,
 // because a half-finished step has no place in the transcript the model reads, and because two
 // calls settling at once would each parent their entry off the leaf they saw and branch the
-// session tree.
+// session tree. Keeping the results in separate files is what lets the seal append them in the
+// order the model asked for.
 //
-// The dispatch note prevents a repeated side effect. It outlives the result it produced, and the
-// turn it was written in, because the attempt it guards against is one that stalled: it comes back
-// after the answer is recorded and after the cleanup that follows, and nothing else on disk can
-// then tell its call from one nothing has run yet.
+// A dispatch claim outlives the result it produced, and the turn it was written in, because the
+// attempt it guards against is one that stalled: it comes back after the answer is recorded and
+// after the cleanup that follows, and nothing else on disk can then tell its call from one nothing
+// has run yet.
+//
+// What a claim answers is whether to admit a second dispatch under that identity. It says nothing
+// about what the first one did, and nothing about whether it is still running.
 
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -19,9 +23,7 @@ const STARTED = ".started";
 
 // Scoped by turn and step, because a call id is only unique within the message that asked for it
 // and a turn numbers its steps from one again. Either scope alone would let a later call find an
-// earlier one's files: without the step, within a turn; without the turn, across turns. That
-// matters more now the notes outlive the results, because a stale note reads as "already
-// dispatched" and would keep a tool that never ran from running.
+// earlier one's files: without the step, within a turn; without the turn, across turns.
 const rootFor = (sessionFile: string) => `${sessionFile}.pending`;
 // The turn's id comes from whoever submitted the prompt, so it is not necessarily a name a
 // filesystem takes. Anything but a plain one is used by its digest rather than rewritten, because

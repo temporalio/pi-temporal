@@ -115,8 +115,12 @@ export interface ModelCallResult {
   // what answers for a failed model call (a retry, a compaction) happens there.
   readonly ended: boolean;
   // The queue this worker polls on its own. The rest of the step is addressed there, because this
-  // is the host holding the directory the tools are about to write. Absent when the worker has none
-  // and never required: the step falls back to the shared queue and the tree travels as before.
+  // is the host holding the directory the tools are about to write, which is what lets them run at
+  // once. Absent when the worker has none, and then the step runs on the shared queue as before.
+  //
+  // Falling back is narrow on purpose: only a dispatch nobody started may move, and only once every
+  // pinned sibling has settled. An attempt that started and failed may still have a tool writing
+  // that directory, and nothing here can see it.
   readonly queue?: string;
 }
 
