@@ -27,6 +27,8 @@ const say = (line: string) => process.stderr.write(line + "\n");
 // not an id plus whatever else was worth printing to a person.
 const emit = (line: string) => process.stdout.write(line + "\n");
 
+import { resolve } from "node:path";
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // A session with no live workflow is idle, not an error: the supervisor retires after its idle
@@ -396,6 +398,21 @@ async function main() {
       await worktree.forget(sessionFileFor(fromEnv().sessionDir, sessionId));
       say(`dropped what ${sessionId} kept for its project files`);
       say("  the transcript is untouched; a new turn would start from an empty project");
+      return;
+    }
+    case "release-tree": {
+      // The directory a stranded tool left refused. Nothing here can tell whether that tool is
+      // still running, which is the whole reason the refusal is persistent, so this says what it
+      // is forgetting and leaves the judgement with whoever ran it.
+      const dir = rest.find((a) => !a.startsWith("--"));
+      if (!dir) throw new Error("release-tree wants a project directory");
+      const forgotten = await worktree.clearWriters(resolve(dir));
+      if (forgotten === 0) {
+        say(`${dir} was not refused; nothing to clear`);
+        return;
+      }
+      say(`cleared ${forgotten} unaccounted writer(s) on ${dir}`);
+      say("  stop anything still running in it first: this only forgets that they were there");
       return;
     }
     default:

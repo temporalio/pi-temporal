@@ -24,7 +24,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { withSessionLock } from "./session-lock.js";
@@ -181,6 +181,88 @@ async function isEmptyDir(dir: string) {
 // gives the model a confident wrong answer, which is worse than not running at all, so this throws
 // and lets Temporal put the work on a host that can do it.
 class WrongTree extends Error {}
+
+// One file per tool call that is inside its own execution, written before the tool can have any
+// effect and removed when the body returns. It is the only thing on this host that tells a tool
+// that finished from one Temporal stopped waiting for: an attempt that timed out settles the
+// workflow's promise and leaves the body running, and nothing the workflow can see says which
+// happened.
+//
+// A marker still here when another turn wants this directory is a writer nobody can account for, so
+// the directory is refused rather than shared with it. The refusal outlives the process that made
+// it: a marker whose writer died without removing it keeps the directory refused until somebody
+// clears it. That does not strand the session, which another host can serve. It strands the
+// directory, which is the trade this makes on purpose.
+const writersDir = (projectDir: string) => join(hostDir(projectDir), "writers");
+const writerPath = (projectDir: string, callId: string) =>
+  join(writersDir(projectDir), `${createHash("sha256").update(callId).digest("hex").slice(0, 16)}.json`);
+
+/** What a tool call is, for telling this step's writers from an earlier turn's. */
+export interface Writer {
+  readonly turn: string;
+  readonly step: number;
+  readonly callId: string;
+}
+
+interface WriterNote extends Writer {
+  readonly host: string;
+  readonly pid: number;
+  readonly started: string;
+}
+
+/** Say a tool call is about to write this directory. `endWrite` says it came back. */
+export async function beginWrite(projectDir: string, writer: Writer): Promise<void> {
+  await mkdir(writersDir(projectDir), { recursive: true });
+  await writeJson(writerPath(projectDir, writer.callId), {
+    ...writer,
+    host: hostname(),
+    pid: process.pid,
+    started: new Date().toISOString(),
+  } satisfies WriterNote);
+}
+
+/** Whatever it did to the directory, it is not still doing it. */
+export async function endWrite(projectDir: string, callId: string): Promise<void> {
+  await rm(writerPath(projectDir, callId), { force: true });
+}
+
+async function writersHere(projectDir: string): Promise<WriterNote[]> {
+  const names = await readdir(writersDir(projectDir)).catch(() => [] as string[]);
+  const found: WriterNote[] = [];
+  for (const name of names) {
+    const note = await readJson<WriterNote>(join(writersDir(projectDir), name));
+    if (note) found.push(note);
+  }
+  return found;
+}
+
+/** Thrown when a directory is refused because a writer from an earlier step never came back. */
+export class Quarantined extends Error {}
+
+/**
+ * Refuse a directory an unaccounted writer may still be inside. The step's own calls run at once
+ * on this host by design, so their markers are not a reason to refuse; a marker from another step
+ * or another turn is exactly the case the driver cannot see from the workflow.
+ */
+async function refuseWhenStranded(projectDir: string, current?: Writer): Promise<void> {
+  const stranded = (await writersHere(projectDir)).filter(
+    (note) => !current || note.turn !== current.turn || note.step !== current.step,
+  );
+  if (stranded.length === 0) return;
+  const one = stranded[0];
+  throw new Quarantined(
+    `not using ${projectDir}: ${stranded.length} tool call(s) from an earlier step never returned ` +
+      `(${one.callId} of turn ${one.turn} step ${one.step}, pid ${one.pid} on ${one.host}, started ` +
+      `${one.started}). Stop them, then clear it with \`pi-temporal release-tree ${projectDir}\`.`,
+  );
+}
+
+/** Clear the refusal, for an operator who has stopped whatever was left running. */
+export async function clearWriters(projectDir: string): Promise<number> {
+  const stranded = await writersHere(projectDir);
+  await rm(writersDir(projectDir), { recursive: true, force: true });
+  return stranded.length;
+}
 
 /**
  * Record the project's files against this session. Cheap when nothing changed: a tree id is
@@ -379,11 +461,14 @@ export async function capture(
   // a worker draws, because the first capture decides what the project *is* and a worker is chosen
   // by whatever was free. Letting one do it meant an empty `/project` on the host that happened to
   // draw the first tool became the project, on every host.
-  opts: { readonly seed?: boolean } = {},
+  opts: { readonly seed?: boolean; readonly current?: Writer } = {},
 ): Promise<void> {
   // One at a time per directory. Two captures share an index and a shadow repository, so a second
   // one collides on `index.lock`, and that failure reads as a session that stopped shipping.
   await withTreeLocks(projectDir, sessionFile, async () => {
+    // What this directory holds is not this session's to publish while a writer from another step
+    // is unaccounted for: its files are in there too.
+    await refuseWhenStranded(projectDir, opts.current);
     // Work of any kind means this session is not the finished one its last idle period marked.
     await revive(sessionFile);
     const tip = await readJson<Tip>(tipPath(sessionFile));
@@ -418,8 +503,11 @@ export async function capture(
  * the directory holds something this session did not put there, because running against it would
  * describe somebody else's files as the project.
  */
-export async function ensure(projectDir: string, sessionFile: string): Promise<void> {
+export async function ensure(projectDir: string, sessionFile: string, current?: Writer): Promise<void> {
   await withTreeLocks(projectDir, sessionFile, async () => {
+    // Before anything is written or checked out. A restore is what brings this host to the tip, and
+    // doing that under an abandoned writer is what makes its next capture look current.
+    await refuseWhenStranded(projectDir, current);
     await revive(sessionFile);
     // Read inside the lock. A capture on this host between the read and the lock would leave this
     // deciding against a tip that has already moved, and resetting the directory to the older tree.
