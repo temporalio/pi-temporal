@@ -1,14 +1,15 @@
-// A refused directory must cost that directory, not the session. The refusal is persistent by
-// design: nothing on the host can prove a tool that never came back has stopped, so the marker
-// stays until it returns or an operator clears it. What must not follow is a session that cannot
-// run anywhere.
+// A refused directory must cost that directory, not the session. The refusal stands for as long as
+// the host cannot show the writer is over, and here it cannot: the marker names a live process. What
+// must not follow is a session that cannot run anywhere.
 //
 // Two workers on one queue, each standing in its own project directory, and in their own processes
-// because that is what two hosts are. One of them is refused. What is asserted is that the turn
-// still finishes, on the other one.
+// because that is what two hosts are. One of them is refused. What is asserted is that the work
+// lands on the other one, never on the refused one, and that the turn is answered rather than
+// stranded with the directory.
 //
 // Needs a Temporal server; no model key. Usage: npx tsx quarantine-routing-check.mts
 
+import { appendFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,8 @@ import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { makeActivities } from "./src/activities.js";
+import { QUERIES } from "./src/protocol.js";
+import type { TurnState } from "./src/protocol.js";
 import * as worktree from "./src/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
@@ -67,6 +70,7 @@ async function main() {
         messages.push({ role: "assistant", content: "answered", timestamp: Date.now() });
         return { done: true, finalText: "answered" };
       },
+      waitForIdle: async () => {},
       dispose() {},
     };
   }`;
@@ -128,6 +132,7 @@ async function main() {
   });
   child.stderr.on("data", (chunk: Buffer) => {
     const line = chunk.toString();
+    if (process.env.FREE_HOST_LOG) appendFileSync(process.env.FREE_HOST_LOG, line);
     if (/Error|error:/.test(line)) console.error("[free host]", line.split("\n")[0].slice(0, 200));
   });
   const running = [refused.run()];
@@ -144,18 +149,30 @@ async function main() {
       } as never],
     });
     // Long enough for the refusal, its backoff, and a redispatch. What is being watched is where
-    // the work goes, not how fast.
-    const settled = handle.result().then(() => "done", () => "failed");
-    await Promise.race([settled, new Promise((r) => setTimeout(r, 45_000))]);
+    // the work goes and whether the turn gets its answer, not how fast either happens.
+    const started = Date.now();
+    const deadline = started + 120_000;
+    let finished: TurnState["finished"];
+    while (Date.now() < deadline && !finished) {
+      finished = (await handle.query<TurnState, []>(QUERIES.turnState).catch((err) => {
+        console.error("[query]", String(err).slice(0, 200));
+        return undefined;
+      }))?.finished;
+      if (!finished) await new Promise((r) => setTimeout(r, 500));
+    }
+    console.log(`the turn settled after ${Math.round((Date.now() - started) / 1000)}s`);
     await handle.terminate().catch(() => undefined);
 
     // The refusal is an ordinary failure, so Temporal schedules the work again and any worker can
     // take it. A permanent one would have ended the turn with the directory.
     check("the work reaches a host that is not refused", ranOn.includes("free"), ranOn);
     check("and never runs on the refused one", !ranOn.includes("refused"), ranOn);
-    // What this fixture cannot say: whether the turn then finishes. Its session is in memory, so
-    // nothing it records survives the activity that recorded it. A turn finishing on a worker that
-    // never saw the session is `detached-check.mts`, against a real transcript.
+    // And the turn is answered, rather than merely dispatched somewhere. What this fixture cannot
+    // say is what the answer was made of: its session is in memory, so nothing an activity records
+    // survives it. A turn finishing on a worker that never saw the session, against a real
+    // transcript, is `detached-check.mts`.
+    check("and the turn is answered", finished?.outcome === "answered", finished);
+    check("by the host that took the work", finished?.finalText === "answered", finished);
   } finally {
     child.kill("SIGKILL");
     await rm(helper, { force: true });
