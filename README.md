@@ -34,6 +34,12 @@ npm run setup-fork
 
 `setup-fork` fetches that exact commit into `.fork/pi` (ignored), builds it, and links it into `node_modules`. CI uses the same setup commands. The pin selects fork source; the dependency lock and setup inputs also affect the build. The linked package resolves its sibling `@earendil-works/pi-agent-core` (which carries `Agent.step`) from the fork's own workspace, so the whole fork API is picked up.
 
+Working in the fork itself needs one more thing, and it needs the network: its model catalog under
+`packages/ai/src/providers/data/` is generated and ignored, so a clone that has never fetched it
+fails `tsgo --noEmit` with errors about models nobody has heard of, and the fork's own pre-commit
+hook fails with it. `npm run -w @earendil-works/pi-ai hydrate-model-data` writes it, after which
+`npm run check` passes. That is upstream's arrangement, not something this pin can carry.
+
 Run `setup-fork` after any `npm ci`, which wipes `node_modules` and takes the link with it. To select different fork source, edit `PI_FORK_REF` in `fork.pin` and run it again.
 
 ## Install it into pi
