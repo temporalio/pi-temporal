@@ -195,7 +195,12 @@ async function main() {
   // --- 4. follow it across the handover, from a process that is only ever a client
   const watched = await run(cli(["watch", sessionId]).cmd, cli(["watch", sessionId]).args, env, 120_000);
   check("watch returned rather than hanging", !watched.timedOut, watched.out.slice(-200));
-  check("watch followed the turn to its end", /answered/.test(watched.err), watched.err.slice(-200));
+  // Not "answered". A worker dying with a tool in flight ends the turn now, on purpose: the
+  // attempt started, so nothing here can say the tool stopped, and a sixth review reproduced what
+  // moving the rest of the step costs when it had not. `migration-rejoin-check.mts` is that
+  // reproduction. What the turn owes the user instead is below: the results it already had, and no
+  // second run of the tool.
+  check("the turn ends rather than moving to another worker", /failed/.test(watched.err), watched.err.slice(-200));
 
   const entries = (await readFile(join(sessions, `${sessionId}.jsonl`), "utf8").catch(() => ""))
     .split("\n")
@@ -212,11 +217,13 @@ async function main() {
     })
     .filter((e): e is NonNullable<typeof e> => e !== undefined);
 
-  // The turn finished after the only worker that had it was killed, so something else finished it.
-  const finishedAfterKill = entries.some(
-    (e) => e.message?.role === "assistant" && Date.parse(e.timestamp ?? "") > killedAt,
+  // The step still closes, on a worker that never ran it. That is the recovery seal: it records
+  // what the step had and does not touch the project, so the results of a call that finished are
+  // not thrown away with the host that ran it.
+  const sealedAfterKill = entries.some(
+    (e) => e.message?.role === "toolResult" && Date.parse(e.timestamp ?? "") > killedAt,
   );
-  check("the turn was finished by the worker that took over", finishedAfterKill, new Date(killedAt).toISOString());
+  check("the results it already had are recorded anyway", sealedAfterKill, new Date(killedAt).toISOString());
 
   const text = (content: unknown) => JSON.stringify(content ?? "");
   const results = entries.filter((e) => e.message?.role === "toolResult").map((e) => text(e.message?.content));
