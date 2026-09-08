@@ -99,14 +99,6 @@ const isUnclaimed = (err: unknown) =>
   err.cause instanceof TimeoutFailure &&
   err.cause.timeoutType === "SCHEDULE_TO_START";
 
-// The worker that took the step is not reporting any more. A dispatch heartbeats every few seconds
-// for as long as it is alive, so this is the server saying the host is gone rather than that a tool
-// is still running on it. Start-to-close is deliberately not here: that one expires while the
-// worker is still heartbeating, which is the case a live tool can outlive its own attempt.
-const isHostLost = (err: unknown) =>
-  err instanceof ActivityFailure &&
-  err.cause instanceof TimeoutFailure &&
-  err.cause.timeoutType === "HEARTBEAT";
 
 // Copying a project a client left for a scheduled session. Short, and it has to finish before the
 // first step, so a queue nobody polls must not hold the run open waiting for it.
@@ -167,7 +159,6 @@ export async function piSession(
         isCancellation,
         pinnedTo,
         isUnclaimed,
-        isHostLost,
         nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
         // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
         log: (message, attributes) => log.info(message, attributes),

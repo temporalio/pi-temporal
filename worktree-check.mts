@@ -143,6 +143,30 @@ async function main() {
   const held = await read(join(projectB, "note.txt"));
   check("and nothing the other host shipped is reverted", held === "three\n", held);
 
+  // The step gave up on a pinned host and ran the rest somewhere else. That host was never told,
+  // so its tool can finish and try to publish long afterwards. This is the guard the workflow
+  // rests on when it moves a step off a worker that stopped answering: without it, moving would
+  // mean the stranded host quietly reverting the tree the rest of the step was written against.
+  asHost(root, "b");
+  await writeFile(join(projectB, "note.txt"), "four\n");
+  await worktree.capture(projectB, sessionFile);
+  asHost(root, "a");
+  await writeFile(join(projectA, "late.txt"), "written after the step moved on\n");
+  let lateRefused = false;
+  await worktree.capture(projectA, sessionFile).catch(() => {
+    lateRefused = true;
+  });
+  check("a stranded host cannot publish over the tip", lateRefused);
+  asHost(root, "b");
+  await worktree.ensure(projectB, sessionFile);
+  check("so the host that carried on keeps its work", (await read(join(projectB, "note.txt"))) === "four\n");
+  // And what it wrote is recoverable rather than gone, which is what makes the move survivable
+  // rather than merely safe.
+  asHost(root, "a");
+  await worktree.setAside(projectA, sessionFile).catch(() => undefined);
+  const kept = await readdir(join(`${sessionFile}.tree`, "salvage")).catch(() => [] as string[]);
+  check("and the work it stranded is set aside", kept.length > 0, kept);
+
   // A writer that died between renaming its bundle into place and naming it as the tip leaves a
   // bundle nothing points at. Every host afterwards computes that same number, so refusing it wedges
   // the session everywhere rather than on the one host that crashed.

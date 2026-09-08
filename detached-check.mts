@@ -126,6 +126,12 @@ async function main() {
   // A side effect we can count. A second execution records no second result, because the retry
   // throws it away, so the transcript cannot tell "did not run again" from "ran again and the
   // result was dropped". This can. It is the `git push` case in one line.
+  //
+  // The write comes before the sleep, not after it. With the sleep first, the kill below takes the
+  // whole process group and the tool never reaches the write, so the file is empty however the
+  // handover goes and the count proves nothing. This way the effect has already happened when the
+  // worker dies, which is the case worth asserting: the tool ran, nothing recorded it, and the
+  // takeover must not run it again.
   const ranFile = join(sessions, "ran.txt");
   const env = {
     TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7241",
@@ -148,7 +154,7 @@ async function main() {
       "tsx",
       "src/cli.ts",
       "start",
-      `Run this exact command with the bash tool: sleep 45 && echo HANDOVER >> ${ranFile}. ` +
+      `Run this exact command with the bash tool: echo HANDOVER >> ${ranFile} && sleep 45. ` +
         "Then report it.",
     ],
     env,
@@ -165,7 +171,11 @@ async function main() {
   let toolInFlight = false;
   for (let i = 0; i < 60 && !toolInFlight; i++) {
     const log = await readFile(sessionLog, "utf8").catch(() => "");
-    toolInFlight = log.includes('"toolCall"') && !log.includes('"toolResult"');
+    const dispatched = log.includes('"toolCall"') && !log.includes('"toolResult"');
+    // And the effect has landed. Killing between the dispatch and the write leaves nothing to
+    // count, and the assertion at the end would then pass for the wrong reason.
+    const effected = (await readFile(ranFile, "utf8").catch(() => "")).includes("HANDOVER");
+    toolInFlight = dispatched && effected;
     if (!toolInFlight) await sleep(1_000);
   }
   check("a tool is in flight before the kill", toolInFlight);
@@ -239,12 +249,10 @@ async function main() {
     results,
   );
   const ran = (await readFile(ranFile, "utf8").catch(() => "")).split("\n").filter(Boolean);
-  // The file counts executions, so what must never appear is a second line: that is the `git push`
-  // running once per worker. Zero is the honest reading here rather than a weaker one, because the
-  // kill above takes the whole process group and the tool was still inside `sleep` when it landed.
-  // What answers for the call instead is the assertion above it: the model is told the outcome is
-  // unknown rather than the tool being run again.
-  check("the tool never ran twice", ran.length <= 1, ran);
+  // The file counts executions. One line is the effect that happened before the worker died; a
+  // second is the `git push` running once per worker, which is the whole thing this level promises
+  // not to do.
+  check("the tool really ran once, not once per worker", ran.length === 1, ran);
   check("the model asked for the tool once", calls.length === 1, calls.length);
 
   const verdict = failures.length === 0 ? "OK" : `${failures.length} failed`;

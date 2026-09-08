@@ -309,10 +309,15 @@ async function main() {
           if (input.call.id === "waiting") throw unavailable;
           pinnedActive = true;
           pinnedStarted();
-          await held;
-          if (pinnedFails) throw failed;
-          pinnedActive = false;
-          return { outcome: "settled" };
+          try {
+            await held;
+            if (pinnedFails) throw failed;
+            return { outcome: "settled" };
+          } finally {
+            // Cleared however it ends. A pinned tool that threw is not still running, and leaving
+            // this set reports the shared call that waited for it as an overlap.
+            pinnedActive = false;
+          }
         },
         sealStep: async () => SEALED,
       }),
@@ -327,17 +332,20 @@ async function main() {
     finishPinned();
     const error = await result;
     check("fallback never overlaps a pinned tool", !crossedHosts, { pinnedFails });
+    // Either way the waiting call runs on the shared queue, and only after the pinned tool is over.
+    // What a failed pinned attempt costs is the tree its tool wrote, which the store sets aside
+    // when that host publishes late; it does not cost the rest of the step.
     check(
-      pinnedFails ? "an uncertain pinned attempt refuses migration" : "fallback resumes after the pinned tool ships",
-      pinnedFails ? !sharedStarted && error === failed : sharedStarted && error === undefined,
-      { sharedStarted, error: String(error) },
+      pinnedFails ? "an uncertain pinned attempt still lets the step finish" : "fallback resumes after the pinned tool ships",
+      sharedStarted && error === undefined,
+      { sharedStarted, error: String(error), pinnedFails },
     );
   }
 
   // A worker that dies mid-tool is the case the level exists to survive, and it arrives as a
-  // failure of a started attempt rather than as one nobody took. Refusing to move it ends the turn.
+  // failure of a started attempt rather than as one nobody took. Refusing to move it ended the turn.
   {
-    const gone = new Error("the pinned worker stopped heartbeating");
+    const gone = new Error("the pinned attempt did not come back");
     let sharedTools = 0;
     let sharedSeals = 0;
     const step = makeSteppedStep({
@@ -360,7 +368,6 @@ async function main() {
       }),
       isCancellation,
       isUnclaimed: () => false,
-      isHostLost: (error) => error === gone,
       nonCancellable: (fn) => fn(),
     });
     const result = await step(INPUT).then(() => undefined, (error: unknown) => error);
@@ -388,7 +395,12 @@ async function main() {
       nonCancellable: (fn) => fn(),
     });
     const error = await step(INPUT).then(() => undefined, (error: unknown) => error);
-    check("an uncertain pinned tool prevents its seal", seals === 0 && error === failed, { seals });
+    // The seal has to happen wherever the tool ended up. A step that leaves a call unanswered
+    // leaves a transcript no provider accepts, so refusing to seal costs the session, not one step.
+    check("an uncertain pinned tool still gets its step sealed", seals === 1 && error === undefined, {
+      seals,
+      error: String(error),
+    });
   }
 
   const bad = failures.length;
