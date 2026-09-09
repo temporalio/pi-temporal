@@ -298,14 +298,24 @@ The follower distinguishes these states:
 worker A starts the turn, A is killed with the tool still in flight, and worker B, which never saw
 this session, finishes it. `running` lists the session and `watch` follows it across the handover
 from a process that is only ever a client. The tool that was cut off is reported to the model as an
-unknown outcome rather than re-run. This describes the package author's live run; the
-conservative pinned-failure policy can instead end a turn when the old tool may still run.
+unknown outcome rather than re-run, and the model answered without asking for it again, so the
+command ran once. What does not move is the rest of that step: its calls stay with the host that
+has them, and the step is closed without it.
 
 Two things that check gets right only because getting them wrong was silent. It kills on observing
 a tool in flight rather than after a fixed delay, because a slow command in between pushes the kill
 past the end of the turn and then no handover happens at all. And it runs the worker and the CLI as
 single processes (`node --import tsx`), because `npx` spawns `tsx` spawns node, so killing the
 process you hold leaves the one that matters running.
+
+### Sessions that are already running
+
+Which activities a step schedules is what a workflow writes down, so changing that rule changes
+histories that already exist and a worker carrying this code would replay one into a nondeterminism
+error. Both rules that changed it are behind `patched()`, so a run recorded under the old one keeps
+what it recorded and a new one gets the current rule. Nothing has to be drained before the deploy.
+`replay-check.mts` replays a history this code writes and a kept one from before each rule; removing
+a patch fails it.
 
 ### Across two machines
 
