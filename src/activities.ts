@@ -10,7 +10,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { Context } from "@temporalio/activity";
+import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
   createAgentSession,
   findDanglingToolCalls,
@@ -32,6 +32,10 @@ import * as pending from "./pending.js";
 import * as worktree from "./worktree.js";
 import { withSessionLock } from "./session-lock.js";
 import { textOf } from "./messages.js";
+
+// Long enough not to spin on a directory that stays refused, short enough that the work reaches a
+// free host in about the time one dispatch takes.
+const REFUSAL_RETRY = "2 seconds";
 
 const heartbeatEvery = (ms: number) => {
   const timer = setInterval(() => {
@@ -135,7 +139,20 @@ export function makeActivities(
   // sends the work to a host that can do it.
   const bringTree = async (sessionFile: string, current?: worktree.Writer) => {
     if (!opts.shipTree) return;
-    await worktree.ensure(opts.projectDir, sessionFile, current);
+    await worktree.ensure(opts.projectDir, sessionFile, current).catch((err: unknown) => {
+      // A refused directory is not a failing unit of work. It is this host saying no, and the same
+      // dispatch on any other host would do fine, so it must not climb the retry backoff: the
+      // interval doubles per attempt, and a host that answers first and refuses fastest is exactly
+      // the one that would push the next attempt minutes out while a free host sits idle.
+      if (err instanceof worktree.Quarantined) {
+        throw ApplicationFailure.create({
+          message: err.message,
+          type: "WorktreeQuarantined",
+          nextRetryDelay: REFUSAL_RETRY,
+        });
+      }
+      throw err;
+    });
   };
   // A lock can be reclaimed while its holder is blocked, so the holder asks again on the way to
   // the write. Failing here is the right answer: Temporal retries, and the retry takes the lock.
