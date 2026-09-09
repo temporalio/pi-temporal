@@ -7,7 +7,9 @@
 // false for exactly those runs, so they keep the behaviour they recorded.
 //
 // Both directions are checked here, because a patch that is never exercised is a patch nobody
-// knows is wired up: a history this code wrote, and one from before the change.
+// knows is wired up: a history this code writes, and the kept ones under `histories/`, each
+// recorded by running this file against the code that predates a rule. Record another by reverting
+// that rule and pointing `REPLAY_HISTORY` at a file to keep.
 //
 // Needs a Temporal server; no model key. Usage: npx tsx replay-check.mts
 
@@ -132,10 +134,11 @@ async function main() {
     // predates it and keeping the export; without its patch, each is where the nondeterminism
     // appeared. A rule that changes which activities a step schedules needs one of these, and a
     // patch nothing replays through is a patch nobody knows is wired up.
+    const kept = (name: string) => fileURLToPath(new URL(`./histories/${name}`, import.meta.url));
     for (const older of [
-      { path: process.env.OLD_POLICY_HISTORY ?? "/tmp/old-policy-history.json",
+      { path: process.env.OLD_POLICY_HISTORY ?? kept("before-the-migration-rule.json"),
         what: "before a started failure stopped migrating" },
-      { path: process.env.END_TURN_HISTORY ?? "/tmp/end-turn-history.json",
+      { path: process.env.END_TURN_HISTORY ?? kept("before-the-lost-host-rule.json"),
         what: "before a lost host stopped ending the turn" },
     ]) {
       const before = await readFile(older.path, "utf8").catch(() => undefined);
