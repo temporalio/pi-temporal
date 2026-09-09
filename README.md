@@ -543,9 +543,10 @@ The following checks need no model key:
   persistence and checks that interruption does not touch project storage, and
   that a stop leaves the step open to its host where a lost host does not.
 - `replay-check.mts` needs a Temporal server. It records a history, replays it,
-  and replays kept histories from before each rule that changed what a step
-  schedules. Record one by reverting that rule, running this check with
-  `REPLAY_HISTORY=` pointing somewhere durable, and keeping the file.
+  and replays the histories under `histories/`, each recorded by the code that
+  predates a rule that changed what a step schedules. Record another by
+  reverting that rule, running this check with `REPLAY_HISTORY=` pointing at a
+  file to keep, and putting it there.
 - `unschedule-check.mts` checks that deleting a schedule retains a template an
   accepted firing can still need.
 
