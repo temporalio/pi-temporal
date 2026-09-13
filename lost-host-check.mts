@@ -1,16 +1,29 @@
+// The contract a step that lost its host is held to, end to end.
+//
+// It has two clauses, and they are the same two on both hosts of this project. The mechanisms
+// differ because the substrates do: this one names the closed step in the shared directory beside
+// the session file, and OpenCode's reuses the owner token that already fences its event log. A
+// change to either belongs in both places, and the other one is
+// `packages/temporal/test/lost-host.test.ts` in the OpenCode fork.
+//
+//   1. The seal that closes a step away from its host publishes nothing. Between the dispatch
+//      failing and the closure being written there is a window where nothing fences the old host,
+//      and the only thing that makes it harmless is that nobody else publishes during it.
+//   2. Once the session has closed that step, what that host publishes for it is refused.
+//
 // A worker dying with a tool in flight costs that step, and it used to cost the whole turn with it.
 // What made ending the turn the only safe answer was the tool: Temporal stops waiting for it, the
 // process behind it keeps writing, and when it finishes it publishes against the tip it read, which
 // reverts whatever ran in its place. The tip rule cannot catch that one, because the stale writer is
 // standing exactly where it was told to stand.
 //
-// So the seal says the step was closed without its host, in the shared directory every host reads,
-// and a capture belonging to that step is refused wherever it comes from. With that in place the
-// turn has nothing left to be protected from by ending, and it carries on with the next step.
+// With both clauses in place the turn has nothing left to be protected from by ending, and it
+// carries on with the next step. Take `closeStep` out of the seal and clause 2 fails: the abandoned
+// tool publishes first and the work that replaced it is refused and set aside.
 //
-// Both halves are checked here: the step hands the turn back instead of failing it, and the host it
-// lost cannot publish afterwards. Take `closeStep` out of the seal and the second one fails: the
-// abandoned tool publishes first and the work that replaced it is refused and set aside.
+// The clause the two hosts do not share: this one sets the refused host's work aside under
+// `salvage/`, where OpenCode leaves it on that host's disk and logs. Both keep it; neither
+// publishes it.
 //
 // No server and no model key. Usage: npx tsx lost-host-check.mts
 
@@ -90,6 +103,10 @@ try {
     nonCancellable: async (body) => body(),
   });
 
+  const bundles = async () =>
+    (await readdir(`${sessionFile}.tree`)).filter((name) => name.endsWith(".bundle")).length;
+  const shipped = await bundles();
+
   const result = await step({
     sessionId: "session", sessionFile, promptId: turn, text: "task", step: 1, retryAttempt: 0,
   });
@@ -97,9 +114,15 @@ try {
   assert.equal(result.done, false, "the turn goes on rather than ending with the worker");
   console.log("PASS a step that lost its host hands the turn back instead of failing it");
 
+  // Clause 1. That seal is standing in a directory that never ran the step's tools, and the host
+  // that did may still be inside one, so it writes the step down and touches nothing else.
+  assert.equal(await bundles(), shipped, "the seal that closed the step published nothing");
+  console.log("PASS and the seal that closed it published nothing");
+
   // The abandoned tool finishes now, before anything else has moved the tip. This is the ordering
   // the tip rule cannot answer: the host is still standing on the tree it read, so its capture is
   // clean and it takes the project back to whatever it was doing.
+  // Clause 2.
   const refused = await finishAbandoned!();
   assert.match(String(refused), /closed without this host/);
   console.log("PASS the host it lost cannot publish for that step afterwards");

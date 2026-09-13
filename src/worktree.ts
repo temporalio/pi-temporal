@@ -26,6 +26,18 @@
 // they come back or this host can show they are gone. And a step the session closed without its
 // host is named in the shared directory, so what that host publishes for it afterwards is refused
 // wherever it comes from, rather than winning because it happened to capture first.
+//
+// That second one is half of a contract both hosts of this project are held to, and the contract is
+// what a change here has to keep rather than the mechanism, which differs by substrate: this names
+// the step in a shared directory, and OpenCode's reuses the owner token that fences its event log.
+//
+//   1. The seal that closes a step away from its host publishes nothing. Between the dispatch
+//      failing and the closure being written there is a window where nothing fences the old host,
+//      and the only thing that makes it harmless is that nobody else publishes during it.
+//   2. Once the session has closed that step, what that host publishes for it is refused.
+//
+// `lost-host-check.mts` holds this one to both clauses, and `packages/temporal/test/lost-host.test.ts`
+// in the OpenCode fork holds that one to the same two, in the same order.
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
