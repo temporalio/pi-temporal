@@ -25,6 +25,7 @@ import type {
   RunStepInput,
   RunStepResult,
   SealStepInput,
+  Spend,
   ToolCallInput,
   ToolCallResult,
 } from "./protocol.js";
@@ -189,6 +190,28 @@ export function makeActivities(
     });
   };
 
+  // What the session has been billed for, as it reports it. Aggregated over every entry, including
+  // history a compaction rewrote, so the difference across one activity is what that activity
+  // spent. A faked session in a check has no such thing to say, and then nothing is reported and
+  // the budget has nothing to add up.
+  const billed = (session: AgentSession) => {
+    const stats = (session as { getSessionStats?: () => { tokens?: { total?: number }; cost?: number } })
+      .getSessionStats;
+    if (typeof stats !== "function") return undefined;
+    try {
+      const now = stats.call(session);
+      return { tokens: now.tokens?.total ?? 0, cost: now.cost ?? 0 };
+    } catch {
+      return undefined;
+    }
+  };
+
+  const spentSince = (before: ReturnType<typeof billed>, session: AgentSession): Spend | undefined => {
+    const after = billed(session);
+    if (!before || !after) return undefined;
+    return { tokens: after.tokens - before.tokens, cost: after.cost - before.cost };
+  };
+
   async function openSession(sessionFile: string, guard?: () => void): Promise<AgentSession> {
     if (dependencies.openSession) return dependencies.openSession(sessionFile, guard);
     await mkdir(dirname(sessionFile), { recursive: true });
@@ -273,14 +296,21 @@ export function makeActivities(
 
           // prepareStep settled anything the crash left dangling, so this is a plain step: a tool
           // whose result never landed is reported as unknown, not re-run behind the model's back.
+          const before = billed(session);
           const { done } = await session.step();
           await session.waitForIdle();
           const messages = session.state.messages as Msg[];
+          const spent = spentSince(before, session);
           // Whole-step mode has no carry. Its session is rebuilt per activity too, so its retry
           // budget starts at zero on every step and only the step ceiling bounds it. That is how
           // it has always been; giving it the carry means giving step() the seal's post-run pass.
           await shipTree(input.sessionFile);
-          return { done, retryAttempt: 0, finalText: done ? lastAssistantText(messages) : "" };
+          return {
+            done,
+            retryAttempt: 0,
+            finalText: done ? lastAssistantText(messages) : "",
+            ...(spent ? { spent } : {}),
+          };
         } finally {
           session.dispose();
         }
@@ -315,12 +345,15 @@ export function makeActivities(
           const settled = await readyForStep(session, input, true);
           if (settled) return { settled, calls: [], sequential: false, ended: true };
 
+          const before = billed(session);
           const outcome = await session.modelCall();
+          const spent = spentSince(before, session);
           return {
             calls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
             sequential: mustSerialize(outcome.sequential),
             ended: outcome.ended,
             ...(opts.stepQueue === undefined ? {} : { queue: opts.stepQueue }),
+            ...(spent ? { spent } : {}),
           };
         } finally {
           session.dispose();
@@ -454,6 +487,7 @@ export function makeActivities(
           // Named, so a message something else appended between the model call and here cannot
           // be the one these results are attributed to.
           await stillOurs(owned, "the seal");
+          const before = billed(session);
           const sealed = await session.sealStep(results, {
             expectCalls: input.calls.map((call) => call.id),
             retryAttempt: input.retryAttempt,
@@ -471,7 +505,13 @@ export function makeActivities(
           if (!input.interrupted) {
             await shipTree(input.sessionFile, { fence: { turn: input.turn, step: input.step } });
           }
-          return { done, retryAttempt: sealed.retryAttempt, finalText: done ? answer : "" };
+          const spent = spentSince(before, session);
+          return {
+            done,
+            retryAttempt: sealed.retryAttempt,
+            finalText: done ? answer : "",
+            ...(spent ? { spent } : {}),
+          };
         } finally {
           session.dispose();
         }

@@ -17,6 +17,7 @@ import type {
   RunStepInput,
   RunStepResult,
   SealStepInput,
+  Spend,
   ToolCallInput,
   ToolCallOutcome,
   ToolCallResult,
@@ -129,15 +130,27 @@ export async function dispatchStepCalls(
 
 type SteppedStep = (input: RunStepInput) => Promise<RunStepResult>;
 
+// What the step cost, which is the model call plus whatever the seal paid for on the way out. The
+// seal runs a compaction when the step needs one, and a compaction is a model call.
+const together = (model: Spend | undefined, sealed: Spend | undefined): Spend | undefined => {
+  if (!model && !sealed) return undefined;
+  const cost = (model?.cost ?? 0) + (sealed?.cost ?? 0);
+  return { tokens: (model?.tokens ?? 0) + (sealed?.tokens ?? 0), ...(cost ? { cost } : {}) };
+};
+
 export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
   const { runModelCall } = deps.activities;
 
   return async (input: RunStepInput): Promise<RunStepResult> => {
     const model = await runModelCall(input);
+    const withSpend = (result: RunStepResult): RunStepResult => {
+      const spent = together(model.spent, result.spent);
+      return spent ? { ...result, spent } : result;
+    };
     if (model.settled) {
       // A crashed step finalized from the transcript, or a retry landing after the turn's last
       // step: nothing to dispatch and nothing to close.
-      return model.settled;
+      return withSpend(model.settled);
     }
 
     // The worker that made the model call, when it offered a queue of its own. Everything else in
@@ -258,14 +271,14 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         // Not the seal's own answer: a step closed this way did not finish, and the turn asks the
         // model what to do about it. A transcript that is already complete settles on the next
         // model call, which is where a turn that had nothing left to do ends.
-        return { done: false, retryAttempt: sealed.retryAttempt, finalText: "" };
+        return withSpend({ done: false, retryAttempt: sealed.retryAttempt, finalText: "" });
       }
       throw failure;
     };
     const failure = stopped ?? unsafeFailure;
     if (failure !== undefined) return recover(failure);
     try {
-      return await seal(false);
+      return withSpend(await seal(false));
     } catch (err) {
       const sealFailure = stopFailure ?? unsafeFailure;
       if (sealFailure !== undefined) return recover(sealFailure);
