@@ -29,7 +29,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname, uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -196,12 +196,15 @@ class WrongTree extends Error {}
 //
 // A marker still here when another turn wants this directory is a writer nobody can account for, so
 // the directory is refused rather than shared with it. The refusal outlives the process that made
-// it, and takes itself back where this host can show that it is over: the writer's process is gone,
-// nothing carrying its name is still running, nothing is left in its process group, and the machine
-// has not restarted underneath the pids that say so. What is left after that is a tool that both
-// left the group and was handed an environment of somebody else's choosing, and `release-tree` is
-// the answer to that one. Until then the directory is refused, which does not strand the session,
-// since another host can serve it.
+// it, and takes itself back where this host can show that it is over. Four readings answer that,
+// because a tool can put down anything the worker gave it: its process is gone, nothing carrying
+// the name the worker exported is running, nothing is left in its control group or its process
+// group, and nothing is standing in the directory. The machine not having restarted is what makes
+// the pids in those readings mean anything. What is left after all of it is a tool that left the
+// group, was handed an environment of somebody else's choosing, shares this process's own control
+// group, and writes the directory without being in it, and `release-tree` is the answer to that
+// one. Until then the directory is refused, which does not strand the session, since another host
+// can serve it.
 const writersDir = (projectDir: string) => join(hostDir(projectDir), "writers");
 const writerPath = (projectDir: string, callId: string) =>
   join(writersDir(projectDir), `${createHash("sha256").update(callId).digest("hex").slice(0, 16)}.json`);
@@ -213,7 +216,7 @@ export interface Writer {
   readonly callId: string;
 }
 
-interface WriterNote extends Writer {
+export interface WriterNote extends Writer {
   readonly host: string;
   readonly pid: number;
   // The group the writer's process was in. What a tool starts stays in it unless it asks for a
@@ -222,6 +225,10 @@ interface WriterNote extends Writer {
   // The worker that ran the call, as a name it put in its own environment. Everything a tool starts
   // inherits it, including through `setsid`, so this is what finds a child the group check lost.
   readonly worker?: string;
+  // The control group the writer was in. A tool keeps it through `setsid` and through `sudo`, and
+  // it can be read whoever owns the process, so it is what answers for a tool running as somebody
+  // else. Linux only.
+  readonly cgroup?: string;
   // When this machine last started, so a pid from before a restart is not read as a live one.
   readonly bootAt?: number;
   readonly started: string;
@@ -249,19 +256,51 @@ const running = (pid: number) => {
   }
 };
 
-/** What is running on this host: which groups hold something, and which workers' work is still in
- * them. Undefined when the host cannot be asked, which is answered as "everything is still here".
+/** What is running on this host, in the four shapes a tool this worker started can be recognised
+ * by. Undefined when the host cannot be asked, which is answered as "everything is still here".
  * `ps` is not installed on a slim container image, which is where most of these run, so Linux is
  * read from `/proc` and everything else asks `ps`. */
-async function liveHere(): Promise<{ groups: Set<number>; workers: Set<string> } | undefined> {
+export interface LiveHere {
+  readonly groups: Set<number>;
+  readonly workers: Set<string>;
+  // Which control groups still hold a process. Linux only, and the only reading here that answers
+  // for a process running as somebody else: a cgroup is inherited across fork and exec, `setsid`
+  // does not change it, `sudo` does not change it, and `/proc/<pid>/cgroup` is readable whoever
+  // owns the process, where that process's environment and working directory are not.
+  readonly cgroups: Set<string>;
+  // Processes standing in the directory itself: their working directory is inside it, or they hold
+  // a file under it open. This is the reading that does not depend on the tool having kept
+  // anything the worker gave it, so it is what is left when a tool leaves the group and is handed
+  // an environment of somebody else's choosing. This host's own processes only, on both platforms.
+  readonly holding: readonly { readonly pid: number; readonly how: string }[];
+  // Where this process itself stands. A marker naming either of these is one the reading cannot be
+  // asked about: a worker restarted from the same shell is in the group its predecessor was in, and
+  // in a container every process shares one control group. Both are part of the reading rather than
+  // read again inside the rule, so the rule is a function of what was seen and nothing else.
+  readonly ourGroup?: number;
+  readonly ourCgroup?: string;
+}
+
+async function liveHere(projectDir: string): Promise<LiveHere | undefined> {
   const groups = new Set<number>();
   const workers = new Set<string>();
-  const found = (text: string) => {
+  const cgroups = new Set<string>();
+  const holding: { pid: number; how: string }[] = [];
+  // Through the links, because a temporary directory on a Mac is reached by one and every reading
+  // below comes back resolved. Comparing the two forms finds nothing, quietly.
+  const here = await realpath(projectDir).catch(() => projectDir);
+  const inside = (path: string | undefined) =>
+    path !== undefined && (path === here || path.startsWith(`${here}/`));
+  const nameOf = (text: string) => {
     // The environment is NUL-separated in `/proc` and space-separated in `ps`, so this reads the
     // name off either without pretending to parse the whole of it.
     const at = text.indexOf(`${WORKER_ENV}=`);
-    if (at >= 0) workers.add(text.slice(at + WORKER_ENV.length + 1).split(/[\0\s]/)[0]);
+    return at < 0 ? undefined : text.slice(at + WORKER_ENV.length + 1).split(/[\0\s]/)[0];
   };
+  // A tool of this worker's own is accounted for by its own marker, and the git subprocesses the
+  // tree store runs stand in the directory by design. Neither is a writer nobody can account for.
+  const ours = (name: string | undefined) => name === worker;
+
   try {
     if (process.platform === "linux") {
       for (const name of await readdir("/proc")) {
@@ -272,27 +311,60 @@ async function liveHere(): Promise<{ groups: Set<number>; workers: Set<string> }
         const after = stat?.slice(stat.lastIndexOf(")") + 2).split(" ");
         const pgrp = after ? Number.parseInt(after[2], 10) : NaN;
         if (Number.isFinite(pgrp)) groups.add(pgrp);
+        // Readable whoever owns the process, unlike the two below it.
+        const cgroup = await readFile(`/proc/${name}/cgroup`, "utf8").catch(() => undefined);
+        const path = cgroup?.split("\n")[0]?.slice(cgroup.indexOf(":", cgroup.indexOf(":") + 1) + 1);
+        if (path) cgroups.add(path.trim());
         // Readable for this user's processes, which is what a tool of ours is. Anything else is
-        // not something this worker started.
-        found(await readFile(`/proc/${name}/environ`, "utf8").catch(() => ""));
+        // not something this worker started, unless it was started through `sudo`, and that one is
+        // what the cgroup above answers for.
+        const held = nameOf(await readFile(`/proc/${name}/environ`, "utf8").catch(() => ""));
+        if (held !== undefined) workers.add(held);
+        if (ours(held)) continue;
+        const pid = Number.parseInt(name, 10);
+        const cwd = await readlink(`/proc/${name}/cwd`).catch(() => undefined);
+        if (inside(cwd)) {
+          holding.push({ pid, how: "its working directory is in it" });
+          continue;
+        }
+        for (const fd of await readdir(`/proc/${name}/fd`).catch(() => [] as string[])) {
+          const open = await readlink(`/proc/${name}/fd/${fd}`).catch(() => undefined);
+          if (!inside(open)) continue;
+          holding.push({ pid, how: `it holds ${open} open` });
+          break;
+        }
       }
-      return { groups, workers };
+      return { groups, workers, cgroups, holding, ourGroup: await group(), ourCgroup: await cgroup() };
     }
+
     // `-E` prints each process's environment after its command, for the processes this user owns.
-    // Without the name in its own environment: `ps` is a child of this process, so it inherits
-    // whatever we hold, and it would otherwise report itself as work this worker left running.
+    // Without the name in its own environment, and standing somewhere else: `ps` and `lsof` are
+    // children of this process, so they inherit what we hold and where we are, and would otherwise
+    // report themselves as work this worker left behind.
     const { [WORKER_ENV]: _ours, ...env } = process.env;
-    const { stdout } = await execFileAsync("ps", ["-A", "-E", "-o", "pid=,pgid=,command="], {
-      maxBuffer: 32 * 1024 * 1024,
-      env,
-    });
+    const asked = { maxBuffer: 32 * 1024 * 1024, cwd: "/", env };
+    const { stdout } = await execFileAsync("ps", ["-A", "-E", "-o", "pid=,pgid=,command="], asked);
+    const named = new Map<number, string | undefined>();
     for (const line of stdout.split("\n")) {
       const [pid, pgid] = line.trim().split(/\s+/, 2).map((n) => Number.parseInt(n, 10));
-      if (pid === process.pid) continue;
+      if (!Number.isFinite(pid) || pid === process.pid) continue;
       if (Number.isFinite(pgid)) groups.add(pgid);
-      found(line);
+      const held = nameOf(line);
+      if (held !== undefined) workers.add(held);
+      named.set(pid, held);
     }
-    return { groups, workers };
+    // One reading for every process, rather than walking the directory: `lsof +D` stats the whole
+    // tree, and the answer wanted here is about the processes, not about the files.
+    const cwds = await execFileAsync("lsof", ["-a", "-d", "cwd", "-Fpn"], asked).catch(() => undefined);
+    let at: number | undefined;
+    for (const line of cwds?.stdout.split("\n") ?? []) {
+      if (line.startsWith("p")) at = Number.parseInt(line.slice(1), 10);
+      if (!line.startsWith("n") || at === undefined || at === process.pid) continue;
+      if (inside(line.slice(1)) && !ours(named.get(at))) {
+        holding.push({ pid: at, how: "its working directory is in it" });
+      }
+    }
+    return { groups, workers, cgroups, holding, ourGroup: await group(), ourCgroup: await cgroup() };
   } catch {
     return undefined;
   }
@@ -317,6 +389,18 @@ async function readGroup(pid: number): Promise<number | undefined> {
 let ourGroup: Promise<number | undefined> | undefined;
 const group = () => (ourGroup ??= readGroup(process.pid));
 
+// Nor, without asking, the control group it is in. Absent off Linux, where there are none.
+async function readCgroup(): Promise<string | undefined> {
+  if (process.platform !== "linux") return undefined;
+  const text = await readFile("/proc/self/cgroup", "utf8").catch(() => undefined);
+  const line = text?.split("\n")[0];
+  // `<hierarchy>:<controllers>:<path>`, and the path is the part that names the unit or container.
+  return line ? line.slice(line.indexOf(":", line.indexOf(":") + 1) + 1).trim() || undefined : undefined;
+}
+
+let ourCgroup: Promise<string | undefined> | undefined;
+const cgroup = () => (ourCgroup ??= readCgroup());
+
 /** Say a tool call is about to write this directory. `endWrite` says it came back. */
 export async function beginWrite(projectDir: string, writer: Writer): Promise<void> {
   await mkdir(writersDir(projectDir), { recursive: true });
@@ -325,6 +409,7 @@ export async function beginWrite(projectDir: string, writer: Writer): Promise<vo
     host: hostname(),
     pid: process.pid,
     ...((await group()) === undefined ? {} : { pgid: await group() }),
+    ...((await cgroup()) === undefined ? {} : { cgroup: await cgroup() }),
     worker,
     bootAt: bootAt(),
     started: new Date().toISOString(),
@@ -337,48 +422,67 @@ export async function endWrite(projectDir: string, callId: string): Promise<void
 }
 
 /**
- * Whether this marker can still be a tool inside its own execution, which is the only thing the
- * refusal is worth its cost for. Everything here is a reason to stop refusing, never a reason to
- * start: what cannot be answered is answered as still running.
+ * Why this marker can still be a tool inside its own execution, or nothing when it cannot. That is
+ * the only thing the refusal is worth its cost for, and the reason is carried out of here because
+ * an operator is who acts on it.
+ *
+ * Everything here is a reason to stop refusing, never a reason to start: what cannot be answered is
+ * answered as still running.
+ *
+ * Exported for a check, because one of the readings it decides on is Linux's alone and a Mac cannot
+ * produce it. Handing it the reading is the only way to ask it that question there.
  */
-async function maybeInside(
-  note: WriterNote,
-  live: Awaited<ReturnType<typeof liveHere>>,
-): Promise<boolean> {
+export function insideBecause(note: WriterNote, live: LiveHere | undefined): string | undefined {
   // A pid from another machine says nothing here, and two hosts sharing one data directory is the
   // only way to get one. Neither of them can see the other's processes.
-  if (note.host !== hostname()) return true;
+  if (note.host !== hostname()) return `it was written on ${note.host}, and this is ${hostname()}`;
   // Written by a worker that did not date its marker, so there is nothing to tell a live pid from
   // a reused one.
-  if (note.bootAt === undefined) return true;
+  if (note.bootAt === undefined) return "it does not say which boot its pid belongs to";
   // The machine restarted. Nothing it was running came back with it.
-  if (Math.abs(note.bootAt - bootAt()) > SAME_BOOT) return false;
-  if (running(note.pid)) return true;
-  // The writer is gone, and what a tool starts can outlive it. Nothing here is asked of the pids
-  // themselves, which come round again; it is asked of what those processes are carrying.
-  if (live === undefined) return true;
+  if (Math.abs(note.bootAt - bootAt()) > SAME_BOOT) return undefined;
+  if (running(note.pid)) return `pid ${note.pid} is still running`;
+  // The writer is gone, and what a tool starts can outlive it. Nothing below is asked of the pids
+  // themselves, which come round again; it is asked of what those processes carry and where they
+  // stand.
+  if (live === undefined) return "this host could not be asked what is running on it";
   // Anything the worker started, wherever it ended up. A tool that daemonizes leaves the group and
   // keeps the environment, which is why this is the check that decides most cases.
-  if (note.worker !== undefined && live.workers.has(note.worker)) return true;
-  // And the group, for a tool that was given an environment of somebody else's choosing. Only when
-  // this process is somewhere else: a worker restarted from the same shell is in the group its
-  // predecessor was in, and finding ourselves there is not evidence about anything.
-  if (note.pgid !== undefined && note.pgid !== (await group())) return live.groups.has(note.pgid);
-  return false;
+  if (note.worker !== undefined && live.workers.has(note.worker)) {
+    return "something it started is still running";
+  }
+  // The control group, for a tool running as somebody else: `sudo` empties the environment it
+  // passes on and this survives it. Only when the writer was in a group of its own, which a
+  // service manager or a container per worker gives it: in the container this process is in, every
+  // process shares one, and finding ourselves there is not evidence about anything.
+  if (note.cgroup !== undefined && note.cgroup !== live.ourCgroup && live.cgroups.has(note.cgroup)) {
+    return `something is still in ${note.cgroup}`;
+  }
+  // The process group, for a tool that was given an environment of somebody else's choosing. Only
+  // when this process is somewhere else, for the reason above: a worker restarted from the same
+  // shell is in the group its predecessor was in.
+  if (note.pgid !== undefined && note.pgid !== live.ourGroup && live.groups.has(note.pgid)) {
+    return `something is still in process group ${note.pgid}`;
+  }
+  // And last, the directory itself. A tool that left the group and kept nothing the worker gave it
+  // is still standing where it writes, which is the one thing it cannot put down and go on writing.
+  const standing = live.holding[0];
+  return standing ? `pid ${standing.pid} is in the directory: ${standing.how}` : undefined;
 }
 
 // Markers that cannot be a live tool any more are dropped rather than reported: the refusal exists
 // because nothing could prove the tool stopped, so where something can, it stops standing.
-async function writersHere(projectDir: string): Promise<WriterNote[]> {
+async function writersHere(projectDir: string): Promise<(WriterNote & { because: string })[]> {
   const names = await readdir(writersDir(projectDir)).catch(() => [] as string[]);
   if (names.length === 0) return [];
-  const live = await liveHere();
-  const found: WriterNote[] = [];
+  const live = await liveHere(projectDir);
+  const found: (WriterNote & { readonly because: string })[] = [];
   for (const name of names) {
     const path = join(writersDir(projectDir), name);
     const note = await readJson<WriterNote>(path);
     if (!note) continue;
-    if (await maybeInside(note, live)) found.push(note);
+    const because = insideBecause(note, live);
+    if (because !== undefined) found.push({ ...note, because });
     else await rm(path, { force: true });
   }
   return found;
@@ -401,7 +505,8 @@ async function refuseWhenStranded(projectDir: string, current?: Writer): Promise
   throw new Quarantined(
     `not using ${projectDir}: ${stranded.length} tool call(s) from an earlier step never returned ` +
       `(${one.callId} of turn ${one.turn} step ${one.step}, pid ${one.pid} on ${one.host}, started ` +
-      `${one.started}). Stop them, then clear it with \`pi-temporal release-tree ${projectDir}\`.`,
+      `${one.started}). Still refused because ${one.because}. Stop it, then clear the directory ` +
+      `with \`pi-temporal release-tree ${projectDir}\`.`,
   );
 }
 
