@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ApplicationFailure } from "@temporalio/common";
@@ -197,6 +197,25 @@ async function main() {
   await ended(escaped);
   check("and that one releases the directory too", await usable());
 
+  // A tool that leaves the group and is handed an environment of somebody else's choosing has put
+  // down everything the worker gave it. What it cannot put down and go on writing is the directory
+  // it writes, so that is the last reading, and it is the one that does not depend on the tool
+  // having kept anything.
+  const standing = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+    cwd: project,
+    env: { PATH: process.env.PATH ?? "" },
+  });
+  kids.push(standing);
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ ...stale, worker: "nothing-carries-this" });
+  check("a tool standing in the directory keeps it refused, whatever it put down", !(await usable()));
+  const said = await worktree.ensure(project, sessionFile, later).then(() => "", (err) => String(err));
+  check("and the refusal says which process and why", said.includes(`pid ${standing.pid} is in the directory`), said.slice(0, 200));
+  await ended({ child: standing, pid: standing.pid!, pgid: standing.pid! });
+  check("and releases it when that process leaves", await usable());
+
   // The name has to reach the tool, not only the marker, or none of the above is about anything
   // that runs here. This child is given no environment of its own, so the only way it can carry
   // the name is that the worker put it where a child would inherit it.
@@ -215,6 +234,39 @@ async function main() {
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...stale, pgid: await ourGroup() });
   check("a marker from a predecessor in this process's own group clears itself", await usable());
+
+  // The control group is Linux's, and a tool keeps it through `setsid` and through `sudo`, which
+  // empties the environment it passes on. A Mac has no such thing to read, so the rule is asked on
+  // its own, with the reading a Linux host would have made handed to it.
+  const readings = {
+    groups: new Set<number>(), workers: new Set<string>(), holding: [],
+    ourGroup: await ourGroup(), ourCgroup: "/the-one-this-process-is-in",
+  };
+  const dead = {
+    turn: "turn-3", step: 1, callId: "call-d", host: hostname(), pid: gone.pid,
+    // The stamp the module compares against, not the wall clock: a marker dated now would read as
+    // one from before a restart and never reach the rule this is about.
+    bootAt: Math.round(Date.now() - uptime() * 1000), started: new Date().toISOString(),
+  };
+  const inCgroup = (note: Record<string, unknown>, live: string[]) =>
+    worktree.insideBecause(
+      { ...dead, ...note } as Parameters<typeof worktree.insideBecause>[0],
+      { ...readings, cgroups: new Set(live) },
+    );
+  check(
+    "a writer whose control group still holds something keeps the directory refused",
+    inCgroup({ cgroup: "/system.slice/pi-worker-1.service" }, ["/system.slice/pi-worker-1.service"])
+      ?.includes("still in /system.slice/pi-worker-1.service") === true,
+  );
+  check(
+    "an empty one releases it",
+    inCgroup({ cgroup: "/system.slice/pi-worker-1.service" }, ["/system.slice/pi-worker-2.service"]) ===
+      undefined,
+  );
+  check(
+    "and the group this process is in says nothing either way",
+    inCgroup({ cgroup: readings.ourCgroup }, [readings.ourCgroup]) === undefined,
+  );
 
   // A pid means nothing across a restart, so a marker from before one is not read as a live writer.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
