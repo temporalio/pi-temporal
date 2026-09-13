@@ -30,7 +30,9 @@ export interface TurnState {
     readonly promptId: string;
     // "interrupted" is the user pressing stop. A turn that died for any other reason is "failed",
     // because reporting a crash as a stop tells whoever is watching that they did it.
-    readonly outcome: "answered" | "interrupted" | "failed" | "ceiling";
+    // "budget" is the operator's bound reached, which is neither a failure nor somebody pressing
+    // stop: the turn is left where it got to and the session takes the next prompt.
+    readonly outcome: "answered" | "interrupted" | "failed" | "ceiling" | "budget";
     // What went wrong, when something did. The session log holds the detail; this is for a
     // client that is only reading turnState.
     readonly error?: string;
@@ -58,6 +60,16 @@ export interface RunStepInput extends PromptInput {
   readonly step: number;
 }
 
+/** What one unit of work cost, as the session's own accounting reports it. Reported per activity
+ * rather than as a running total, because the workflow is what adds them up: the session file is
+ * shared, so a total read from it includes turns this one did not run. */
+export interface Spend {
+  readonly tokens: number;
+  // What the session priced those tokens at. Reported where the host knows it, so an operator
+  // reading a stopped turn sees the number they care about rather than a proxy for it.
+  readonly cost?: number;
+}
+
 export interface RunStepResult {
   // Whether the turn is finished. False means the workflow schedules another step.
   readonly done: boolean;
@@ -66,6 +78,8 @@ export interface RunStepResult {
   readonly retryAttempt: number;
   // The assistant's final text, once the turn is done (the log is the truth; this is a courtesy).
   readonly finalText: string;
+  // What this step spent, for the turn's budget. Absent when the session cannot say.
+  readonly spent?: Spend;
 }
 
 export interface SessionTurnOptions {
@@ -91,6 +105,10 @@ export interface SessionTurnOptions {
   // prompt (the extension's `/background` does) otherwise never sees the answer: the new run starts
   // with nothing finished, and the watcher gives up when the session retires.
   readonly finished?: TurnState["finished"];
+  // What one turn may spend before the workflow stops driving it. Off unless an operator sets it:
+  // a bound that ends real work is worse than none, and only the operator knows which is which.
+  // The step ceiling above is not this. It is a runaway guard with a fixed number; this is policy.
+  readonly budget?: TurnBudget;
   // Roll over at this many history events, on top of the server's own suggestion. The suggestion is
   // what production runs on; this is for an operator who wants a tighter bound, and it is what
   // makes the rollover reachable in a check.
@@ -122,6 +140,9 @@ export interface ModelCallResult {
   // pinned sibling has settled. An attempt that started and failed may still have a tool writing
   // that directory, and nothing here can see it.
   readonly queue?: string;
+  // What the model call spent. The tools and the seal cost nothing at the provider unless the seal
+  // compacts, which is a model call of its own and reports its own.
+  readonly spent?: Spend;
 }
 
 export interface ToolCallInput {
@@ -166,6 +187,24 @@ export interface SealStepInput {
   // an unknown outcome, because a step that leaves one unanswered leaves a transcript no
   // provider accepts.
   readonly calls: readonly DeferredToolCall[];
+}
+
+/**
+ * What a turn may spend. Enforced between steps, never inside one: a step that has started is left
+ * to finish, because stopping it would leave a tool call the transcript cannot be made from.
+ *
+ * This is what the workflow having the loop buys. The agent is not asked to keep to it, and cannot
+ * be: the model decides what to ask for, and the thing that says no has to be somewhere the model
+ * does not reach.
+ */
+export interface TurnBudget {
+  // Wall clock for the whole turn, in seconds, measured with the workflow's own clock so it reads
+  // the same on a replay. A number rather than a duration string like the timeouts above it: the
+  // parser for those lives outside what a workflow bundle should be reaching for, and a budget
+  // nobody can be sure of the units of is worse than one that says them.
+  readonly seconds?: number;
+  // Tokens the turn's model calls may spend, added up as each one reports.
+  readonly tokens?: number;
 }
 
 // A turn that never stops stepping is a bug (a model looping on the same tool, say), and the

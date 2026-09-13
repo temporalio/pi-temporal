@@ -216,14 +216,42 @@ export async function piSession(
           await adoptProject({ sessionFile: file, template: options.template });
           projectAdopted = true;
         }
+        // What this turn has spent, and when it started spending it. Both are workflow state: the
+        // session file is shared, so its own totals include turns this workflow never ran, and
+        // `Date.now()` here is the workflow's clock, which reads the same on a replay.
+        const startedAt = Date.now();
+        let tokens = 0;
+        let cost = 0;
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
           const input: RunStepInput = { sessionId: id, sessionFile: file, step, retryAttempt, ...prompt };
           const result = await runTurnStep(input);
           retryAttempt = result.retryAttempt;
+          tokens += result.spent?.tokens ?? 0;
+          cost += result.spent?.cost ?? 0;
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;
+            return;
+          }
+          // Between steps, never inside one. A step that has started is left to finish: stopping it
+          // would leave a call in the transcript that no result answers, which is a payload no
+          // provider accepts, and the next turn of this session would fail rather than this one.
+          const spent = (Date.now() - startedAt) / 1000;
+          const over =
+            (options?.budget?.tokens !== undefined && tokens > options.budget.tokens) ||
+            (options?.budget?.seconds !== undefined && spent > options.budget.seconds);
+          if (over && patched("a-turn-has-a-budget")) {
+            outcome = "budget";
+            log.warn("turn stopped where it was: it is out of budget", {
+              sessionId: id,
+              promptId: prompt.promptId,
+              step,
+              tokens,
+              cost,
+              seconds: Math.round(spent),
+              budget: options?.budget,
+            });
             return;
           }
         }
