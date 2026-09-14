@@ -565,6 +565,47 @@ const isClosed = async (sessionFile: string, fence: Fence) =>
     (c) => c.turn === fence.turn && c.step === fence.step,
   );
 
+/**
+ * Move a refused directory out of the way, so the session can have a fresh one here. What this is
+ * for is the writer nothing can account for: it keeps writing the directory it already has open,
+ * which is now somewhere else, and nothing it does can reach what the session builds next. That is
+ * the whole of the problem the readings above only narrow, and it costs a rename.
+ *
+ * Refused itself in three cases. A directory this session did not build out of an empty one is
+ * somebody's checkout, and moving it is not ours to do. A directory holding a call of the step now
+ * asking for it has one of our own tools inside, and moving it would take the floor out from under
+ * that. And a mount point cannot be renamed at all, which is what a project directory mounted as a
+ * volume is: there the refusal stands, and an operator is what it needs.
+ *
+ * Returns where it went, for whoever has to look at what the tool left.
+ */
+async function moveAside(
+  projectDir: string,
+  sessionFile: string,
+  current?: Writer,
+): Promise<string | undefined> {
+  const held = await readJson<Held>(heldPath(projectDir, sessionFile));
+  if (!held?.built) return undefined;
+  if (current) {
+    const here = await writersHere(projectDir);
+    if (here.some((note) => note.turn === current.turn && note.step === current.step)) return undefined;
+  }
+  const moved = `${projectDir}.stranded.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  try {
+    await rename(projectDir, moved);
+  } catch {
+    // A mount point, or a directory this process may not move. Nothing has changed, so the caller
+    // refuses as it did before.
+    return undefined;
+  }
+  await mkdir(projectDir, { recursive: true });
+  // Both are about the directory that just moved: the note says what it held, and the markers say
+  // who was inside it. The one here now is empty and nobody is in it.
+  await rm(heldPath(projectDir, sessionFile), { force: true });
+  await rm(writersDir(projectDir), { recursive: true, force: true });
+  return moved;
+}
+
 /** Clear the refusal, for an operator who has stopped whatever was left running. */
 export async function clearWriters(projectDir: string): Promise<number> {
   const stranded = await writersHere(projectDir);
@@ -830,7 +871,21 @@ export async function ensure(projectDir: string, sessionFile: string, current?: 
   await withTreeLocks(projectDir, sessionFile, async () => {
     // Before anything is written or checked out. A restore is what brings this host to the tip, and
     // doing that under an abandoned writer is what makes its next capture look current.
-    await refuseWhenStranded(projectDir, current);
+    //
+    // Where the directory can be moved out of the way, that is what happens instead of refusing:
+    // the writer nobody can account for goes on writing the directory it has open, at its new name,
+    // and the session builds a fresh one here. That is a closure rather than a narrowing, and it is
+    // why the readings the refusal rests on do not have to be conclusive.
+    await refuseWhenStranded(projectDir, current).catch(async (err: unknown) => {
+      if (!(err instanceof Quarantined)) throw err;
+      const moved = await moveAside(projectDir, sessionFile, current);
+      if (moved === undefined) throw err;
+      console.warn(
+        `moved ${projectDir} to ${moved}: a tool call from an earlier step never came back and ` +
+          `this host cannot show it stopped. What it wrote is there; nothing it does now reaches ` +
+          `the directory this session builds next.`,
+      );
+    });
     await revive(sessionFile);
     // Read inside the lock. A capture on this host between the read and the lock would leave this
     // deciding against a tip that has already moved, and resetting the directory to the older tree.
