@@ -33,6 +33,9 @@ export interface TurnState {
     // "budget" is the operator's bound reached, which is neither a failure nor somebody pressing
     // stop: the turn is left where it got to and the session takes the next prompt.
     readonly outcome: "answered" | "interrupted" | "failed" | "ceiling" | "budget";
+    // What the session has spent by the time this turn ended, for a client that wants to show it
+    // or an operator asking why a turn stopped.
+    readonly spent?: Spent;
     // What went wrong, when something did. The session log holds the detail; this is for a
     // client that is only reading turnState.
     readonly error?: string;
@@ -101,6 +104,9 @@ export interface SessionTurnOptions {
   // What a run that rolled over was still holding. The queue is the whole of the control state, so
   // handing it to the next run is what makes the rollover invisible to a client.
   readonly queued?: readonly PromptInput[];
+  // What the session has spent, carried across a rollover for the same reason the queue is: a
+  // session that rolled over has not started again.
+  readonly spent?: Spent;
   // What the last turn came to, carried across a rollover. A client polling `turnState` for its own
   // prompt (the extension's `/background` does) otherwise never sees the answer: the new run starts
   // with nothing finished, and the watcher gives up when the session retires.
@@ -205,6 +211,21 @@ export interface TurnBudget {
   readonly seconds?: number;
   // Tokens the turn's model calls may spend, added up as each one reports.
   readonly tokens?: number;
+  // And the same two for the session, across every turn it runs. A per-turn bound says what one
+  // answer may cost; this says what the whole session may, which is the number somebody is billed
+  // for. Carried across a rollover, so a session does not get its allowance back by outgrowing a
+  // run's history.
+  readonly sessionSeconds?: number;
+  readonly sessionTokens?: number;
+}
+
+/** What a session has spent so far, carried between runs of its workflow. */
+export interface Spent {
+  readonly tokens: number;
+  readonly cost: number;
+  // Wall clock the session's turns have used, rather than how long the session has existed: a
+  // session sitting idle overnight has spent nothing.
+  readonly seconds: number;
 }
 
 // A turn that never stops stepping is a bug (a model looping on the same tool, say), and the

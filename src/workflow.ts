@@ -125,10 +125,13 @@ export async function piSession(
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   // Same loop either way. Only what "one step" means differs, so wake, interrupt, the step
   // ceiling and idle retirement are unchanged.
+  // Set per turn, because what it reads is that turn's own spend. The step driver is built once.
+  let outOfBudget = (): boolean => false;
   const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
     ? makeSteppedStep({
         activities: { runModelCall, runToolCall, sealStep },
         isCancellation,
+        outOfBudget: () => outOfBudget(),
         pinnedTo,
         isUnclaimed,
         // False only while replaying a history written before this rule existed. See the dep.
@@ -150,6 +153,13 @@ export async function piSession(
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
   let finished: TurnState["finished"] = options?.finished;
+  // What this session has spent, across every turn it has run, carried in from the run that rolled
+  // over. A session does not get its allowance back by outgrowing a run's history.
+  const spent: { tokens: number; cost: number; seconds: number } = {
+    tokens: options?.spent?.tokens ?? 0,
+    cost: options?.spent?.cost ?? 0,
+    seconds: options?.spent?.seconds ?? 0,
+  };
 
   setHandler(submitPrompt, (p) => {
     queue.push(p);
@@ -197,6 +207,7 @@ export async function piSession(
         template: projectAdopted ? undefined : options?.template,
         queued: queue,
         finished,
+        spent,
       });
     }
 
@@ -207,6 +218,12 @@ export async function piSession(
     // The step's retry budget, kept here because the session that would count it is rebuilt per
     // activity and the transcript it could be read off is something a compaction rewrites.
     let retryAttempt = 0;
+    // At the turn's scope, not the step's: what a turn spent has to be there for the `finally`
+    // below, which runs whether the turn answered, failed or was stopped. The provider billed for
+    // it either way.
+    const startedAt = Date.now();
+    let tokens = 0;
+    let cost = 0;
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
@@ -219,9 +236,21 @@ export async function piSession(
         // What this turn has spent, and when it started spending it. Both are workflow state: the
         // session file is shared, so its own totals include turns this workflow never ran, and
         // `Date.now()` here is the workflow's clock, which reads the same on a replay.
-        const startedAt = Date.now();
-        let tokens = 0;
-        let cost = 0;
+        // A step that crosses a bound is the last one the workflow drives, and the one already in
+        // flight is left to finish. Handing this to the step lets it stop dispatching the rest of a
+        // batch instead, which is the difference between overshooting by a step and overshooting by
+        // whatever is running.
+        outOfBudget = () => {
+          const b = options?.budget;
+          if (!b) return false;
+          const turnSeconds = (Date.now() - startedAt) / 1000;
+          return (
+            (b.tokens !== undefined && tokens > b.tokens) ||
+            (b.seconds !== undefined && turnSeconds > b.seconds) ||
+            (b.sessionTokens !== undefined && spent.tokens + tokens > b.sessionTokens) ||
+            (b.sessionSeconds !== undefined && spent.seconds + turnSeconds > b.sessionSeconds)
+          );
+        };
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
           const input: RunStepInput = { sessionId: id, sessionFile: file, step, retryAttempt, ...prompt };
@@ -234,22 +263,18 @@ export async function piSession(
             finalText = result.finalText;
             return;
           }
-          // Between steps, never inside one. A step that has started is left to finish: stopping it
-          // would leave a call in the transcript that no result answers, which is a payload no
-          // provider accepts, and the next turn of this session would fail rather than this one.
-          const spent = (Date.now() - startedAt) / 1000;
-          const over =
-            (options?.budget?.tokens !== undefined && tokens > options.budget.tokens) ||
-            (options?.budget?.seconds !== undefined && spent > options.budget.seconds);
-          if (over && patched("a-turn-has-a-budget")) {
+          // Between steps, and inside one only as far as refusing to dispatch what has not started.
+          // A call that has started is left to finish: stopping it would leave a call in the
+          // transcript that no result answers, which is a payload no provider accepts, and the next
+          // turn of this session would fail rather than this one.
+          if (outOfBudget() && patched("a-turn-has-a-budget")) {
             outcome = "budget";
             log.warn("turn stopped where it was: it is out of budget", {
               sessionId: id,
               promptId: prompt.promptId,
               step,
-              tokens,
-              cost,
-              seconds: Math.round(spent),
+              turn: { tokens, cost, seconds: Math.round((Date.now() - startedAt) / 1000) },
+              session: { tokens: spent.tokens + tokens, cost: spent.cost + cost },
               budget: options?.budget,
             });
             return;
@@ -276,7 +301,12 @@ export async function piSession(
     } finally {
       current = undefined;
       running = undefined;
-      finished = { promptId: prompt.promptId, outcome, finalText, error };
+      // Added up here rather than per step, so a turn that failed or was interrupted still counts
+      // what it spent: the provider billed for it either way.
+      spent.tokens += tokens;
+      spent.cost += cost;
+      spent.seconds += (Date.now() - startedAt) / 1000;
+      finished = { promptId: prompt.promptId, outcome, finalText, error, spent: { ...spent } };
     }
   }
 }

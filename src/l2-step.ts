@@ -52,6 +52,10 @@ export interface SteppedStepDeps {
   // Run the seal even though the turn was cancelled. Calls that finished have real results kept
   // for them, and abandoning the step tells the model they may have taken effect instead.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
+  // Whether the turn has spent what it was allowed. Asked between the calls of a batch that runs
+  // one at a time, so a bound stops the rest of a step rather than only the next one. A call that
+  // has started is never stopped: its result is what the transcript needs.
+  readonly outOfBudget?: () => boolean;
   // The workflow's logger, so what a step could not settle is said where an operator reads about
   // the turn. History records an activity that succeeded; only the dispatch knows what it decided.
   readonly log?: (message: string, attributes: Record<string, unknown>) => void;
@@ -82,7 +86,7 @@ export async function dispatchStepCalls(
   step: number,
   model: StepCalls,
   runToolCall: (call: DeferredToolCall) => Promise<ToolCallResult>,
-  deps: Pick<SteppedStepDeps, "isCancellation" | "log">,
+  deps: Pick<SteppedStepDeps, "isCancellation" | "log" | "outOfBudget">,
 ): Promise<unknown> {
   // Errors are carried rather than thrown, so one call that ran out of retries does not leave its
   // siblings' promises rejecting with nobody to catch them.
@@ -98,11 +102,20 @@ export async function dispatchStepCalls(
   const dispatched: Dispatched[] = [];
   if (!model.ended) {
     if (model.sequential) {
-      // A tool of this step says the batch runs in order, and an interrupt stops the rest of it.
+      // A tool of this step says the batch runs in order, and an interrupt stops the rest of it. So
+      // does running out of budget: the calls left are ones nothing has started, and a bound that
+      // waits for the whole batch is a bound the batch decides.
       for (const call of model.calls) {
         const outcome = await dispatch(call);
         dispatched.push(outcome);
         if (outcome.error !== undefined && deps.isCancellation(outcome.error)) break;
+        if (deps.outOfBudget?.()) {
+          deps.log?.("stopped dispatching the rest of this step: the turn is out of budget", {
+            step,
+            left: model.calls.length - dispatched.length,
+          });
+          break;
+        }
       }
     } else {
       dispatched.push(...(await Promise.all(model.calls.map(dispatch))));
