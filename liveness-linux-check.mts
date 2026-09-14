@@ -126,6 +126,13 @@ async function main() {
   await editMarker({ ...stale, cgroup: note.cgroup });
   check("a marker naming the group this process is in still clears", await usable());
 
+  // And whether this host could move that directory out of the way at all, which is the difference
+  // between a stranded tool costing a directory and costing it until somebody comes. The reading is
+  // a prediction for an operator; what decides is the rename. Both cases exist on any Linux host.
+  check("a plain directory can be set aside", (await worktree.cannotMoveAside(project)) === undefined);
+  const mounted = await worktree.cannotMoveAside("/proc");
+  check("a mount point cannot, and says so", mounted?.includes("mount point") === true, mounted);
+
   await rm(root, { recursive: true, force: true });
   console.log(failures.length === 0 ? "liveness-linux-check: OK" : `liveness-linux-check: ${failures.length} failed`);
   process.exitCode = failures.length === 0 ? 0 : 1;

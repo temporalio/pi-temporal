@@ -8,6 +8,7 @@
 import {
   patched,
   proxyActivities,
+  sleep,
   defineSignal,
   defineQuery,
   setHandler,
@@ -26,6 +27,7 @@ import type {
   RunStepInput,
   RunStepResult,
   SessionTurnOptions,
+  Spend,
   TurnState,
 } from "./protocol.js";
 import { makeSteppedStep, type SteppedActivities } from "./l2-step.js";
@@ -224,9 +226,27 @@ export async function piSession(
     const startedAt = Date.now();
     let tokens = 0;
     let cost = 0;
+    // What the record says the session has been billed, as of the last step that reported it. The
+    // count this workflow keeps is about a run; this one is about the session, and it is the one a
+    // session's own bound is measured against wherever the host can say it.
+    let recorded: Spend | undefined;
+    // Whether what cancelled this turn was its own deadline rather than somebody pressing stop.
+    let deadline = false;
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
+        // A deadline that ends the turn where it is, rather than at the next place it can stop.
+        // The timer lives in this scope, so a turn that finishes first cancels it on the way out
+        // and the rejection that follows is the scope's own.
+        if (options?.budget?.hardSeconds !== undefined && patched("a-turn-has-a-budget")) {
+          sleep(options.budget.hardSeconds * 1000).then(
+            () => {
+              deadline = true;
+              current?.cancel();
+            },
+            () => undefined,
+          );
+        }
         if (!projectAdopted && options?.template) {
           // Initialization is part of the turn, so stop and query apply while it waits.
           running = { promptId: prompt.promptId, step: 0 };
@@ -247,7 +267,8 @@ export async function piSession(
           return (
             (b.tokens !== undefined && tokens > b.tokens) ||
             (b.seconds !== undefined && turnSeconds > b.seconds) ||
-            (b.sessionTokens !== undefined && spent.tokens + tokens > b.sessionTokens) ||
+            (b.sessionTokens !== undefined &&
+              (recorded?.tokens ?? spent.tokens + tokens) > b.sessionTokens) ||
             (b.sessionSeconds !== undefined && spent.seconds + turnSeconds > b.sessionSeconds)
           );
         };
@@ -258,6 +279,7 @@ export async function piSession(
           retryAttempt = result.retryAttempt;
           tokens += result.spent?.tokens ?? 0;
           cost += result.spent?.cost ?? 0;
+          recorded = result.total ?? recorded;
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;
@@ -274,7 +296,8 @@ export async function piSession(
               promptId: prompt.promptId,
               step,
               turn: { tokens, cost, seconds: Math.round((Date.now() - startedAt) / 1000) },
-              session: { tokens: spent.tokens + tokens, cost: spent.cost + cost },
+              session: recorded ?? { tokens: spent.tokens + tokens, cost: spent.cost + cost },
+              recorded: recorded !== undefined,
               budget: options?.budget,
             });
             return;
@@ -291,7 +314,14 @@ export async function piSession(
       // run error is already recorded in the session log, so we log-and-continue rather than fail
       // the whole session.
       if (isCancellation(err)) {
-        outcome = "interrupted";
+        outcome = deadline ? "budget" : "interrupted";
+        if (deadline) {
+          log.warn("turn stopped where it was: its deadline passed", {
+            sessionId: id,
+            promptId: prompt.promptId,
+            seconds: options?.budget?.hardSeconds,
+          });
+        }
       } else {
         // A step that exhausted its retries, or blew its ceiling, is not somebody pressing stop.
         outcome = "failed";

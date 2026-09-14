@@ -30,6 +30,9 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 
 /** One step, as expensive and as slow as the case wants, and never finished unless it says so. */
 const steps = new Map<string, number>();
+// What the record says each session has been billed, which is the thing a workflow cannot keep: it
+// outlives the run, the way the session file does.
+const recorded = new Map<string, number>();
 let tokensPerStep = 0;
 let secondsPerStep = 0;
 let answerAfter = Number.POSITIVE_INFINITY;
@@ -39,11 +42,14 @@ const activities = {
     const taken = (steps.get(input.promptId) ?? 0) + 1;
     steps.set(input.promptId, taken);
     if (secondsPerStep) await sleep(secondsPerStep * 1000);
+    const billed = (recorded.get(input.sessionFile) ?? 0) + tokensPerStep;
+    recorded.set(input.sessionFile, billed);
     return {
       done: taken >= answerAfter,
       retryAttempt: 0,
       finalText: taken >= answerAfter ? "answered" : "",
       spent: { tokens: tokensPerStep, cost: tokensPerStep / 1000 },
+      total: { tokens: billed, cost: billed / 1000 },
     };
   },
   async retireSession() {},
@@ -69,13 +75,18 @@ async function main() {
   // fresh id per call is a fresh session, which is what the per-turn cases want. The session cases
   // keep the run alive between turns: what a session has spent is this run's state, so a session
   // that goes idle and is woken again later starts a new run and counts from zero.
-  const turn = async (budget: SessionTurnOptions["budget"], session?: string) => {
+  const turn = async (
+    budget: SessionTurnOptions["budget"],
+    session?: string,
+    // Which run drives it, so a case can put two turns of one session in one run or in two.
+    run = session,
+  ) => {
     const promptId = randomUUID();
     const began = Date.now();
     const handle = await client.workflow.signalWithStart("piSession", {
-      workflowId: session ?? `${queue}-${promptId}`,
+      workflowId: run ?? `${queue}-${promptId}`,
       taskQueue: queue,
-      args: [session ?? promptId, `/unused/${promptId}.jsonl`, {
+      args: [session ?? promptId, session ?? `/unused/${promptId}.jsonl`, {
         idleTimeout: session ? "60 seconds" : "100 milliseconds",
         budget,
       } satisfies SessionTurnOptions as never],
@@ -124,6 +135,35 @@ async function main() {
     check("a later turn of that session is stopped by what the session has spent", second.finished?.outcome === "budget", second.finished);
     check("and the session's total is what it was measured against", (second.finished?.spent?.tokens ?? 0) >= 250, second.finished?.spent);
 
+    // And it is the record that answers, not the run. A session that went idle and was woken again
+    // is a fresh workflow with an empty count of its own; what it has been billed is in the session,
+    // and the host reports it.
+    answerAfter = 2;
+    const woken = `${queue}-woken-session`;
+    const firstRun = await turn({ sessionTokens: 250 }, woken, `${woken}-run-1`);
+    check("a turn of a fresh session answers", firstRun.finished?.outcome === "answered", firstRun.finished);
+    const secondRun = await turn({ sessionTokens: 250 }, woken, `${woken}-run-2`);
+    check(
+      "and a later run of that session is bounded by what the record says it spent",
+      secondRun.finished?.outcome === "budget",
+      secondRun.finished,
+    );
+
+    // And a deadline, which stops the turn where it is rather than where it can. A step that has
+    // started is left alone by every bound above; this one is what a user pressing stop does, and
+    // it is the only way a turn does not overshoot by whatever was running.
+    answerAfter = Number.POSITIVE_INFINITY;
+    tokensPerStep = 0;
+    secondsPerStep = 5;
+    const hard = await turn({ hardSeconds: 2 });
+    check("a turn past its deadline is stopped where it is", hard.finished?.outcome === "budget", hard.finished);
+    check(
+      "inside the step that was running, not after it",
+      hard.ran < 5_000,
+      { ran: hard.ran, steps: hard.taken },
+    );
+    secondsPerStep = 1;
+
     // Wall clock, with the same shape: the step that crosses it is the last one.
     answerAfter = Number.POSITIVE_INFINITY;
     tokensPerStep = 0;
@@ -135,10 +175,9 @@ async function main() {
     // business; that it did not stop early is.
     check("and not before it has spent it", late.taken >= 2 && late.ran >= 2_000, late);
   } finally {
-    await client.workflow
-      .getHandle(`${queue}-session-budget`)
-      .terminate()
-      .catch(() => undefined);
+    for (const id of [`${queue}-session-budget`, `${queue}-woken-session-run-1`, `${queue}-woken-session-run-2`]) {
+      await client.workflow.getHandle(id).terminate().catch(() => undefined);
+    }
     worker.shutdown();
     await running.catch(() => undefined);
     await connection.close();

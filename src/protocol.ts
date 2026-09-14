@@ -83,6 +83,11 @@ export interface RunStepResult {
   readonly finalText: string;
   // What this step spent, for the turn's budget. Absent when the session cannot say.
   readonly spent?: Spend;
+  // And what the session has been billed in total, which is what the session's own bound is about.
+  // Read off the record rather than added up here, so it survives everything the workflow does not:
+  // a run that rolled over, a session that went idle and was woken again, a turn some other client
+  // ran against the same file. Absent when the session cannot say.
+  readonly total?: Spend;
 }
 
 export interface SessionTurnOptions {
@@ -149,6 +154,8 @@ export interface ModelCallResult {
   // What the model call spent. The tools and the seal cost nothing at the provider unless the seal
   // compacts, which is a model call of its own and reports its own.
   readonly spent?: Spend;
+  // What the session has been billed in total, as the record holds it. See `RunStepResult`.
+  readonly total?: Spend;
 }
 
 export interface ToolCallInput {
@@ -211,10 +218,17 @@ export interface TurnBudget {
   readonly seconds?: number;
   // Tokens the turn's model calls may spend, added up as each one reports.
   readonly tokens?: number;
+  // Wall clock again, but as a deadline rather than a bound checked between units of work. At
+  // `seconds` the turn stops where it can; at this one it stops where it is, which is what a user
+  // pressing stop does: the calls that have results keep them, the ones in flight come back to the
+  // model as outcomes nobody can vouch for, and the tools over there keep running until they are
+  // done. Nothing else here abandons work, so this is opt-in on top of the bound above.
+  readonly hardSeconds?: number;
   // And the same two for the session, across every turn it runs. A per-turn bound says what one
   // answer may cost; this says what the whole session may, which is the number somebody is billed
-  // for. Carried across a rollover, so a session does not get its allowance back by outgrowing a
-  // run's history.
+  // for. Measured against what the session's own record says it has been billed, where the host
+  // reports that, so it survives a rollover, an idle retirement, and anything else that runs the
+  // session. Where it does not, the workflow's own count is used and carried across a rollover.
   readonly sessionSeconds?: number;
   readonly sessionTokens?: number;
 }
