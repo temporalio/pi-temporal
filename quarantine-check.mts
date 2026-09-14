@@ -351,6 +351,51 @@ async function main() {
   );
   await worktree.clearWriters(project);
 
+  // And the directory the session built for itself is not refused at all: it is moved out of the
+  // way, and the session gets a fresh one here. The writer nobody can account for goes on writing
+  // the directory it has open, under its new name, where nothing it does reaches what comes next.
+  // That is the case the readings above cannot close, and it costs a rename.
+  const built = join(root, "built-here");
+  await mkdir(built, { recursive: true });
+  await worktree.ensure(built, sessionFile);
+  check("a host builds an empty directory for the session", (await readdir(built)).includes("README.md"));
+  await worktree.beginWrite(built, { turn: "turn-10", step: 1, callId: "call-i" });
+  await writeFile(join(built, "written-by-the-stranded-tool.txt"), "still writing\n");
+  let movedOn = true;
+  await worktree
+    .ensure(built, sessionFile, { turn: "turn-11", step: 1, callId: "call-j" })
+    .catch(() => {
+      movedOn = false;
+    });
+  check("a directory this session built is moved aside rather than refused", movedOn);
+  const movedTo = (await readdir(root)).filter((name) => name.startsWith("built-here.stranded."));
+  check("and what the tool wrote is where somebody can find it", movedTo.length === 1, movedTo);
+  check(
+    "which is not where the session is now",
+    (await readdir(join(root, movedTo[0] ?? "nowhere")).catch(() => [] as string[])).includes(
+      "written-by-the-stranded-tool.txt",
+    ) && !(await readdir(built)).includes("written-by-the-stranded-tool.txt"),
+  );
+  check("the fresh one holds what the session shipped", (await readdir(built)).includes("README.md"));
+  check("and no marker is left on it", (await markers()).length === 0);
+
+  // And never while one of this step's own tools is inside it: moving the directory then would take
+  // the floor out from under a call that is running and accounted for.
+  await worktree.beginWrite(built, { turn: "turn-12", step: 1, callId: "call-k" });
+  await worktree.beginWrite(built, { turn: "turn-13", step: 1, callId: "call-l" });
+  let movedUnderOurOwn = true;
+  await worktree
+    .ensure(built, sessionFile, { turn: "turn-13", step: 1, callId: "call-m" })
+    .catch(() => {
+      movedUnderOurOwn = false;
+    });
+  check("a directory holding one of this step's own calls is refused, not moved", !movedUnderOurOwn);
+  check(
+    "and it stays where it is",
+    (await readdir(root)).filter((name) => name.startsWith("built-here.stranded.")).length === 1,
+  );
+  await worktree.clearWriters(built);
+
   // The file the stranded tool wrote is still there. Quarantine refuses reuse; it does not throw
   // away what the tool did, which is the other half of not losing work.
   await writeFile(join(project, "late.txt"), "written by the stranded tool\n");
