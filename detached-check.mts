@@ -181,7 +181,15 @@ async function main() {
   const died = await killWorker(workerA, workerA.pid ? [workerA.pid] : []);
   // Asked of the OS by pattern, not only of the pid we hold: the whole point of the next step is
   // that nothing of worker A is left that could finish this turn itself.
-  const left = (await workerPids()).filter((pid) => !idle.includes(pid));
+  //
+  // Waited for rather than sampled. A process that has been signalled is listed until it is reaped,
+  // and a single reading catches one on its way out and calls it a survivor.
+  let left = await workerPids();
+  for (let i = 0; i < 40 && left.some((pid) => !idle.includes(pid)); i++) {
+    await sleep(250);
+    left = await workerPids();
+  }
+  left = left.filter((pid) => !idle.includes(pid));
   check("worker A is really gone", died && left.length === 0, { died, left });
 
   // --- 3. a worker that never saw this session picks the step up
