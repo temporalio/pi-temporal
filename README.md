@@ -542,7 +542,10 @@ The following checks need no model key:
   tool at all.
 - `docker/liveness-check.sh` asks those same questions inside a container, because the readings
   are made from `/proc` on Linux and from `ps` and `lsof` everywhere else, and a laptop only ever
-  runs the second. It needs neither a server nor a key.
+  runs the second. It needs neither a server nor a key. Both container checks build the image
+  every run and refuse to start when `.fork/pi` is not the commit `fork.pin` names, or has
+  uncommitted changes: the driver's source is mounted over the image, the fork is not, so a
+  checkout left behind would be built in and read as current.
 - `lost-host-check.mts` closes a step without its host, then lets the abandoned
   tool finish and try to publish. It uses fake activities and the real tree store,
   and asserts the turn is handed back rather than ended.
