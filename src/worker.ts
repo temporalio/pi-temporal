@@ -12,6 +12,20 @@ async function main() {
   const projectDir = process.env.PI_PROJECT_DIR ?? process.cwd();
 
   for (const note of notes(cfg)) console.log(`  note: ${note}`);
+  // Said here rather than in `preflight`, because it is about this worker's own filesystem and not
+  // about its configuration. A directory that cannot be moved out of the way is one a tool call
+  // that never comes back takes out of service until somebody clears it by hand; one that can be
+  // moved costs nothing and strands nothing.
+  if (cfg.shipTree) {
+    const stuck = await worktree.cannotMoveAside(projectDir);
+    if (stuck) {
+      console.log(
+        `  note: ${projectDir} cannot be set aside (${stuck}). A tool call that never comes back ` +
+          `will refuse this directory until \`pi-temporal release-tree\` clears it. Mount the ` +
+          `volume above the project rather than at it to avoid that.`,
+      );
+    }
+  }
   const problems = preflight(cfg);
   for (const problem of problems) console.error(`configuration: ${problem}`);
   // A worker that starts anyway is one that accepts work it cannot do, and the failure lands on

@@ -41,13 +41,15 @@
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { withSessionLock } from "./session-lock.js";
 
 const execFileAsync = promisify(execFile);
+const { W_OK } = constants;
 
 // A bundle has to name a ref, and the ref has to be per session: two sessions capturing the same
 // directory would otherwise overwrite each other's between `update-ref` and `bundle create`, and
@@ -604,6 +606,31 @@ async function moveAside(
   await rm(heldPath(projectDir, sessionFile), { force: true });
   await rm(writersDir(projectDir), { recursive: true, force: true });
   return moved;
+}
+
+/**
+ * Why this directory could not be moved out of the way if a call never came back in it, or nothing
+ * when it could. A host whose project directory is a mount point, or whose parent it may not write,
+ * has only the refusal, and that is worth saying at startup rather than at the failure.
+ *
+ * A prediction, for a note an operator reads while nothing is wrong. What decides is the rename
+ * itself, which `moveAside` attempts and falls back from: this one moves nothing to find out.
+ */
+export async function cannotMoveAside(projectDir: string): Promise<string | undefined> {
+  try {
+    const [here, up] = await Promise.all([stat(projectDir), stat(dirname(projectDir))]);
+    // A mount point is a different device from the directory it hangs under, and `rename` refuses
+    // to move one. This is the reading that says so without moving anything to find out.
+    if (here.dev !== up.dev) return "it is a mount point, and a mount point cannot be renamed";
+  } catch (err) {
+    return `it could not be read: ${String((err as Error).message ?? err)}`;
+  }
+  try {
+    await access(dirname(projectDir), W_OK);
+  } catch {
+    return "the directory it hangs under is not writable by this process";
+  }
+  return undefined;
 }
 
 /** Clear the refusal, for an operator who has stopped whatever was left running. */

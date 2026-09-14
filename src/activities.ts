@@ -212,6 +212,11 @@ export function makeActivities(
     return { tokens: after.tokens - before.tokens, cost: after.cost - before.cost };
   };
 
+  // What the record says the whole session has been billed, which is the number a session's own
+  // bound is about. Nothing the workflow keeps can answer it: a session that went idle and was
+  // woken again is a fresh run with an empty count, and the file is what remembers.
+  const totalOf = (session: AgentSession): Spend | undefined => billed(session);
+
   async function openSession(sessionFile: string, guard?: () => void): Promise<AgentSession> {
     if (dependencies.openSession) return dependencies.openSession(sessionFile, guard);
     await mkdir(dirname(sessionFile), { recursive: true });
@@ -305,11 +310,13 @@ export function makeActivities(
           // budget starts at zero on every step and only the step ceiling bounds it. That is how
           // it has always been; giving it the carry means giving step() the seal's post-run pass.
           await shipTree(input.sessionFile);
+          const total = totalOf(session);
           return {
             done,
             retryAttempt: 0,
             finalText: done ? lastAssistantText(messages) : "",
             ...(spent ? { spent } : {}),
+            ...(total ? { total } : {}),
           };
         } finally {
           session.dispose();
@@ -348,12 +355,14 @@ export function makeActivities(
           const before = billed(session);
           const outcome = await session.modelCall();
           const spent = spentSince(before, session);
+          const total = totalOf(session);
           return {
             calls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
             sequential: mustSerialize(outcome.sequential),
             ended: outcome.ended,
             ...(opts.stepQueue === undefined ? {} : { queue: opts.stepQueue }),
             ...(spent ? { spent } : {}),
+            ...(total ? { total } : {}),
           };
         } finally {
           session.dispose();
@@ -506,11 +515,13 @@ export function makeActivities(
             await shipTree(input.sessionFile, { fence: { turn: input.turn, step: input.step } });
           }
           const spent = spentSince(before, session);
+          const total = totalOf(session);
           return {
             done,
             retryAttempt: sealed.retryAttempt,
             finalText: done ? answer : "",
             ...(spent ? { spent } : {}),
+            ...(total ? { total } : {}),
           };
         } finally {
           session.dispose();

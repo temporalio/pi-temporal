@@ -158,7 +158,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     const model = await runModelCall(input);
     const withSpend = (result: RunStepResult): RunStepResult => {
       const spent = together(model.spent, result.spent);
-      return spent ? { ...result, spent } : result;
+      // The later of the two totals, which is the seal's when it made one: it opened the session
+      // after the model call wrote to it.
+      const total = result.total ?? model.total;
+      return { ...result, ...(spent ? { spent } : {}), ...(total ? { total } : {}) };
     };
     if (model.settled) {
       // A crashed step finalized from the transcript, or a retry landing after the turn's last
