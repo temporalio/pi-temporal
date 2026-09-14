@@ -63,25 +63,37 @@ async function main() {
   });
   const running = worker.run();
 
-  const turn = async (budget: SessionTurnOptions["budget"]) => {
+  // One workflow per session id, so two turns of the same session meet the same accumulator. A
+  // fresh id per call is a fresh session, which is what the per-turn cases want.
+  // One workflow per session id, so two turns of the same session meet the same accumulator. A
+  // fresh id per call is a fresh session, which is what the per-turn cases want. The session cases
+  // keep the run alive between turns: what a session has spent is this run's state, so a session
+  // that goes idle and is woken again later starts a new run and counts from zero.
+  const turn = async (budget: SessionTurnOptions["budget"], session?: string) => {
     const promptId = randomUUID();
     const began = Date.now();
-    const handle = await client.workflow.start("piSession", {
-      workflowId: `${queue}-${promptId}`,
+    const handle = await client.workflow.signalWithStart("piSession", {
+      workflowId: session ?? `${queue}-${promptId}`,
       taskQueue: queue,
-      args: [promptId, `/unused/${promptId}.jsonl`, {
-        idleTimeout: "100 milliseconds",
-        initialPrompt: { promptId, text: "run" },
+      args: [session ?? promptId, `/unused/${promptId}.jsonl`, {
+        idleTimeout: session ? "60 seconds" : "100 milliseconds",
         budget,
       } satisfies SessionTurnOptions as never],
+      signal: "submitPrompt",
+      signalArgs: [{ promptId, text: "run" }],
     });
     const deadline = Date.now() + 60_000;
     let finished: TurnState["finished"];
     while (Date.now() < deadline && !finished) {
-      finished = (await handle.query<TurnState, []>(QUERIES.turnState).catch(() => undefined))?.finished;
+      finished = (
+        await handle.query<TurnState, []>(QUERIES.turnState).catch(() => undefined)
+      )?.finished;
+      // This turn's, not the one before it: a session's second turn reads the first one's answer
+      // until its own lands.
+      if (finished?.promptId !== promptId) finished = undefined;
       if (!finished) await sleep(200);
     }
-    await handle.terminate().catch(() => undefined);
+    if (!session) await handle.terminate().catch(() => undefined);
     return { finished, taken: steps.get(promptId) ?? 0, ran: Date.now() - began };
   };
 
@@ -99,6 +111,19 @@ async function main() {
     check("a turn inside its bound answers as usual", inside.finished?.outcome === "answered", inside.finished);
     check("and runs every step it needed", inside.taken === 2, inside.taken);
 
+    // A session's own bound, which is the number somebody is billed for. A session of cheap turns
+    // passes every per-turn bound and can still run all night.
+    answerAfter = 2;
+    tokensPerStep = 100;
+    const session = `${queue}-session-budget`;
+    const first = await turn({ tokens: 10_000, sessionTokens: 250 }, session);
+    check("a turn inside both bounds answers", first.finished?.outcome === "answered", first.finished);
+    check("and the session's spend is reported with it", (first.finished?.spent?.tokens ?? 0) === 200, first.finished?.spent);
+    // The same session again: 200 already spent, so this turn crosses 250 on its first step.
+    const second = await turn({ tokens: 10_000, sessionTokens: 250 }, session);
+    check("a later turn of that session is stopped by what the session has spent", second.finished?.outcome === "budget", second.finished);
+    check("and the session's total is what it was measured against", (second.finished?.spent?.tokens ?? 0) >= 250, second.finished?.spent);
+
     // Wall clock, with the same shape: the step that crosses it is the last one.
     answerAfter = Number.POSITIVE_INFINITY;
     tokensPerStep = 0;
@@ -110,6 +135,10 @@ async function main() {
     // business; that it did not stop early is.
     check("and not before it has spent it", late.taken >= 2 && late.ran >= 2_000, late);
   } finally {
+    await client.workflow
+      .getHandle(`${queue}-session-budget`)
+      .terminate()
+      .catch(() => undefined);
     worker.shutdown();
     await running.catch(() => undefined);
     await connection.close();
