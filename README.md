@@ -539,6 +539,12 @@ The following checks need no model key:
 - `step-loop-check.mts`, `local-turn-check.mts`, `workflow-init-check.mts`, and
   `rollover-check.mts` need a Temporal server. They use stub activities or turns
   to check workflow control, initialization, and continue-as-new.
+- `seal-check.mts` and `fence-check.mts` need a Temporal server. They run the real
+  activities over a real session with a scripted model (`faux-worker.mts`), each worker in a
+  process of its own. `seal-check.mts` covers the last seal's boundaries, a seal killed after
+  its writes and retried elsewhere, and a `turn_end` continuation. `fence-check.mts` stops a
+  worker mid-model-call and checks that its late append is refused once another worker has
+  finished the turn. Each waits out a heartbeat and the lock's stale window.
 - `l2-step-check.mts` checks tool overlap, fallback policy, and cancellation with
   fake activities. `migration-rejoin-check.mts` also uses fake activities but real
   temporary project directories to test the stale-host migration case.
