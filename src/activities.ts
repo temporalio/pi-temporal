@@ -195,8 +195,8 @@ export function makeActivities(
   // spent. A faked session in a check has no such thing to say, and then nothing is reported and
   // the budget has nothing to add up.
   const billed = (session: AgentSession) => {
-    const stats = (session as { getSessionStats?: () => { tokens?: { total?: number }; cost?: number } })
-      .getSessionStats;
+    type Stats = { tokens?: { total?: number }; cost?: number };
+    const stats = (session as { getSessionStats?: () => Stats }).getSessionStats;
     if (typeof stats !== "function") return undefined;
     try {
       const now = stats.call(session);
@@ -206,7 +206,10 @@ export function makeActivities(
     }
   };
 
-  const spentSince = (before: ReturnType<typeof billed>, session: AgentSession): Spend | undefined => {
+  const spentSince = (
+    before: ReturnType<typeof billed>,
+    session: AgentSession,
+  ): Spend | undefined => {
     const after = billed(session);
     if (!before || !after) return undefined;
     return { tokens: after.tokens - before.tokens, cost: after.cost - before.cost };
@@ -400,7 +403,8 @@ export function makeActivities(
         openSession(input.sessionFile, () => {
           if (opening) return writeGuard(ownedNow, "opening the session")();
           throw new Error(
-            "a tool activity must not write to the session: the seal records what the step produced",
+            "a tool activity must not write to the session: " +
+              "the seal records what the step produced",
           );
         }),
       );

@@ -224,9 +224,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
           throw err;
         }
         unclaimed = true;
-        deps.log?.("the pinned queue did not take the work; the rest of the step goes to the shared queue", {
-          step: input.step,
-        });
+        deps.log?.(
+          "the pinned queue did not take the work; the rest of the step goes to the shared queue",
+          { step: input.step },
+        );
         return onShared(run);
       }
     };
@@ -272,7 +273,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       // Completed results would be swept by the next prompt unless they reach the transcript.
       // The original failure still decides the turn's outcome if this recovery cannot finish.
       const sealed = await deps.nonCancellable(() => seal(true, lost)).catch((err: unknown) => {
-        deps.log?.("could not record results before ending the step", { step: input.step, error: String(err) });
+        deps.log?.("could not record results before ending the step", {
+          step: input.step,
+          error: String(err),
+        });
         return undefined;
       });
       // The step is written down and the host it was on can no longer publish for it, so what that
