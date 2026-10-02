@@ -19,6 +19,7 @@ import {
   isCancellation,
   log,
   ActivityFailure,
+  ApplicationFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
 import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS, WORKFLOW_ID_PREFIX } from "./protocol.js";
@@ -123,6 +124,14 @@ export async function piSession(
   // its own. The workflow id is already unique per firing (Temporal suffixes a scheduled one) and
   // is the one name both sides agree on, so derive from it when nothing was given.
   const id = sessionId || workflowInfo().workflowId.replace(WORKFLOW_ID_PREFIX, "");
+  // Refused rather than defaulted: "." is the working directory of whichever worker runs the step,
+  // so two workers would serve one session from two different files. A start that names neither a
+  // file nor a directory is the caller's bug, and the failure should land on the caller.
+  if (!sessionFile && !options?.sessionDir && patched("a-session-log-needs-a-named-home")) {
+    throw ApplicationFailure.nonRetryable(
+      `session ${id} was started with no session file and no sessionDir`,
+    );
+  }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   // Same loop either way. Only what "one step" means differs, so wake, interrupt, the step
