@@ -16,7 +16,11 @@ import { connect, interrupt, submitPrompt } from "./client.js";
 import { describe, fromEnv, notes, preflight, sessionFileFor } from "./config.js";
 import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
-import { QueryRejectedError, ScheduleOverlapPolicy } from "@temporalio/client";
+import {
+  QueryRejectedError,
+  ScheduleOverlapPolicy,
+  WorkflowNotFoundError,
+} from "@temporalio/client";
 import type { TurnState } from "./protocol.js";
 import { textOf } from "./messages.js";
 
@@ -59,12 +63,12 @@ async function turnStateOf(
     // The query was refused because the run is closed, which includes a run the server terminated
     // for outgrowing its history. That is a finished session, not an unreachable one.
     if (err instanceof QueryRejectedError) return { kind: "gone" };
-    const message = String((err as Error)?.message ?? err);
-    // A workflow that is not there, or already closed, is a session that has finished. Anything
-    // else (a deadline, a worker that cannot answer) must not read as "finished".
-    return /not found|NOT_FOUND|already completed|workflow execution already/i.test(message)
-      ? { kind: "gone" }
-      : { kind: "unreachable" };
+    // No workflow under this id: a session that retired, or was never started. Decided by the
+    // error's type rather than its text, because any error whose message happens to say "not
+    // found" about something else would otherwise end a follower mid-turn.
+    if (err instanceof WorkflowNotFoundError) return { kind: "gone" };
+    // Anything else (a deadline, a worker that cannot answer) must not read as "finished".
+    return { kind: "unreachable" };
   }
 }
 
@@ -80,7 +84,7 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
   const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR;
   if (!projectDir) {
     throw new Error(
-      "the tree is on, so this needs the project: pi-temporal start \"...\" --project=/path/to/repo",
+      'the tree is on, so this needs the project: pi-temporal start "..." --project=/path/to/repo',
     );
   }
   const file = sessionFileFor(cfg.sessionDir, sessionId);
@@ -94,15 +98,18 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
   say(`  sent the project from ${projectDir}`);
 }
 
+// One flag's value, from `--name=value`. `slice(1).join("=")` keeps a value with its own `=` whole.
+const flagOf = (args: string[], name: string) =>
+  args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
+
 async function start(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
-  const flag = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
-  const sessionId = flag("session") ?? `task-${randomUUID().slice(0, 8)}`;
+  const sessionId = flagOf(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
   // Before the prompt, so the project is established from the directory the person running this
   // meant. Left to the workers it is established by whichever one draws the first activity, and
   // that is right only when that worker happens to be the one holding the files.
-  await seedProject(sessionId, flag("project"));
+  await seedProject(sessionId, flagOf(args, "project"));
   // signal-with-start, so this both creates the session and hands it the prompt. Nothing waits for
   // the turn: whichever worker is polling the queue runs it.
   await submitPrompt(sessionId, text);
@@ -114,10 +121,9 @@ async function start(args: string[]) {
 // the session is created by the workflow rather than by whoever asked for it.
 async function schedule(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
-  const flag = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
-  const every = flag("every");
-  const cron = flag("cron");
-  const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
+  const every = flagOf(args, "every");
+  const cron = flagOf(args, "cron");
+  const id = flagOf(args, "id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
   // Every firing is its own session and nothing is running at firing time to send it a project, so
@@ -127,7 +133,7 @@ async function schedule(args: string[]) {
   const scheduled = fromEnv();
   let template: string | undefined;
   if (scheduled.shipTree) {
-    const projectDir = flag("project") ?? process.env.PI_PROJECT_DIR;
+    const projectDir = flagOf(args, "project") ?? process.env.PI_PROJECT_DIR;
     if (!projectDir) {
       throw new Error(
         "the tree is on, so a schedule needs the project: " +
@@ -188,7 +194,9 @@ async function running() {
     for await (const wf of client.workflow.list({
       query: `WorkflowType = '${WORKFLOW_TYPE}' AND ExecutionStatus = 'Running'`,
     })) {
-      if (wf.workflowId.startsWith(WORKFLOW_ID_PREFIX)) ids.push(wf.workflowId.slice(WORKFLOW_ID_PREFIX.length));
+      if (wf.workflowId.startsWith(WORKFLOW_ID_PREFIX)) {
+        ids.push(wf.workflowId.slice(WORKFLOW_ID_PREFIX.length));
+      }
     }
     if (ids.length === 0) {
       say("nothing running");
@@ -219,10 +227,14 @@ function render(entry: { message?: { role?: string; content?: unknown } }): stri
   if (!message?.role) return undefined;
   const text = textOf(message.content).trim();
   if (message.role === "user") return text ? `you: ${text.slice(0, 300)}` : undefined;
-  if (message.role === "toolResult") return `tool result: ${text.slice(0, 200).replace(/\n+/g, " ")}`;
+  if (message.role === "toolResult") {
+    return `tool result: ${text.slice(0, 200).replace(/\n+/g, " ")}`;
+  }
   if (message.role === "assistant") {
     const calls = Array.isArray(message.content)
-      ? (message.content as { type?: string; name?: string }[]).filter((b) => b?.type === "toolCall")
+      ? (message.content as { type?: string; name?: string }[]).filter(
+          (b) => b?.type === "toolCall",
+        )
       : [];
     if (calls.length) return `tool: ${calls.map((c) => c.name ?? "?").join(", ")}`;
     return text ? `said: ${text.slice(0, 400)}` : undefined;
@@ -369,7 +381,10 @@ async function main() {
             await connection.close();
           }
         })
-        .catch((err) => `could not reach ${cfg.address}: ${err instanceof Error ? err.message : String(err)}`);
+        .catch((err) => {
+          const why = err instanceof Error ? err.message : String(err);
+          return `could not reach ${cfg.address}: ${why}`;
+        });
       say(`  server: ${reach}`);
       for (const problem of problems) say(`problem: ${problem}`);
       if (!reach.startsWith("reached")) process.exitCode = 1;
