@@ -88,11 +88,16 @@ async function main() {
     };
   };
 
-  const turn = async (s: ReturnType<typeof scenario>, text: string, waitMs = 60_000) => {
+  const turn = async (
+    s: ReturnType<typeof scenario>,
+    text: string,
+    waitMs = 60_000,
+    stepped = true,
+  ) => {
     const handle = await client.workflow.signalWithStart("piSession", {
       workflowId: s.queue,
       taskQueue: s.queue,
-      args: [s.queue, s.file, { idleTimeout: "5 seconds", stepped: true }],
+      args: [s.queue, s.file, { idleTimeout: "5 seconds", stepped }],
       signal: "submitPrompt",
       signalArgs: [{ promptId: `${s.queue}-prompt`, text }],
     });
@@ -213,6 +218,44 @@ async function main() {
         lines(files(s.dir).settled).length === 1,
         lines(files(s.dir).settled),
       );
+    }
+
+    // Whole-step mode, which builds each step from the same three primitives inside one activity.
+    // The seal is the same seal, so its boundaries have to behave the same from in there.
+    {
+      const s = scenario("whole");
+      dirs.push(s.dir);
+      startWorker(s.queue, s.dir);
+      const { handle, finished } = await turn(s, "run the probe", 60_000, false);
+      const answer = await finished();
+      check("a whole-step turn answers", answer?.outcome === "answered", answer);
+      const history = await handle.fetchHistory();
+      const activities = (history.events ?? []).flatMap((e) => {
+        const name = e.activityTaskScheduledEventAttributes?.activityType?.name;
+        return name ? [name] : [];
+      });
+      check(
+        "as two runStep activities: the tool call, then the answer",
+        activities.length === 2 && activities.every((name) => name === "runStep"),
+        activities,
+      );
+      const probes = lines(files(s.dir).probes);
+      check("the tool ran once", probes.length === 1, probes);
+      const settled = lines(files(s.dir).settled);
+      check(
+        "agent_before_settle ran once, inside runStep",
+        settled.length === 1 && settled[0].endsWith(" runStep"),
+        settled,
+      );
+      const entries = entriesOf(s.file);
+      const shape = entries.map((e) => e.customType ?? e.message?.role ?? e.type);
+      check(
+        "and the seal recorded that turn_end ran",
+        count(entries, custom("pi.turn-end-dispatched")) > 0 &&
+          count(entries, custom("check-turn-end")) === 1,
+        shape,
+      );
+      check("the session is one chain", linear(entries), shape);
     }
   } finally {
     for (const child of workers) child.kill("SIGKILL");
