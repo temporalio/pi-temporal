@@ -7,6 +7,7 @@
 
 import {
   patched,
+  ApplicationFailure,
   proxyActivities,
   sleep,
   defineSignal,
@@ -19,7 +20,6 @@ import {
   isCancellation,
   log,
   ActivityFailure,
-  ApplicationFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
 import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS, WORKFLOW_ID_PREFIX } from "./protocol.js";
@@ -43,19 +43,33 @@ const activityOptions = {
 
 // A total cap on top of the per-attempt one, so a unit that keeps timing out cannot hold the turn
 // and the session's queue for days.
-const cappedOptions = { ...activityOptions, scheduleToCloseTimeout: "2 hours" } as const;
+const CAP_MINUTES = 120;
+const cappedOptions = {
+  ...activityOptions,
+  scheduleToCloseTimeout: `${CAP_MINUTES} minutes`,
+} as const;
 
 const { runStep } = proxyActivities<{
   runStep(input: RunStepInput): Promise<RunStepResult>;
 }>(cappedOptions);
 
 const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
-// A call that fails for a reason no retry fixes must not hold the step, the turn and the session's
-// queue behind it. The step waits for every call, so the ceiling here is the ceiling on all of it.
-const { runToolCall } = proxyActivities<SteppedActivities>({
-  ...cappedOptions,
-  retry: { maximumAttempts: 20 },
-});
+
+// Overridable per deployment with PI_TEMPORAL_TOOL_TIMEOUT_MINUTES, read where the session starts.
+export const DEFAULT_TOOL_TIMEOUT_MINUTES = 30;
+
+function toolCallActivities(timeoutMinutes: number) {
+  // A call that fails for a reason no retry fixes must not hold the step, the turn and the
+  // session's queue behind it. The step waits for every call, so this ceiling is the one on all
+  // of it. A bound past the cap gets the room for at least one attempt.
+  return proxyActivities<SteppedActivities>({
+    ...activityOptions,
+    startToCloseTimeout: `${timeoutMinutes} minutes`,
+    scheduleToCloseTimeout: `${Math.max(CAP_MINUTES, timeoutMinutes)} minutes`,
+    retry: { maximumAttempts: 20 },
+  });
+}
+
 // The seal also runs what answers for a step that went wrong: a provider retry, and a compaction
 // that is itself a model call over the whole context. So it keeps the step-sized backstop.
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
@@ -140,7 +154,13 @@ export async function piSession(
   let outOfBudget = (): boolean => false;
   const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
     ? makeSteppedStep({
-        activities: { runModelCall, runToolCall, sealStep },
+        activities: {
+          runModelCall,
+          runToolCall: toolCallActivities(
+            options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES,
+          ).runToolCall,
+          sealStep,
+        },
         isCancellation,
         outOfBudget: () => outOfBudget(),
         pinnedTo,

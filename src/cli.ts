@@ -173,6 +173,7 @@ async function schedule(args: string[]) {
           {
             idleTimeout: cfg.idleTimeout,
             stepped: cfg.stepped,
+            toolTimeoutMinutes: cfg.toolTimeoutMinutes,
             sessionDir: cfg.sessionDir,
             template,
             initialPrompt: { promptId: `scheduled-${id}`, text },
@@ -231,11 +232,10 @@ function render(entry: { message?: { role?: string; content?: unknown } }): stri
     return `tool result: ${text.slice(0, 200).replace(/\n+/g, " ")}`;
   }
   if (message.role === "assistant") {
-    const calls = Array.isArray(message.content)
-      ? (message.content as { type?: string; name?: string }[]).filter(
-          (b) => b?.type === "toolCall",
-        )
+    const blocks = Array.isArray(message.content)
+      ? (message.content as { type?: string; name?: string }[])
       : [];
+    const calls = blocks.filter((b) => b?.type === "toolCall");
     if (calls.length) return `tool: ${calls.map((c) => c.name ?? "?").join(", ")}`;
     return text ? `said: ${text.slice(0, 400)}` : undefined;
   }

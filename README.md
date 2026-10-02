@@ -195,6 +195,8 @@ Worker tool results stay beside the session file to reduce history payloads. Bui
 truncate some outputs, but extensions can return different sizes. The driver must not assume
 that every result is bounded to 50 KB.
 
+Each tool call gets 30 minutes per attempt by default. A call that crosses it is not run again, since its note says it started, so it ends as an unknown outcome while the tool may still be running. A deployment with longer tools sets `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` on the client that starts the session.
+
 What it costs: each activity opens the session file and builds an `AgentSession` of its own, so a step with four calls pays six session opens instead of one. Against a model call that takes seconds, the boundaries measure in milliseconds (see below), but the cost is real and it grows with the transcript.
 
 ## What is durable, and what is not

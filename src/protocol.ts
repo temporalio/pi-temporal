@@ -124,6 +124,9 @@ export interface SessionTurnOptions {
   // what production runs on; this is for an operator who wants a tighter bound, and it is what
   // makes the rollover reachable in a check.
   readonly maxHistory?: number;
+  // The bound on one tool call in stepped mode. A call that crosses it is not run again, because
+  // its dispatch note says it started, so this is the longest any tool may take.
+  readonly toolTimeoutMinutes?: number;
 }
 
 // A call the model asked for, recorded but not run. The arguments stay in the transcript: the

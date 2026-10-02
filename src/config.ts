@@ -34,6 +34,8 @@ export interface Config {
   // than carried as values, so what `describe` prints is the path and never the secret.
   readonly apiKey?: string;
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
+  // How long one tool call may run in stepped mode. Unset keeps the workflow's default.
+  readonly toolTimeoutMinutes?: number;
 }
 
 const read = (path: string | undefined) => (path ? readFileSync(path, "utf8") : undefined);
@@ -60,6 +62,7 @@ export function fromEnv(): Config {
     // The unit of work a fleet wants is the smaller one: a worker dying takes one tool call with it
     // rather than a whole step, and a tool call is where the retry policy and the approval belong.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
+    toolTimeoutMinutes: minutesFromEnv("PI_TEMPORAL_TOOL_TIMEOUT_MINUTES"),
     // In a fleet the files have to travel or a worker runs the tools against a directory that is
     // not the project and tells the model those files are it.
     shipTree: onOff("PI_TEMPORAL_SHIP_TREE", fleet),
@@ -162,9 +165,21 @@ export function describe(cfg: Config): Record<string, string> {
     sessionDir: cfg.sessionDir,
     idleTimeout: cfg.idleTimeout,
     stepped: String(cfg.stepped),
+    toolTimeoutMinutes: cfg.toolTimeoutMinutes ? `${cfg.toolTimeoutMinutes} minutes` : "default",
     shipTree: String(cfg.shipTree),
     credentials: cfg.apiKey ? "api key" : cfg.tls ? "certificate pair" : "none (plaintext)",
   };
+}
+
+export function minutesFromEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return undefined;
+  const minutes = Number(raw);
+  // A typo here would otherwise become a timeout nobody asked for.
+  if (!Number.isInteger(minutes) || minutes <= 0) {
+    throw new Error(`${name} must be a whole number of minutes, got ${JSON.stringify(raw)}`);
+  }
+  return minutes;
 }
 
 export const sessionFileFor = (sessionDir: string, sessionId: string) =>

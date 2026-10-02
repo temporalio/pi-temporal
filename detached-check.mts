@@ -18,7 +18,8 @@ import { join } from "node:path";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
-  console.log(`${ok ? "PASS" : "FAIL"} ${what}${ok ? "" : ` (${JSON.stringify(detail)?.slice(0, 300)})`}`);
+  const why = ok ? "" : ` (${JSON.stringify(detail)?.slice(0, 300)})`;
+  console.log(`${ok ? "PASS" : "FAIL"} ${what}${why}`);
   if (!ok) failures.push(what);
 };
 
@@ -93,7 +94,10 @@ async function killWorker(child: ChildProcess, pids: number[]) {
 // hangs reports nothing at all.
 // The CLI as one process, for the same reason the worker is: a timeout that kills `npx` leaves the
 // node process underneath it running and holding the pipes, so the bound never takes effect.
-const cli = (args: string[]) => ({ cmd: process.execPath, args: ["--import", "tsx", "src/cli.ts", ...args] });
+const cli = (args: string[]) => ({
+  cmd: process.execPath,
+  args: ["--import", "tsx", "src/cli.ts", ...args],
+});
 
 function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs?: number) {
   return new Promise<{ code: number; out: string; err: string; timedOut: boolean }>((resolve) => {
@@ -255,7 +259,8 @@ async function main() {
   });
   console.log(`  (the model asked for it ${asked.length} time(s) across ${results.length} result(s))`);
 
-  console.log(failures.length === 0 ? "\ndetached-check: OK" : `\ndetached-check: ${failures.length} failed`);
+  const verdict = failures.length === 0 ? "OK" : `${failures.length} failed`;
+  console.log(`\ndetached-check: ${verdict}`);
   process.exitCode = failures.length === 0 ? 0 : 1;
 }
 
