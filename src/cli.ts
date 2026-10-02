@@ -15,7 +15,7 @@ import { open, stat } from "node:fs/promises";
 import { connect, interrupt, submitPrompt } from "./client.js";
 import { sessionFileFor } from "./config.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
-import { ScheduleOverlapPolicy } from "@temporalio/client";
+import { ScheduleOverlapPolicy, WorkflowNotFoundError } from "@temporalio/client";
 import type { TurnState } from "./protocol.js";
 import { textOf } from "./messages.js";
 
@@ -53,12 +53,9 @@ async function turnStateOf(
     );
     return { kind: "state", state };
   } catch (err) {
-    const message = String((err as Error)?.message ?? err);
-    // A workflow that is not there, or already closed, is a session that has finished. Anything
-    // else (a deadline, a worker that cannot answer) must not read as "finished".
-    return /not found|NOT_FOUND|already completed|workflow execution already/i.test(message)
-      ? { kind: "gone" }
-      : { kind: "unreachable" };
+    // A workflow that is not there is a session that has finished. Anything else (a deadline, a
+    // worker that cannot answer) must not read as "finished".
+    return err instanceof WorkflowNotFoundError ? { kind: "gone" } : { kind: "unreachable" };
   }
 }
 
