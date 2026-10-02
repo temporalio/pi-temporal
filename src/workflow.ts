@@ -6,6 +6,7 @@
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
 import {
+  ApplicationFailure,
   proxyActivities,
   defineSignal,
   defineQuery,
@@ -80,7 +81,15 @@ export async function piSession(
   // its own. The workflow id is already unique per firing (Temporal suffixes a scheduled one) and
   // is the one name both sides agree on, so derive from it when nothing was given.
   const id = sessionId || workflowInfo().workflowId.replace(WORKFLOW_ID_PREFIX, "");
-  const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
+  if (!sessionFile && !options?.sessionDir) {
+    // The worker's own directory would do, until two workers in different directories serve one
+    // session from two files.
+    throw ApplicationFailure.nonRetryable(
+      "piSession was started with neither a session file nor a session directory",
+      "NoSessionDir",
+    );
+  }
+  const file = sessionFile || `${options?.sessionDir}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   // Same loop either way. Only what "one step" means differs, so wake, interrupt, the step
   // ceiling and idle retirement are unchanged.
