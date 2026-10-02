@@ -28,24 +28,28 @@ trap cleanup EXIT
 [ -n "${OPENAI_API_KEY:-}" ] || { echo "set OPENAI_API_KEY"; exit 1; }
 
 $COMPOSE down -v >/dev/null 2>&1
-docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null || { echo "build failed"; exit 1; }
+docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null \
+  || { echo "build failed"; exit 1; }
 $COMPOSE up -d temporal worker-a >/dev/null 2>&1 || { echo "stack failed to start"; exit 1; }
 
 hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
-[ -n "$hostA" ] && ok "worker A is a host of its own ($hostA)" || { bad "worker A came up"; exit 1; }
+[ -n "$hostA" ] && ok "worker A is a host of its own ($hostA)" \
+  || { bad "worker A came up"; exit 1; }
 
 # --- a client that is only ever a client hands over a task and exits
 sid=$($COMPOSE run --rm -T client start \
   "Run this exact command with the bash tool: sleep 45 && echo CROSS-HOST. Then report it." \
   2>/dev/null | tr -d '\r' | head -1)
-[ -n "$sid" ] && ok "a client container started the session ($sid)" || { bad "client could not start a session"; exit 1; }
+[ -n "$sid" ] && ok "a client container started the session ($sid)" \
+  || { bad "client could not start a session"; exit 1; }
 
 # --- kill worker A while the tool is genuinely in flight. Waiting on the transcript rather than on
 # a clock, because a fixed sleep is how the kill ends up landing after the turn already finished.
 inflight=""
 for _ in $(seq 1 60); do
   if $COMPOSE exec -T worker-a sh -c \
-      "grep -q toolCall /sessions/$sid.jsonl 2>/dev/null && ! grep -q toolResult /sessions/$sid.jsonl"; then
+      "grep -q toolCall /sessions/$sid.jsonl 2>/dev/null \
+        && ! grep -q toolResult /sessions/$sid.jsonl"; then
     inflight=yes
     break
   fi
@@ -55,7 +59,8 @@ done
 
 docker kill "$($COMPOSE ps -q worker-a)" >/dev/null 2>&1
 sleep 2
-[ -z "$($COMPOSE ps -q --status running worker-a)" ] && ok "worker A's host is gone" || bad "worker A's host is gone"
+[ -z "$($COMPOSE ps -q --status running worker-a)" ] && ok "worker A's host is gone" \
+  || bad "worker A's host is gone"
 
 # --- a second host, which has never seen this session or its files
 $COMPOSE up -d worker-b >/dev/null 2>&1
@@ -77,7 +82,8 @@ esac
 
 # --- the part only Temporal can answer: two hosts ran this, and the second one retried
 $COMPOSE exec -T temporal sh -c \
-  "temporal workflow show --address 127.0.0.1:7233 -w pi-session-$sid -o json" 2>/dev/null > /tmp/pi-l3-history.json
+  "temporal workflow show --address 127.0.0.1:7233 -w pi-session-$sid -o json" \
+  2>/dev/null > /tmp/pi-l3-history.json
 summary=$(python3 - "$hostA" "$hostB" <<'PY'
 import json, sys
 hostA, hostB = sys.argv[1], sys.argv[2]
@@ -108,7 +114,8 @@ $COMPOSE run --rm -T client schedule \
 scheduled=""
 for _ in $(seq 1 30); do
   found=$($COMPOSE exec -T temporal sh -c \
-    "temporal workflow list --address 127.0.0.1:7233 --query \"WorkflowType='piSession'\"" 2>/dev/null \
+    "temporal workflow list --address 127.0.0.1:7233 \
+      --query \"WorkflowType='piSession'\"" 2>/dev/null \
     | grep -o "check-nightly[^ ]*" | head -1)
   [ -n "$found" ] && { scheduled="$found"; break; }
   sleep 5
