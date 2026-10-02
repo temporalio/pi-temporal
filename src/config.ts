@@ -66,7 +66,11 @@ export function fromEnv(): Config {
     apiKey: process.env.PI_TEMPORAL_API_KEY ?? read(process.env.PI_TEMPORAL_API_KEY_FILE),
     tls:
       cert && key
-        ? { cert: readFileSync(cert, "utf8"), key: readFileSync(key, "utf8"), ca: read(process.env.PI_TEMPORAL_TLS_CA) }
+        ? {
+            cert: readFileSync(cert, "utf8"),
+            key: readFileSync(key, "utf8"),
+            ca: read(process.env.PI_TEMPORAL_TLS_CA),
+          }
         : process.env.PI_TEMPORAL_TLS === "1"
           ? true
           : undefined,
@@ -110,11 +114,25 @@ export function preflight(cfg: Config): string[] {
       );
     }
   }
+  // The writer markers and the closed-step fence exist only on the stepped path: a whole step
+  // never says which calls are inside their own execution, so a timed-out attempt's tool can keep
+  // writing a directory a later restore brings back to the tip, and the next capture ships what it
+  // wrote with nothing to refuse it.
+  if (cfg.shipTree && !cfg.stepped) {
+    problems.push(
+      "PI_TEMPORAL_SHIP_TREE=1 needs PI_TEMPORAL_STEPPED=1: only the stepped path keeps the " +
+        "writer markers and dispatch claims that fence a tool its activity stopped waiting for",
+    );
+  }
   if (cfg.apiKey && LOOPBACK.test(cfg.address)) {
-    problems.push(`an API key is set but TEMPORAL_ADDRESS is ${cfg.address}, which is a dev server`);
+    problems.push(
+      `an API key is set but TEMPORAL_ADDRESS is ${cfg.address}, which is a dev server`,
+    );
   }
   if (cfg.apiKey && cfg.namespace === "default") {
-    problems.push("an API key is set but TEMPORAL_NAMESPACE is `default`, which is not a Cloud namespace");
+    problems.push(
+      "an API key is set but TEMPORAL_NAMESPACE is `default`, which is not a Cloud namespace",
+    );
   }
   if (!!process.env.PI_TEMPORAL_TLS_CERT !== !!process.env.PI_TEMPORAL_TLS_KEY) {
     problems.push("PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY come as a pair");
