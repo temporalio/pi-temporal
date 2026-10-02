@@ -62,7 +62,6 @@ function fakeTurn(options: { interruptAfter?: number } = {}) {
             : [],
           sequential: false,
           ended: false,
-          replayed: false,
         };
       },
       runToolCall: async (toolCallId) => {

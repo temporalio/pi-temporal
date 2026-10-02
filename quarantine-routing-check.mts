@@ -66,10 +66,12 @@ async function main() {
         messages.push({ role: "user", content: text, timestamp: Date.now() });
         return true;
       },
-      step: async () => {
+      modelCall: async () => {
         messages.push({ role: "assistant", content: "answered", timestamp: Date.now() });
-        return { done: true, finalText: "answered" };
+        return { toolCalls: [], sequential: false, ended: false };
       },
+      runToolCall: async () => undefined,
+      sealStep: async () => ({ done: true, retryAttempt: 0 }),
       waitForIdle: async () => {},
       dispose() {},
     };

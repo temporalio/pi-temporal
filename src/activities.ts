@@ -322,24 +322,36 @@ export function makeActivities(
 
           // prepareStep settled anything the crash left dangling, so this is a plain step: a tool
           // whose result never landed is reported as unknown, not re-run behind the model's back.
+          // The same three units the stepped mode dispatches one by one, run here in one activity.
           const before = billed(session);
-          const stepped = await session.step();
-          // A refusal, not a step that wanted another: nothing ran, so there is no `done` to read.
-          if (stepped.ran === false) {
-            throw new Error("the session refused the step: another unit of work is running in it");
+          const model = await session.modelCall();
+          const calls = model.ended ? [] : model.toolCalls;
+          const results = new Map<string, TurnToolCallOutcome>();
+          for (const call of calls) {
+            // One at a time: the session admits a single unit of work, so calls cannot overlap.
+            const outcome = await session.runToolCall(call.id);
+            if (outcome) results.set(call.id, outcome);
           }
-          const { done } = stepped;
+          const sealed = await session.sealStep(
+            // A call with no outcome already has its result in the transcript, which the seal
+            // finds, so only the ones this attempt ran are handed over.
+            calls.flatMap((call) => results.get(call.id) ?? []),
+            {
+              expectCalls: calls.map((call) => call.id),
+              // Carried by the workflow, because the seal reads no budget off the transcript and
+              // this session is rebuilt for every step.
+              retryAttempt: input.retryAttempt,
+            },
+          );
+          const { done } = sealed;
           await session.waitForIdle();
           const messages = session.state.messages as Msg[];
           const spent = spentSince(before, session);
-          // Whole-step mode has no carry. Its session is rebuilt per activity too, so its retry
-          // budget starts at zero on every step and only the step ceiling bounds it. That is how
-          // it has always been; giving it the carry means giving step() the seal's post-run pass.
           await shipTree(input.sessionFile);
           const total = totalOf(session);
           return {
             done,
-            retryAttempt: 0,
+            retryAttempt: sealed.retryAttempt,
             finalText: done ? lastAssistantText(messages) : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
