@@ -4,9 +4,10 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { ApplicationFailure } from "@temporalio/activity";
 import { makeActivities } from "./src/activities.js";
 import * as pending from "./src/pending.js";
-import type { ToolCallInput } from "./src/protocol.js";
+import { FAILED_BEFORE_CLAIM, type ToolCallInput } from "./src/protocol.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-dispatch-"));
 const effectFile = join(root, "effects");
@@ -60,6 +61,21 @@ try {
   await assert.rejects(activities.runToolCall(refused));
   assert.equal(await readFile(effectFile, "utf8"), "effect\n", "a failed dispatch write must block the effect");
   console.log("PASS a failed dispatch write blocks the effect");
+
+  // A failure before any attempt claimed the call is one the tool cannot have started from, and the
+  // workflow may only move a pinned step on that answer. One that follows a claim must not give it.
+  const cannotOpen = makeActivities({ projectDir: root }, {
+    openSession: async () => {
+      throw new Error("cannot open the session");
+    },
+  });
+  const beforeClaim = (err: unknown) =>
+    err instanceof ApplicationFailure && err.type === FAILED_BEFORE_CLAIM;
+  const fresh = { ...input, sessionFile: join(root, "fresh.jsonl") };
+  await assert.rejects(cannotOpen.runToolCall(fresh), beforeClaim);
+  console.log("PASS a call that failed before any claim says so");
+  await assert.rejects(cannotOpen.runToolCall(input), (err: unknown) => !beforeClaim(err));
+  console.log("PASS a call an earlier attempt claimed does not");
 
   const unreadable = join(root, "unreadable.jsonl");
   await mkdir(join(pending.stepDirFor(unreadable, "prompt", 1), "call.started"), {

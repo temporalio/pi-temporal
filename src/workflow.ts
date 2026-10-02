@@ -22,7 +22,13 @@ import {
   ActivityFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
-import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS, WORKFLOW_ID_PREFIX } from "./protocol.js";
+import {
+  FAILED_BEFORE_CLAIM,
+  MAX_STEPS_PER_TURN,
+  QUERIES,
+  SIGNALS,
+  WORKFLOW_ID_PREFIX,
+} from "./protocol.js";
 import type {
   PromptInput,
   RunStepInput,
@@ -99,8 +105,8 @@ const pinnedTo = (taskQueue: string) => ({
 /** The pinned policy permits one attempt, so this timeout excludes an earlier started attempt. */
 const isUnclaimed = (err: unknown) =>
   err instanceof ActivityFailure &&
-  err.cause instanceof TimeoutFailure &&
-  err.cause.timeoutType === "SCHEDULE_TO_START";
+  ((err.cause instanceof TimeoutFailure && err.cause.timeoutType === "SCHEDULE_TO_START") ||
+    (err.cause instanceof ApplicationFailure && err.cause.type === FAILED_BEFORE_CLAIM));
 
 
 // Copying a project a client left for a scheduled session. Short, and it has to finish before the

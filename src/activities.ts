@@ -29,6 +29,7 @@ import type {
   ToolCallInput,
   ToolCallResult,
 } from "./protocol.js";
+import { FAILED_BEFORE_CLAIM } from "./protocol.js";
 import * as pending from "./pending.js";
 import * as worktree from "./worktree.js";
 import { withSessionLock } from "./session-lock.js";
@@ -376,10 +377,25 @@ export function makeActivities(
     }
   }
 
+  // Typed only when no attempt of the call has a dispatch note: the workflow sees the last
+  // attempt's failure, and an earlier one may have claimed the call and still be running the tool.
+  const beforeClaim = async (err: unknown, input: ToolCallInput): Promise<unknown> => {
+    if (err instanceof ApplicationFailure) return err;
+    const { sessionFile, turn, step, call } = input;
+    const noted = await pending.wasDispatched(sessionFile, turn, step, call.id).catch(() => true);
+    if (noted) return err;
+    return ApplicationFailure.create({
+      message: err instanceof Error ? err.message : String(err),
+      type: FAILED_BEFORE_CLAIM,
+      cause: err instanceof Error ? err : undefined,
+    });
+  };
+
   /** One recorded call of the current step. Its result is kept beside the session file until the
    * seal records it, so a tool that ran is not asked to run again. */
   async function runToolCall(input: ToolCallInput): Promise<ToolCallResult> {
     const stop = heartbeatEvery(3000);
+    let claimed = false;
     try {
       // A tool call is its own dispatch, so it can land on a worker that ran neither the model
       // call nor any sibling tool. Without this it runs against whatever files that host happens
@@ -438,6 +454,7 @@ export function makeActivities(
           await pending.keepResult(input.sessionFile, turn, step, call.id, unknown);
           return { outcome: "unknown" };
         }
+        claimed = true;
 
         // Said on this host before the tool can touch anything, and taken back below when the body
         // returns. It is the only local record of a tool that is still inside its own execution,
@@ -466,6 +483,8 @@ export function makeActivities(
       } finally {
         session.dispose();
       }
+    } catch (err) {
+      throw claimed ? err : await beforeClaim(err, input);
     } finally {
       stop();
     }
