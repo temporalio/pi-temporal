@@ -29,7 +29,12 @@ fi
 # packages/ai keeps its model data out of git, so a fresh checkout fetches it before anything
 # compiles. Only the data: the full build would also regenerate the model sources from whatever
 # the catalog says today, and then the thing that gets built is not the commit we pinned.
-(cd "$dir" && npm ci && npm run -w @earendil-works/pi-ai hydrate-model-data && npm run build:offline)
+(
+  cd "$dir"
+  npm ci
+  npm run -w @earendil-works/pi-ai hydrate-model-data
+  npm run build:offline
+)
 
 link="$root/node_modules/@earendil-works/pi-coding-agent"
 mkdir -p "$(dirname "$link")"
