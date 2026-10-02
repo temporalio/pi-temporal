@@ -889,6 +889,24 @@ async function heldByOthers(projectDir: string, sessionFile: string) {
 }
 
 /**
+ * Why `dir` must not be sent as a project when nobody named it, or undefined when it may. What
+ * ships is everything an ignore file does not exclude, so a home directory sends `~/.ssh` and
+ * `~/.aws`, and a directory with no repository and no ignore file has nothing to stop the same.
+ */
+export async function projectRefusal(dir: string): Promise<string | undefined> {
+  const resolved = await realpath(dir).catch(() => dir);
+  const home = await realpath(homedir()).catch(() => homedir());
+  if (resolved === home) {
+    return `${dir} is your home directory, and every dotfile in it would ship`;
+  }
+  const exists = (name: string) => access(join(resolved, name)).then(() => true, () => false);
+  if (!(await exists(".git")) && !(await exists(".gitignore"))) {
+    return `${dir} holds no repository and no .gitignore, so nothing keeps secrets out of it`;
+  }
+  return undefined;
+}
+
+/**
  * Record the project's files against this session. Cheap when nothing changed: a tree id is
  * content-addressed, so an untouched directory produces the tree the tip already names.
  */
