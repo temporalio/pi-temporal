@@ -27,6 +27,16 @@ async function main() {
     }
   }
   const problems = preflight(cfg);
+  // The worker's own check rather than `preflight`'s: `PI_PROJECT_DIR` is read here, and a client
+  // has no use for it. The fallback is this process's working directory, which is a different
+  // directory on every worker, so with the tree on it is either refused on every restore (it holds
+  // files no session shipped) or quietly adopted as a managed project directory.
+  if (cfg.profile === "fleet" && !process.env.PI_PROJECT_DIR) {
+    problems.push(
+      "the fleet profile needs an explicit PI_PROJECT_DIR: the fallback is this worker's own " +
+        "working directory, which is a different directory on every worker",
+    );
+  }
   for (const problem of problems) console.error(`configuration: ${problem}`);
   // A worker that starts anyway is one that accepts work it cannot do, and the failure lands on
   // whoever prompted it rather than on whoever deployed it.
