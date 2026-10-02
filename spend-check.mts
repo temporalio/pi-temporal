@@ -38,10 +38,13 @@ try {
           state: { messages: [] },
           prepareStep: () => true,
           recordPrompt: async () => true,
-          step: async () => {
+          // The model call is what spends, and a step that asks for no tool seals as answered.
+          modelCall: async () => {
             billed = { tokens: billed.tokens + 250, cost: billed.cost + 0.125 };
-            return { done: true, finalText: "answered" };
+            return { toolCalls: [], sequential: false, ended: false };
           },
+          runToolCall: async () => undefined,
+          sealStep: async () => ({ done: true, retryAttempt: 0 }),
           async waitForIdle() {},
           getSessionStats: () => ({ tokens: { total: billed.tokens }, cost: billed.cost }),
           dispose() {},
@@ -79,7 +82,9 @@ try {
           state: { messages: [] },
           prepareStep: () => true,
           recordPrompt: async () => true,
-          step: async () => ({ done: true, finalText: "answered" }),
+          modelCall: async () => ({ toolCalls: [], sequential: false, ended: false }),
+          runToolCall: async () => undefined,
+          sealStep: async () => ({ done: true, retryAttempt: 0 }),
           async waitForIdle() {},
           dispose() {},
         }) as unknown as AgentSession,

@@ -14,16 +14,26 @@ A timeout does not prove that the old activity or its tool stopped.
 
 ## Depends on the Pi fork
 
-This uses the fork APIs developed in three pull requests. The source used here is pinned in `fork.pin`; this review does not establish the API surface of the current published package. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
+This uses the fork APIs from open pull requests on top of merged #9. The pin in `fork.pin` is
+`moe/pin-head`, a merge of #12 and #4, because neither head alone has all of it; it moves to
+fork main once they merge. This review does not establish the API surface of the current
+published package.
 
-- `recordPrompt(text)` puts a prompt in the transcript without running it.
-- `step()` runs one model call and its tools, and reports whether the turn is done.
-- `prepareStep()` settles what a stopped turn left behind, without running to the end of it.
-- `resumeInterruptedTurn()` is `prepareStep()` plus a run to the end of the turn, for a caller that wants the whole turn back in one call.
+- [temporalio/pi#9](https://github.com/temporalio/pi/pull/9), merged, splits one turn of the
+  agent loop into a model call, its tool calls and a seal.
+- [temporalio/pi#12](https://github.com/temporalio/pi/pull/12), on main, adds
+  `SessionManager.setWriteGuard`, which every write to the session file asks first.
+- [temporalio/pi#2](https://github.com/temporalio/pi/pull/2), on main, adds `prepareStep()`,
+  which settles what a stopped turn left behind, and `recordPrompt(text)`, which puts a prompt
+  in the transcript without running it.
+- [temporalio/pi#4](https://github.com/temporalio/pi/pull/4), on #2, adds `modelCall`,
+  `runToolCall` and `sealStep`, hands the same three to an extension that registers with
+  `pi.registerTurnExecutor` as `turn.steps`, and resumes an interrupted turn through that
+  executor when it asks for `resumeOnStart`.
 
-[temporalio/pi#3](https://github.com/temporalio/pi/pull/3), stacked on it, adds `pi.registerTurnExecutor`, which lets an extension take over when a session's own turns run.
-
-[temporalio/pi#4](https://github.com/temporalio/pi/pull/4), stacked on that, splits a step into `modelCall`, `runToolCall` and `sealStep`, and hands the same three to a registered executor as `turn.steps`.
+The seal reads no retry budget off the transcript. Each seal returns the count it spent, and the
+workflow carries it into the next one, because the session that would otherwise count it is
+rebuilt for every activity.
 
 So the dependency is a build of the fork, pinned by commit in `fork.pin`:
 
@@ -151,7 +161,9 @@ One `runStep` activity does one thing:
 
 1. If the prompt is not in the transcript, `recordPrompt` puts it there. Nothing runs yet.
 2. Otherwise `prepareStep` settles what an earlier attempt left behind. It returns false when the turn already has its answer, which is a retry landing after the last step finished.
-3. `step()` runs one model call and the tools it asks for, and says whether the turn is done.
+3. `modelCall()` asks the model, `runToolCall()` runs each call it asked for, one at a time,
+   and `sealStep()` records the results and says whether the turn is done. The seal is handed
+   the retry count the workflow carried and returns what it spent.
 
 The workflow loops that until a step reports done, so the number of activities is the number of steps. Nothing in the activity reads the workflow's step number: the transcript decides what runs next, and the workflow only counts so a runaway turn hits a ceiling.
 
@@ -684,8 +696,9 @@ Limits that remain:
   one setup; NFSv3 and arbitrary clock skew are not covered.
 - Live intermediate results are in memory. Worker pending claims remain after
   result cleanup. Those paths have different retention and recovery behavior.
-- Whole-step worker retries rebuild the session, so the session's retry budget
-  resets between activities. The workflow's step ceiling is the fallback bound.
+- Worker retries rebuild the session in both modes. The workflow carries the retry count each
+  seal returns into the next one, so the budget holds across activities; the step ceiling is
+  the bound behind it.
 
 Historical live measurements, reported during development with `gpt-4o-mini`:
 
