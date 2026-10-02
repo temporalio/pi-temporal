@@ -19,6 +19,8 @@ import type {
   TurnExecutorContext,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { Client, Connection } from "@temporalio/client";
 import {
   LOCAL_TURN_WORKFLOW,
@@ -287,6 +289,15 @@ export default function (pi: ExtensionAPI) {
         // free, so an activity that adopts its own directory puts the project wherever Temporal
         // happened to send the first unit of work.
         if (cfg.shipTree) {
+          // The same brake `start --project` has. A pi opened in a home directory would ship
+          // every dotfile in it, `~/.ssh` and `~/.aws` included, because nothing there is ignored.
+          if (resolve(ctx.cwd) === homedir()) {
+            ctx.ui.notify(
+              "not sending your home directory as the project; run /background from the project",
+              "error",
+            );
+            return;
+          }
           await worktree.capture(ctx.cwd, `${cfg.sessionDir}/${task.sessionId}.jsonl`, {
             seed: true,
           });
