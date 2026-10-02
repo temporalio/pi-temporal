@@ -4,6 +4,9 @@
 
 export const WORKFLOW_TYPE = "piSession";
 export const WORKFLOW_ID_PREFIX = "pi-session-";
+// The failure type of a tool call that stopped before any attempt claimed it, so the tool cannot
+// have started and the workflow may move a pinned step instead of closing the call as unknown.
+export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
 
 export const workflowId = (sessionId: string) => `${WORKFLOW_ID_PREFIX}${sessionId}`;
 
