@@ -26,7 +26,7 @@ export function fromEnv(): Config {
   };
 }
 
-function minutesFromEnv(name: string): number | undefined {
+export function minutesFromEnv(name: string): number | undefined {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return undefined;
   const minutes = Number(raw);

@@ -1,0 +1,56 @@
+# Two workers that share nothing but the cluster and the session directory, plus a client that is
+# only ever a client. On one host "another worker" is another process reading the same disk, which
+# proves less than it looks like: here each worker has its own filesystem, its own hostname, and no
+# way to reach the other except through Temporal and /sessions.
+#
+#   docker compose -f docker/compose.yml up -d temporal worker-a
+#   docker compose -f docker/compose.yml run --rm client start "..."
+#
+# What this does NOT test: /sessions is a local volume, so the O_EXCL caveats in session-lock.ts
+# (NFSv3) are still untested. A real fleet wants a filesystem that answers those.
+
+name: pi-temporal-l3
+
+services:
+  # The dev server, not auto-setup: this needs no external database, and nothing here outlives the
+  # run. --ip 0.0.0.0 because the other containers reach it by service name.
+  temporal:
+    image: temporalio/admin-tools:1.29
+    # The image's own entrypoint is `sleep infinity`, so a command alone becomes arguments to sleep
+    # and the server never runs.
+    entrypoint: ["temporal"]
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--log-level", "warn"]
+    ports:
+      - "7242:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  worker-a: &worker
+    image: pi-temporal:l3
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - PI_SESSION_DIR=/sessions
+      - PI_TEMPORAL_TASK_QUEUE=${PI_TEMPORAL_TASK_QUEUE:-pi-session}
+      - PI_TEMPORAL_STEPPED=1
+      - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY}
+    volumes:
+      - sessions:/sessions
+
+  worker-b:
+    <<: *worker
+
+  # No worker inside it. It reaches the session through Temporal and the shared directory, which is
+  # the whole claim: a client needs an endpoint and an id, never a particular host.
+  client:
+    <<: *worker
+    entrypoint: ["node", "--import", "tsx", "src/cli.ts"]
+    command: ["running"]
+
+volumes:
+  sessions:

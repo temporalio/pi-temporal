@@ -186,6 +186,85 @@ What it costs: each activity opens the session file and builds an `AgentSession`
 - **An interrupt keeps what finished.** The step is closed on the way out, so a call that returned before the stop keeps its result. Only the one that was still running reads as an unknown outcome.
 - **Stepped mode keeps what a call produced.** A crash between a tool finishing and its result reaching Temporal loses the work under the whole-step mode: nothing recorded it. With a tool call per activity the result is kept beside the session file the moment the tool returns, so the retry finds it and the tool is not asked again. What is still lost is a tool that was inside its own execution when the process died, which is what an unknown outcome is for.
 
+## A session that outlives its client
+
+`/background` sends a task to a worker, but its commands live inside a pi session, so a task could
+only be started, listed and followed from the terminal that started it. Close that terminal and the
+task keeps going with nobody able to see it. `src/cli.ts` is the other half:
+
+```bash
+# hand a task over and walk away; prints the session id and exits
+npx tsx src/cli.ts start "port the auth module to the new API"
+
+# what this deployment is running right now
+npx tsx src/cli.ts running
+
+# follow one from anywhere, and stop when the turn stops
+npx tsx src/cli.ts watch task-1a2b3c4d
+npx tsx src/cli.ts stop task-1a2b3c4d
+```
+
+There is no server in this picture, because a worker-owned session has none. The workflow holds the
+control state and answers `turnState`; the session file holds the conversation. So following a
+session is a query plus a tail of its file, and both work from any machine that can reach the
+cluster and `PI_SESSION_DIR`. Point that directory at shared storage and the machine that starts a
+task, the machine that runs it, and the machine that watches it need not be the same one.
+
+Three things worth knowing about the shape:
+
+- **A query is answered by a worker**, so an open session whose workers are all down cannot answer.
+  Each query carries its own deadline and the answer is one of three: the state, gone, or
+  unreachable. Left as two, one dead worker turns `running` into a listing that hangs.
+- **Unreachable is not finished.** A follower that treats "nobody answered" as "the turn ended"
+  stops in the middle of a worker restart and reports a turn that is still going as done.
+- **A turn is over when the workflow says so**, not when the workflow closes. The supervisor stays
+  open for its idle timeout with nothing left to do, so `watch` reads the turn-level state instead.
+
+### Verified
+
+`detached-check.mts` runs the claim against real processes: a client hands over a task and exits,
+worker A starts the turn, A is killed with the tool still in flight, and worker B, which never saw
+this session, finishes it. `running` lists the session and `watch` follows it across the handover
+from a process that is only ever a client. The tool that was cut off is reported to the model as an
+unknown outcome rather than re-run, which is the rule this repo already holds everywhere else.
+
+Two things that check gets right only because getting them wrong was silent. It kills on observing
+a tool in flight rather than after a fixed delay, because a slow command in between pushes the kill
+past the end of the turn and then no handover happens at all. And it runs the worker and the CLI as
+single processes (`node --import tsx`), because `npx` spawns `tsx` spawns node, so killing the
+process you hold leaves the one that matters running.
+
+### Across two machines
+
+On one host "another worker" is another process reading the same disk, which proves less than it
+looks like. `docker/cross-host-check.sh` puts each worker in its own container: its own filesystem,
+its own hostname, and no way to reach the other except through Temporal and the shared session
+directory. The evidence is Temporal's own, because the worker identity is the container's hostname:
+
+```
+06:15:49  attempt 1  1@89cc9c4fa607     <- worker A, killed mid-tool
+06:16:30  attempt 2  1@252525771cd2     <- worker B, which had never seen this session
+```
+
+`/sessions` is a local volume, so this shows separate hosts rather than a separate filesystem
+implementation. The `O_EXCL` caveats in `session-lock.ts` still want a real network filesystem.
+
+## A turn nobody started
+
+`start` hands a task over and returns, but something still has to run it. A schedule does not:
+
+```bash
+npx tsx src/cli.ts schedule "review yesterday's merges" --cron="0 9 * * *" --id=morning
+npx tsx src/cli.ts unschedule morning
+```
+
+Each firing is its own session, because the workflow takes the task in its input and derives its
+own id from the firing it was given. Two things make that work rather than one. `initialPrompt` in
+the workflow input is the task, so nothing has to be running to send a first prompt. And the
+schedule names its workflow the way a session's workflow is always named, because Temporal appends
+the firing time to it: without that, a scheduled run lands on an id `running` and `watch` do not
+recognise, and the only sessions anyone could see would be the ones a client started.
+
 ## Reproducing
 
 Helpers are at the repo root, none of which needs a model key:
@@ -195,6 +274,8 @@ Helpers are at the repo root, none of which needs a model key:
 - `local-turn-check.mts` does the same for a turn of a live session, with the turn itself faked: handed over once in whole-turn mode, and a model call, its calls and a seal per step in stepped mode. It also holds the two rules that half depends on: the calls of a step do not overlap there, and an interrupt stops the loop instead of buying another model call.
 - `l2-step-check.mts` needs no server either. It drives the stepped step body against fake activities: calls overlap unless the batch says otherwise, a failed tool still lets the step close, and an interrupt is not swallowed.
 - `session-lock-check.mts` covers the one-writer-at-a-time lock: two writers do not overlap, a dead holder's lock is reclaimed on age, and a live holder's is not stolen.
+- `detached-check.mts` needs a server and a key. It is the only one that does, because what it
+  proves is a session surviving the process holding it, which does not show up inside one process.
 - `pending-check.mts` needs neither a server nor a key. It covers the files a step keeps about its calls, which is what "a call that already started is not silently repeated" rests on: a fresh call looks fresh, scratch never reads as a result, and a sweep drops what the transcript answers and keeps what it does not.
 
 To see what a session is doing without reading its file, ask the workflow: `temporal workflow query --workflow-id pi-session-<id> --name turnState` reports the queue, the step in flight, and how the last turn ended.

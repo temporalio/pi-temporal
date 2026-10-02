@@ -6,16 +6,18 @@
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
 import {
+  ApplicationFailure,
   proxyActivities,
   defineSignal,
   defineQuery,
   setHandler,
+  workflowInfo,
   condition,
   CancellationScope,
   isCancellation,
   log,
 } from "@temporalio/workflow";
-import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS } from "./protocol.js";
+import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS, WORKFLOW_ID_PREFIX } from "./protocol.js";
 import type {
   PromptInput,
   RunStepInput,
@@ -75,6 +77,19 @@ export async function piSession(
   sessionFile: string,
   options?: SessionTurnOptions,
 ): Promise<void> {
+  // A schedule fires with fixed arguments, so it cannot name a session, and every firing has to be
+  // its own. The workflow id is already unique per firing (Temporal suffixes a scheduled one) and
+  // is the one name both sides agree on, so derive from it when nothing was given.
+  const id = sessionId || workflowInfo().workflowId.replace(WORKFLOW_ID_PREFIX, "");
+  if (!sessionFile && !options?.sessionDir) {
+    // The worker's own directory would do, until two workers in different directories serve one
+    // session from two files.
+    throw ApplicationFailure.nonRetryable(
+      "piSession was started with neither a session file nor a session directory",
+      "NoSessionDir",
+    );
+  }
+  const file = sessionFile || `${options?.sessionDir}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   // Same loop either way. Only what "one step" means differs, so wake, interrupt, the step
   // ceiling and idle retirement are unchanged.
@@ -93,7 +108,9 @@ export async function piSession(
         log: (message, attributes) => log.info(message, attributes),
       })
     : runStep;
-  const queue: PromptInput[] = [];
+  // Seeded from the input, which is what lets a turn start with no client: the task is already in
+  // the workflow when it begins, rather than arriving as a signal from something still running.
+  const queue: PromptInput[] = options?.initialPrompt ? [options.initialPrompt] : [];
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
   let finished: TurnState["finished"];
@@ -121,7 +138,13 @@ export async function piSession(
         current = CancellationScope.current();
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
-          const input: RunStepInput = { sessionId, sessionFile, step, retryAttempt, ...prompt };
+          const input: RunStepInput = {
+            sessionId: id,
+            sessionFile: file,
+            step,
+            retryAttempt,
+            ...prompt,
+          };
           const result = await runTurnStep(input);
           retryAttempt = result.retryAttempt;
           if (result.done) {
@@ -131,7 +154,7 @@ export async function piSession(
           }
         }
         log.warn("turn hit the step ceiling and was left where it stopped", {
-          sessionId,
+          sessionId: id,
           promptId: prompt.promptId,
           maxSteps: MAX_STEPS_PER_TURN,
         });

@@ -70,6 +70,12 @@ export interface SessionTurnOptions {
   // Drive each step as a model call, one activity per tool call, and a seal, instead of one
   // activity for the whole step. Off by default: the whole-step mode is what runs today.
   readonly stepped?: boolean;
+  // A task the workflow already has when it starts, so a turn can begin with nothing running that
+  // could have sent it: a Temporal schedule, or anything else that can start a workflow.
+  readonly initialPrompt?: PromptInput;
+  // Where to keep the session log when the id is derived rather than given. A scheduled start has
+  // no client to choose either, and the workflow may not read the environment.
+  readonly sessionDir?: string;
   // The bound on one tool call in stepped mode. A call that crosses it is not run again, because
   // its dispatch note says it started, so this is the longest any tool may take.
   readonly toolTimeoutMinutes?: number;
