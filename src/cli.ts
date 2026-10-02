@@ -174,6 +174,7 @@ async function schedule(args: string[]) {
             idleTimeout: cfg.idleTimeout,
             stepped: cfg.stepped,
             toolTimeoutMinutes: cfg.toolTimeoutMinutes,
+            budget: cfg.budget,
             sessionDir: cfg.sessionDir,
             template,
             initialPrompt: { promptId: `scheduled-${id}`, text },
