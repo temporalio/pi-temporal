@@ -554,7 +554,8 @@ The following checks need no model key:
 - `seal-check.mts` and `fence-check.mts` need a Temporal server. They run the real
   activities over a real session with a scripted model (`faux-worker.mts`), each worker in a
   process of its own. `seal-check.mts` covers the last seal's boundaries, a seal killed after
-  its writes and retried elsewhere, and a `turn_end` continuation. `fence-check.mts` stops a
+  its writes and retried elsewhere, a `turn_end` continuation, and a whole-step turn, which
+  builds its step from the same primitives inside one activity. `fence-check.mts` stops a
   worker mid-model-call and checks that its late append is refused once another worker has
   finished the turn. Each waits out a heartbeat and the lock's stale window.
 - `l2-step-check.mts` checks tool overlap, fallback policy, and cancellation with
