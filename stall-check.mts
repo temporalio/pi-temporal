@@ -66,6 +66,10 @@ if (role === "holder") {
   // said "still mine" for exactly the case it was added to cover.
   check("and so does the synchronous one", answers.ownedNow === false, answers);
 
-  console.log(failures.length === 0 ? "\nstall-check: OK" : `\nstall-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "\nstall-check: OK"
+      : `\nstall-check: ${failures.length} failed`,
+  );
   process.exit(failures.length === 0 ? 0 : 1);
 }

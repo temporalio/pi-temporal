@@ -74,7 +74,11 @@ try {
     sessionId: "session", sessionFile, promptId: "turn", text: "task", step: 1, retryAttempt: 0,
   }), (error) => error === timeout);
   assert.equal(sharedCalls, 0, "a started attempt must not overlap a migrated batch");
-  assert.equal(recoverySeals, 1, "the failed step must preserve results without moving its project");
+  assert.equal(
+    recoverySeals,
+    1,
+    "the failed step must preserve results without moving its project",
+  );
   assert.equal(await readFile(join(b, "seed.txt"), "utf8"), "seed\n");
   console.log("PASS: a timed-out attempt cannot publish over work from a migrated batch");
 } finally {

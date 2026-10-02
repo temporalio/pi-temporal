@@ -53,7 +53,8 @@ pinned_fork() {
 pinned_fork
 
 $COMPOSE down -v >/dev/null 2>&1
-docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null || { echo "build failed"; exit 1; }
+docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null \
+  || { echo "build failed"; exit 1; }
 # One worker for the first half, so the second one is provably a host that has never seen this
 # project. The second half brings both up, which is the only way a step's activities get spread.
 # The file server first, and waited for. The session directory is a volume the DAEMON mounts, and
@@ -85,25 +86,31 @@ case "$wrote" in
   *) bad "worker A wrote the file" "$wrote"; exit 1 ;;
 esac
 
-shipped=$($COMPOSE exec -T worker-a sh -c "ls /sessions/$sid.jsonl.tree 2>/dev/null | wc -l" 2>/dev/null | tr -d '\r ')
+shipped=$($COMPOSE exec -T worker-a sh -c "ls /sessions/$sid.jsonl.tree 2>/dev/null | wc -l" \
+  2>/dev/null | tr -d '\r ')
 [ "${shipped:-0}" -gt 0 ] && ok "the tree was shipped beside the session ($shipped files)" \
   || bad "nothing was shipped" "$shipped"
 
 # --- the host that wrote it goes away, and one that has never seen the project takes over
 docker kill "$($COMPOSE ps -q worker-a)" >/dev/null 2>&1
 sleep 2
-[ -z "$($COMPOSE ps -q --status running worker-a)" ] && ok "worker A's host is gone" || bad "worker A's host is gone"
+[ -z "$($COMPOSE ps -q --status running worker-a)" ] \
+  && ok "worker A's host is gone" || bad "worker A's host is gone"
 
 $COMPOSE up -d worker-b >/dev/null 2>&1
 sleep 8
 hostB=$($COMPOSE exec -T worker-b hostname 2>/dev/null | tr -d '\r')
-[ "$hostB" != "$hostA" ] && ok "worker B is a different host ($hostB)" || bad "worker B is a different host"
+[ "$hostB" != "$hostA" ] \
+  && ok "worker B is a different host ($hostB)" || bad "worker B is a different host"
 empty=$($COMPOSE exec -T worker-b sh -c 'ls -A /project | wc -l' 2>/dev/null | tr -d '\r ')
-[ "${empty:-1}" = "0" ] && ok "worker B's project is empty before the turn" || bad "worker B's project was not empty" "$empty"
+[ "${empty:-1}" = "0" ] \
+  && ok "worker B's project is empty before the turn" \
+  || bad "worker B's project was not empty" "$empty"
 
 # --- the same session, on the other host. The file exists there only if the tree travelled.
-$COMPOSE run --rm -T client start --project=/project \
-  "Use the bash tool to run exactly: cat /project/note.txt /project/seed.txt. Report what it printed." \
+task="Use the bash tool to run exactly: cat /project/note.txt /project/seed.txt. "
+task+="Report what it printed."
+$COMPOSE run --rm -T client start --project=/project "$task" \
   --session="$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
 
@@ -138,8 +145,11 @@ $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
 # host and the check would fail with nothing wrong.
 read_back=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
 case "$read_back" in
-  *"tool result: SPREAD"*) ok "with both hosts polling, the one that read it saw the other's work" ;;
-  *) bad "with both hosts polling, the read saw the write" "$(printf '%s' "$read_back" | tail -3)" ;;
+  *"tool result: SPREAD"*)
+    ok "with both hosts polling, the one that read it saw the other's work" ;;
+  *)
+    bad "with both hosts polling, the read saw the write" \
+      "$(printf '%s' "$read_back" | tail -3)" ;;
 esac
 
 echo

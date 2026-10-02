@@ -31,6 +31,7 @@ import type {
   LocalTurnInput,
   PromptInput,
   SessionTurnOptions,
+  TurnBudget,
   TurnState,
 } from "../src/protocol.js";
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
@@ -49,6 +50,7 @@ interface Env {
   readonly idleTimeout: string;
   readonly stepped: boolean;
   readonly toolTimeoutMinutes?: number;
+  readonly budget?: TurnBudget;
   readonly embeddedWorker: boolean;
   readonly durableTurns: boolean;
   readonly provider?: string;
@@ -283,6 +285,7 @@ export default function (pi: ExtensionAPI) {
         idleTimeout: cfg.idleTimeout,
         stepped: cfg.stepped,
         toolTimeoutMinutes: cfg.toolTimeoutMinutes,
+        budget: cfg.budget,
       };
 
       try {

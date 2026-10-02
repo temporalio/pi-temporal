@@ -73,7 +73,11 @@ async function main() {
   });
   check("every contender eventually held it", guards.length === 3, guards.length);
 
-  console.log(failures.length === 0 ? "lock-gap-check: OK" : `lock-gap-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "lock-gap-check: OK"
+      : `lock-gap-check: ${failures.length} failed`,
+  );
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

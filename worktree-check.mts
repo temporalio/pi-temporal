@@ -132,8 +132,14 @@ async function main() {
   await worktree.ensure(projectA, sessionFile);
   const moved = await read(join(projectA, "note.txt"));
   check("a host behind the tip is brought to it", moved === "three\n", moved);
-  const salvaged = await readdir(join(`${sessionFile}.tree`, "salvage")).catch(() => [] as string[]);
-  check("work a crash left behind is kept, not dropped", salvaged.some((n) => n.endsWith(".bundle")), salvaged);
+  const salvaged = await readdir(join(`${sessionFile}.tree`, "salvage")).catch(
+    () => [] as string[],
+  );
+  check(
+    "work a crash left behind is kept, not dropped",
+    salvaged.some((n) => n.endsWith(".bundle")),
+    salvaged,
+  );
 
   // The assertion the old shape did not make. That interleaving is a lost update, and reading only
   // the file that survives it leaves this green while everything shipped since reverts one line
@@ -159,7 +165,10 @@ async function main() {
   check("a stranded host cannot publish over the tip", lateRefused);
   asHost(root, "b");
   await worktree.ensure(projectB, sessionFile);
-  check("so the host that carried on keeps its work", (await read(join(projectB, "note.txt"))) === "four\n");
+  check(
+    "so the host that carried on keeps its work",
+    (await read(join(projectB, "note.txt"))) === "four\n",
+  );
   // And what it wrote is recoverable rather than gone, which is what makes the move survivable
   // rather than merely safe.
   asHost(root, "a");
@@ -168,8 +177,8 @@ async function main() {
   check("and the work it stranded is set aside", kept.length > 0, kept);
 
   // A writer that died between renaming its bundle into place and naming it as the tip leaves a
-  // bundle nothing points at. Every host afterwards computes that same number, so refusing it wedges
-  // the session everywhere rather than on the one host that crashed.
+  // bundle nothing points at. Every host afterwards computes that same number, so refusing it
+  // wedges the session everywhere rather than on the one host that crashed.
   const orphaned = join(shared, "s6.jsonl");
   const projectF = join(root, "f", "project");
   await mkdir(projectF, { recursive: true });
@@ -253,11 +262,15 @@ async function main() {
   const refusedOwned = (await worktree.release(owned, s5)) === false;
   const intact = (await read(join(owned, "src.txt"))) === "code\n";
   const ignoredKept = (await read(join(owned, ".env"))) === "SECRET=1\n";
-  check("a directory this host did not build is never emptied", refusedOwned && intact && ignoredKept, {
-    refusedOwned,
-    intact,
-    ignoredKept,
-  });
+  check(
+    "a directory this host did not build is never emptied",
+    refusedOwned && intact && ignoredKept,
+    {
+      refusedOwned,
+      intact,
+      ignoredKept,
+    },
+  );
 
   // The same directory after a restore, which is what a session with more than one host does to it.
   // An adopted directory's note carries no answer to "who built this", and reading that absence as
@@ -320,7 +333,11 @@ async function main() {
     await worktree.capture(projectLong, compacted);
   }
   const bundles = (await readdir(`${compacted}.tree`)).filter((n) => n.endsWith(".bundle"));
-  check("the bundle chain restarts rather than growing for ever", bundles.length < 20, bundles.length);
+  check(
+    "the bundle chain restarts rather than growing for ever",
+    bundles.length < 20,
+    bundles.length,
+  );
 
   asHost(root, "late");
   await worktree.ensure(projectLate, compacted);
@@ -370,10 +387,14 @@ async function main() {
   asHost(root, "firing");
   await worktree.ensure(projectFiring, firing);
   const arrived = await read(join(projectFiring, "todo.txt"));
-  check("a firing takes the project the schedule was given", took && arrived === "review the merges\n", {
-    took,
-    arrived,
-  });
+  check(
+    "a firing takes the project the schedule was given",
+    took && arrived === "review the merges\n",
+    {
+      took,
+      arrived,
+    },
+  );
   const again = await worktree.adopt(templateFile, firing);
   check("and a re-driven activity does not copy it twice", again === false);
 
@@ -435,7 +456,11 @@ async function main() {
   await rm(bare, { recursive: true, force: true });
   await rm(ignoring, { recursive: true, force: true });
 
-  console.log(failures.length === 0 ? "\nworktree-check: OK" : `\nworktree-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "\nworktree-check: OK"
+      : `\nworktree-check: ${failures.length} failed`,
+  );
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

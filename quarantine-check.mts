@@ -145,9 +145,11 @@ async function main() {
   // The next step of the same turn is not the same step, and a writer the step before it left
   // behind is exactly as unaccounted for as one from another turn.
   let refusedNextStep = false;
-  await worktree.ensure(project, sessionFile, { turn: "turn-1", step: 2, callId: "call-x" }).catch(() => {
-    refusedNextStep = true;
-  });
+  await worktree
+    .ensure(project, sessionFile, { turn: "turn-1", step: 2, callId: "call-x" })
+    .catch(() => {
+      refusedNextStep = true;
+    });
   check("the next step of the same turn is refused too", refusedNextStep);
 
   // The abandoned tool finally returns. Whatever it did, it is not doing it any more, so the
@@ -210,9 +212,21 @@ async function main() {
   kids.push(standing);
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...stale, worker: "nothing-carries-this" });
-  check("a tool standing in the directory keeps it refused, whatever it put down", !(await usable()));
-  const said = await worktree.ensure(project, sessionFile, later).then(() => "", (err) => String(err));
-  check("and the refusal says which process and why", said.includes(`pid ${standing.pid} is in the directory`), said.slice(0, 200));
+  check(
+    "a tool standing in the directory keeps it refused, whatever it put down",
+    !(await usable()),
+  );
+  const said = await worktree
+    .ensure(project, sessionFile, later)
+    .then(
+      () => "",
+      (err) => String(err),
+    );
+  check(
+    "and the refusal says which process and why",
+    said.includes(`pid ${standing.pid} is in the directory`),
+    said.slice(0, 200),
+  );
   await ended({ child: standing, pid: standing.pid!, pgid: standing.pid! });
   check("and releases it when that process leaves", await usable());
 
@@ -260,8 +274,9 @@ async function main() {
   );
   check(
     "an empty one releases it",
-    inCgroup({ cgroup: "/system.slice/pi-worker-1.service" }, ["/system.slice/pi-worker-2.service"]) ===
-      undefined,
+    inCgroup({ cgroup: "/system.slice/pi-worker-1.service" }, [
+      "/system.slice/pi-worker-2.service",
+    ]) === undefined,
   );
   check(
     "and the group this process is in says nothing either way",
@@ -294,7 +309,10 @@ async function main() {
           state: {
             messages: [
               { role: "user", content: "run", timestamp: Date.now() },
-              { role: "assistant", content: [{ type: "toolCall", id: seen.callId, name: "probe" }] },
+              {
+                role: "assistant",
+                content: [{ type: "toolCall", id: seen.callId, name: "probe" }],
+              },
             ],
           },
           async runToolCall() {
@@ -322,9 +340,11 @@ async function main() {
     .catch(() => undefined);
   check("the activity marks the directory while its tool runs", marked[0] === true, marked);
   let afterActivity = true;
-  await worktree.ensure(project, sessionFile, { turn: "turn-6", step: 1, callId: "other" }).catch(() => {
-    afterActivity = false;
-  });
+  await worktree
+    .ensure(project, sessionFile, { turn: "turn-6", step: 1, callId: "other" })
+    .catch(() => {
+      afterActivity = false;
+    });
   check("and unmarks it when the tool returns", afterActivity);
 
   // And what the activity does with a refusal decides what it costs the session. A refused
@@ -358,7 +378,10 @@ async function main() {
   const built = join(root, "built-here");
   await mkdir(built, { recursive: true });
   await worktree.ensure(built, sessionFile);
-  check("a host builds an empty directory for the session", (await readdir(built)).includes("README.md"));
+  check(
+    "a host builds an empty directory for the session",
+    (await readdir(built)).includes("README.md"),
+  );
   await worktree.beginWrite(built, { turn: "turn-10", step: 1, callId: "call-i" });
   await writeFile(join(built, "written-by-the-stranded-tool.txt"), "still writing\n");
   let movedOn = true;
@@ -376,7 +399,10 @@ async function main() {
       "written-by-the-stranded-tool.txt",
     ) && !(await readdir(built)).includes("written-by-the-stranded-tool.txt"),
   );
-  check("the fresh one holds what the session shipped", (await readdir(built)).includes("README.md"));
+  check(
+    "the fresh one holds what the session shipped",
+    (await readdir(built)).includes("README.md"),
+  );
   check("and no marker is left on it", (await markers()).length === 0);
 
   // And never while one of this step's own tools is inside it: moving the directory then would take
@@ -389,7 +415,10 @@ async function main() {
     .catch(() => {
       movedUnderOurOwn = false;
     });
-  check("a directory holding one of this step's own calls is refused, not moved", !movedUnderOurOwn);
+  check(
+    "a directory holding one of this step's own calls is refused, not moved",
+    !movedUnderOurOwn,
+  );
   check(
     "and it stays where it is",
     (await readdir(root)).filter((name) => name.startsWith("built-here.stranded.")).length === 1,
@@ -399,10 +428,17 @@ async function main() {
   // The file the stranded tool wrote is still there. Quarantine refuses reuse; it does not throw
   // away what the tool did, which is the other half of not losing work.
   await writeFile(join(project, "late.txt"), "written by the stranded tool\n");
-  check("nothing the stranded tool wrote is removed", (await readFile(join(project, "late.txt"), "utf8")).length > 0);
+  check(
+    "nothing the stranded tool wrote is removed",
+    (await readFile(join(project, "late.txt"), "utf8")).length > 0,
+  );
 
   await rm(root, { recursive: true, force: true });
-  console.log(failures.length === 0 ? "quarantine-check: OK" : `quarantine-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "quarantine-check: OK"
+      : `quarantine-check: ${failures.length} failed`,
+  );
   process.exitCode = failures.length === 0 ? 0 : 1;
 }
 

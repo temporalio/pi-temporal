@@ -14,8 +14,8 @@
 // A worker dying with a tool in flight costs that step, and it used to cost the whole turn with it.
 // What made ending the turn the only safe answer was the tool: Temporal stops waiting for it, the
 // process behind it keeps writing, and when it finishes it publishes against the tip it read, which
-// reverts whatever ran in its place. The tip rule cannot catch that one, because the stale writer is
-// standing exactly where it was told to stand.
+// reverts whatever ran in its place. The tip rule cannot catch that one, because the stale writer
+// is standing exactly where it was told to stand.
 //
 // With both clauses in place the turn has nothing left to be protected from by ending, and it
 // carries on with the next step. Take `closeStep` out of the seal and clause 2 fails: the abandoned

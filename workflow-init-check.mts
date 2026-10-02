@@ -38,7 +38,12 @@ const activities = {
     return { done: true, retryAttempt: 0, finalText: "answered" };
   },
   async runModelCall() {
-    return { calls: [{ id: "call", name: "probe" }], sequential: false, ended: false, queue: pinnedQueue };
+    return {
+      calls: [{ id: "call", name: "probe" }],
+      sequential: false,
+      ended: false,
+      queue: pinnedQueue,
+    };
   },
   async runToolCall() {
     throw new Error("a tool call must be answered by the queue it was addressed to");
@@ -88,10 +93,18 @@ try {
     }],
   });
   handles.push(initialized);
-  await Promise.race([adoptionStarted, sleep(10_000).then(() => { throw new Error("adoption never started"); })]);
+  await Promise.race([
+    adoptionStarted,
+    sleep(10_000).then(() => {
+      throw new Error("adoption never started");
+    }),
+  ]);
   let state: TurnState | undefined;
   try { state = await initialized.query<TurnState>("turnState"); } catch {}
-  check("scheduled initialization answers its turn query", state?.running?.promptId === "scheduled");
+  check(
+    "scheduled initialization answers its turn query",
+    state?.running?.promptId === "scheduled",
+  );
   await initialized.signal("interrupt");
   releaseAdoption();
   await initialized.result();

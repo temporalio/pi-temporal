@@ -200,7 +200,7 @@ async function main() {
     } finally {
       live.delete(turnId);
     }
-    const nonRetryable = failure instanceof ApplicationFailure && failure.nonRetryable;
+    const nonRetryable = failure instanceof ApplicationFailure && failure.nonRetryable === true;
     check("a tool that fails on a stopped turn is not retried", nonRetryable && runs === 1, {
       failure: String(failure),
       runs,

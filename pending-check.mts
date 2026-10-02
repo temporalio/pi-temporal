@@ -29,8 +29,14 @@ async function main() {
 
   // Nothing kept yet: a fresh dispatch has to look fresh, or a first attempt reports its own
   // tool as an unknown outcome and never runs it.
-  check("an untouched call has no note", (await pending.wasDispatched(file, t1, 1, "c1")) === false);
-  check("an untouched call has no result", (await pending.readResult(file, t1, 1, "c1")) === undefined);
+  check(
+    "an untouched call has no note",
+    (await pending.wasDispatched(file, t1, 1, "c1")) === false,
+  );
+  check(
+    "an untouched call has no result",
+    (await pending.readResult(file, t1, 1, "c1")) === undefined,
+  );
 
   check("a first dispatch is admitted", (await pending.noteDispatch(file, t1, 1, "c1")) === true);
   check("a dispatch leaves a note", (await pending.wasDispatched(file, t1, 1, "c1")) === true);
@@ -79,7 +85,10 @@ async function main() {
   await pending.noteDispatch(file, t1, 2, "c1");
   await pending.keepResult(file, t1, 2, "c1", outcome("c1"));
   await pending.sweep(file, t1, 2);
-  check("an earlier step's results are forgotten", (await pending.readResult(file, t1, 1, "c1")) === undefined);
+  check(
+    "an earlier step's results are forgotten",
+    (await pending.readResult(file, t1, 1, "c1")) === undefined,
+  );
   // And its notes are not. A note is what says the call was admitted, and an attempt that stalled
   // before taking its claim comes back after the results are gone: without the note its call looks
   // fresh and it runs the tool again. `stale-dispatch-check.mts` drives that interleaving.
@@ -92,29 +101,50 @@ async function main() {
   check("no scratch is left behind", left.every((name) => !name.endsWith(".writing")), left);
 
   await pending.forgetResults(file, t1, 2, ["c1"]);
-  check("forgetting a result drops it", (await pending.readResult(file, t1, 2, "c1")) === undefined);
+  check(
+    "forgetting a result drops it",
+    (await pending.readResult(file, t1, 2, "c1")) === undefined,
+  );
   check("and leaves what admitted it", (await pending.wasDispatched(file, t1, 2, "c1")) === true);
 
   // The next turn drops every result, its own and the turns before it, and keeps every note. The
   // results are recorded by then; the notes are what a stalled attempt is still measured against.
   await pending.sweepResults(file);
-  check("a new turn drops the results", (await pending.readResult(file, t1, 2, "c1")) === undefined);
+  check(
+    "a new turn drops the results",
+    (await pending.readResult(file, t1, 2, "c1")) === undefined,
+  );
   check("and keeps the admissions", (await pending.wasDispatched(file, t1, 1, "c1")) === true);
 
   // The turn is half the scope, and it has to be: a turn numbers its steps from one again, so
   // without it the new turn's step 1 would read the last turn's step 1 as its own and report a
   // tool that never ran as already dispatched.
-  check("a new turn's step 1 is its own", (await pending.wasDispatched(file, t2, 1, "c1")) === false);
+  check(
+    "a new turn's step 1 is its own",
+    (await pending.wasDispatched(file, t2, 1, "c1")) === false,
+  );
   check("and it is admitted", (await pending.noteDispatch(file, t2, 1, "c1")) === true);
-  check("without disturbing the turn before it", (await pending.wasDispatched(file, t1, 1, "c1")) === true);
+  check(
+    "without disturbing the turn before it",
+    (await pending.wasDispatched(file, t1, 1, "c1")) === true,
+  );
 
   // A prompt id comes from whoever submitted it, so it is not necessarily a name a filesystem
   // takes. It must not reach the path, and two of them must not land on one directory.
   const escaping = "../../etc";
   await pending.noteDispatch(file, escaping, 1, "c1");
-  check("an id that is not a filename stays inside", (await readdir(`${file}.pending`)).length === 3);
-  check("and is still its own turn", (await pending.wasDispatched(file, escaping, 1, "c1")) === true);
-  check("and not somebody else's", (await pending.wasDispatched(file, "../../var", 1, "c1")) === false);
+  check(
+    "an id that is not a filename stays inside",
+    (await readdir(`${file}.pending`)).length === 3,
+  );
+  check(
+    "and is still its own turn",
+    (await pending.wasDispatched(file, escaping, 1, "c1")) === true,
+  );
+  check(
+    "and not somebody else's",
+    (await pending.wasDispatched(file, "../../var", 1, "c1")) === false,
+  );
 
   // A session that never dispatched anything has no directory, and sweeping it must not throw.
   await pending.sweep(join(dir, "never-used.jsonl"), t1, 1);

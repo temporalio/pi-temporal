@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { unknownToolCallOutcome, type AgentSession, type TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
+import {
+  unknownToolCallOutcome,
+  type AgentSession,
+  type TurnToolCallOutcome,
+} from "@earendil-works/pi-coding-agent";
 import { makeActivities } from "./src/activities.js";
 import { makeSteppedStep } from "./src/l2-step.js";
 import * as pending from "./src/pending.js";
@@ -76,7 +89,10 @@ for (const { failure, atSeal } of [
         try { return await fn(); } finally { nonCancellable = false; }
       },
     });
-    await assert.rejects(step({ sessionId: "session", sessionFile: file, step: 1, promptId: "prompt", text: "run" }), (error) => error === failure);
+    await assert.rejects(
+      step({ sessionId: "session", sessionFile: file, step: 1, promptId: "prompt", text: "run" }),
+      (error) => error === failure,
+    );
     await pending.sweepResults(file);
     const results = JSON.parse(await readFile(file, "utf8")) as TurnToolCallOutcome[];
     assert.equal(results[0]?.message.toolCallId, "finished");
@@ -85,7 +101,11 @@ for (const { failure, atSeal } of [
     assert.equal(results[1]?.message.toolCallId, "cancelled");
     assert.equal(postRun, false);
     assert.equal(pinnedSeals, atSeal ? 1 : 0);
-    console.log(`PASS a completed result survives ${failure instanceof Cancelled ? "cancellation" : "a started-attempt failure"} during the ${atSeal ? "seal" : "tools"} and the next pending sweep`);
+    console.log(
+      `PASS a completed result survives ${
+        failure instanceof Cancelled ? "cancellation" : "a started-attempt failure"
+      } during the ${atSeal ? "seal" : "tools"} and the next pending sweep`,
+    );
     assert.equal(await readFile(join(project, "local.txt"), "utf8"), "local work\n");
     // Nothing was restored or captured: no bundle, no tip, and no host directory at all.
     assert.deepEqual(

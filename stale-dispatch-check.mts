@@ -63,7 +63,11 @@ try {
   await first;
   const effects = await readFile(effectFile, "utf8");
   console.log(`effect count after the stale attempt resumes: ${effects.trim().split("\n").length}`);
-  assert.equal(effects, "effect\n", "a stale dispatch must not repeat a completed effect after cleanup");
+  assert.equal(
+    effects,
+    "effect\n",
+    "a stale dispatch must not repeat a completed effect after cleanup",
+  );
   console.log("stale-dispatch-check: OK");
 } finally {
   release();

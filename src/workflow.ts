@@ -20,7 +20,6 @@ import {
   isCancellation,
   log,
   ActivityFailure,
-  ApplicationFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
 import {

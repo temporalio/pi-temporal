@@ -160,7 +160,11 @@ async function main() {
   // A holder that is alive and ticking, which is the case a refresher can see. The other case, a
   // holder whose event loop stopped, is what `stall-check.mts` covers: it needs two processes,
   // because a stopped loop cannot run its own contender.
-  check("and a live one notices within a refresh when it does not", syncLost === false, { syncLost });
+  check(
+    "and a live one notices within a refresh when it does not",
+    syncLost === false,
+    { syncLost },
+  );
 
   // The first activity of a session takes the lock before anything has created the directory the
   // session file lives in, so the lock has to make it rather than sit there failing.

@@ -205,14 +205,23 @@ async function main() {
   check("running lists it", listed.out.includes(sessionId), listed.out + listed.err);
 
   // --- 4. follow it across the handover, from a process that is only ever a client
-  const watched = await run(cli(["watch", sessionId]).cmd, cli(["watch", sessionId]).args, env, 300_000);
+  const watched = await run(
+    cli(["watch", sessionId]).cmd,
+    cli(["watch", sessionId]).args,
+    env,
+    300_000,
+  );
   check("watch returned rather than hanging", !watched.timedOut, watched.out.slice(-200));
   // The step that lost its host is closed, and the turn goes on from there. What is not moved is
   // the step: the attempt started, so nothing can say the tool stopped, and a sixth review
   // reproduced what moving the rest of a started batch costs (`migration-rejoin-check.mts` is that
   // reproduction). The next step is a fresh model call on whatever worker is free, made from a
   // transcript that says which call has an outcome nobody can vouch for.
-  check("the turn is answered rather than dying with the worker", /answered/.test(watched.err), watched.err.slice(-300));
+  check(
+    "the turn is answered rather than dying with the worker",
+    /answered/.test(watched.err),
+    watched.err.slice(-300),
+  );
 
   const entries = (await readFile(join(sessions, `${sessionId}.jsonl`), "utf8").catch(() => ""))
     .split("\n")
@@ -235,10 +244,16 @@ async function main() {
   const sealedAfterKill = entries.some(
     (e) => e.message?.role === "toolResult" && Date.parse(e.timestamp ?? "") > killedAt,
   );
-  check("the results it already had are recorded anyway", sealedAfterKill, new Date(killedAt).toISOString());
+  check(
+    "the results it already had are recorded anyway",
+    sealedAfterKill,
+    new Date(killedAt).toISOString(),
+  );
 
   const text = (content: unknown) => JSON.stringify(content ?? "");
-  const results = entries.filter((e) => e.message?.role === "toolResult").map((e) => text(e.message?.content));
+  const results = entries
+    .filter((e) => e.message?.role === "toolResult")
+    .map((e) => text(e.message?.content));
   // Every block the model asked for that would append to the file, whichever step asked for it. A
   // turn that carries on can ask again, and that is the model's call to make on an outcome it was
   // told nobody can vouch for. What it must never be is the harness running one twice.
@@ -257,7 +272,9 @@ async function main() {
     ran,
     asked: asked.length,
   });
-  console.log(`  (the model asked for it ${asked.length} time(s) across ${results.length} result(s))`);
+  console.log(
+    `  (the model asked for it ${asked.length} time(s) across ${results.length} result(s))`,
+  );
 
   const verdict = failures.length === 0 ? "OK" : `${failures.length} failed`;
   console.log(`\ndetached-check: ${verdict}`);

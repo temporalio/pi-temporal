@@ -15,7 +15,8 @@ import * as worktree from "./src/worktree.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
-  console.log(`${ok ? "PASS" : "FAIL"} ${what}${ok ? "" : ` (${JSON.stringify(detail)?.slice(0, 300)})`}`);
+  const suffix = ok ? "" : ` (${JSON.stringify(detail)?.slice(0, 300)})`;
+  console.log(`${ok ? "PASS" : "FAIL"} ${what}${suffix}`);
   if (!ok) failures.push(what);
 };
 
@@ -82,7 +83,10 @@ async function main() {
   await worktree.beginWrite(project, { turn: "turn-1", step: 1, callId: "call-a" });
   await editMarker(stale);
   check("the /proc walk clears a writer that left nothing behind", await usable());
-  check("and takes the marker off the host", (await readdir((await markers())!).catch(() => [])).length === 0);
+  check(
+    "and takes the marker off the host",
+    (await readdir((await markers())!).catch(() => [])).length === 0,
+  );
 
   // A tool that put itself in a group of its own and kept nothing the worker gave it, standing in
   // the directory it writes.
@@ -104,7 +108,8 @@ async function main() {
   await writeFile(kept, "written by a tool that is still inside\n");
   const holder = spawned({
     cwd: "/",
-    script: `require("node:fs").openSync(${JSON.stringify(kept)}, "r"); setInterval(() => {}, 1000)`,
+    script:
+      `require("node:fs").openSync(${JSON.stringify(kept)}, "r"); setInterval(() => {}, 1000)`,
   });
   // Its file is opened a moment after it starts, so the reading has to be taken after that.
   await new Promise((r) => setTimeout(r, 1500));
@@ -120,8 +125,14 @@ async function main() {
   const ours = (await readFile("/proc/self/cgroup", "utf8")).split("\n")[0];
   check("this host reports a control group to record", ours.split(":").length >= 3, ours);
   await worktree.beginWrite(project, { turn: "turn-1", step: 1, callId: "call-a" });
-  const note = JSON.parse(await readFile(join((await markers())!, (await readdir((await markers())!))[0]), "utf8"));
-  check("and a marker written here carries it", typeof note.cgroup === "string" && note.cgroup.length > 0, note);
+  const note = JSON.parse(
+    await readFile(join((await markers())!, (await readdir((await markers())!))[0]), "utf8"),
+  );
+  check(
+    "and a marker written here carries it",
+    typeof note.cgroup === "string" && note.cgroup.length > 0,
+    note,
+  );
   // Every process in a container shares one, so a marker naming this one says nothing either way.
   await editMarker({ ...stale, cgroup: note.cgroup });
   check("a marker naming the group this process is in still clears", await usable());
@@ -129,12 +140,19 @@ async function main() {
   // And whether this host could move that directory out of the way at all, which is the difference
   // between a stranded tool costing a directory and costing it until somebody comes. The reading is
   // a prediction for an operator; what decides is the rename. Both cases exist on any Linux host.
-  check("a plain directory can be set aside", (await worktree.cannotMoveAside(project)) === undefined);
+  check(
+    "a plain directory can be set aside",
+    (await worktree.cannotMoveAside(project)) === undefined,
+  );
   const mounted = await worktree.cannotMoveAside("/proc");
   check("a mount point cannot, and says so", mounted?.includes("mount point") === true, mounted);
 
   await rm(root, { recursive: true, force: true });
-  console.log(failures.length === 0 ? "liveness-linux-check: OK" : `liveness-linux-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "liveness-linux-check: OK"
+      : `liveness-linux-check: ${failures.length} failed`,
+  );
   process.exitCode = failures.length === 0 ? 0 : 1;
 }
 
