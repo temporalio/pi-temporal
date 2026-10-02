@@ -36,12 +36,16 @@ const recorded = new Map<string, number>();
 let tokensPerStep = 0;
 let secondsPerStep = 0;
 let answerAfter = Number.POSITIVE_INFINITY;
+// A wall-clock gate rather than a duration: the stale-deadline case below needs a step held until
+// a moment it names, not for a length of time.
+let gateUntil = 0;
 
 const activities = {
   async runStep(input: RunStepInput): Promise<RunStepResult> {
     const taken = (steps.get(input.promptId) ?? 0) + 1;
     steps.set(input.promptId, taken);
     if (secondsPerStep) await sleep(secondsPerStep * 1000);
+    while (Date.now() < gateUntil) await sleep(100);
     const billed = (recorded.get(input.sessionFile) ?? 0) + tokensPerStep;
     recorded.set(input.sessionFile, billed);
     return {
@@ -174,8 +178,36 @@ async function main() {
     // How many steps that is depends on what each one costs to schedule, which is not this check's
     // business; that it did not stop early is.
     check("and not before it has spent it", late.taken >= 2 && late.ran >= 2_000, late);
+
+    // A deadline dies with its turn. The timer used to sit in the turn's scope, which cancels its
+    // timers when it is cancelled, not when its function returns, so a turn that answered early
+    // left it pending and it fired into whichever turn was running when it expired, stopping it as
+    // if the user had. Two turns of one run: the first answers well inside its deadline, and the
+    // second is held past the moment the first one's timer would fire, then answers inside its own.
+    answerAfter = 1;
+    tokensPerStep = 0;
+    secondsPerStep = 0;
+    const survivor = `${queue}-stale-deadline`;
+    const t0 = Date.now();
+    const early = await turn({ hardSeconds: 5 }, survivor);
+    check("a turn well inside its deadline answers", early.finished?.outcome === "answered", early.finished);
+    await sleep(2_000);
+    gateUntil = t0 + 5_500;
+    const next = await turn({ hardSeconds: 5 }, survivor);
+    gateUntil = 0;
+    check(
+      "a deadline does not fire into the turn after it",
+      next.finished?.outcome === "answered",
+      next.finished,
+    );
   } finally {
-    for (const id of [`${queue}-session-budget`, `${queue}-woken-session-run-1`, `${queue}-woken-session-run-2`]) {
+    const kept = [
+      `${queue}-session-budget`,
+      `${queue}-woken-session-run-1`,
+      `${queue}-woken-session-run-2`,
+      `${queue}-stale-deadline`,
+    ];
+    for (const id of kept) {
       await client.workflow.getHandle(id).terminate().catch(() => undefined);
     }
     worker.shutdown();
