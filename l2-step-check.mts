@@ -289,7 +289,8 @@ async function main() {
     let pinnedActive = false;
     let crossedHosts = false;
     const unavailable = new Error("unclaimed");
-    const failed = outcome === "cancelled" ? new FakeCancel() : new Error("started attempt timed out");
+    const failed =
+      outcome === "cancelled" ? new FakeCancel() : new Error("started attempt timed out");
     const step = makeSteppedStep({
       activities: {
         runModelCall: async () => ({
@@ -333,7 +334,11 @@ async function main() {
     const error = await result;
     check("fallback never overlaps a pinned tool", !crossedHosts, { outcome });
     check(
-      outcome === "cancelled" ? "a cancelled sibling blocks queued fallback" : pinnedFails ? "an uncertain pinned attempt blocks migration" : "fallback resumes after the pinned tool ships",
+      outcome === "cancelled"
+        ? "a cancelled sibling blocks queued fallback"
+        : pinnedFails
+          ? "an uncertain pinned attempt blocks migration"
+          : "fallback resumes after the pinned tool ships",
       pinnedFails ? !sharedStarted && error === failed : sharedStarted && error === undefined,
       { sharedStarted, error: String(error), outcome },
     );
@@ -347,7 +352,12 @@ async function main() {
     let recoverySeal = false;
     const step = makeSteppedStep({
       activities: {
-        runModelCall: async () => ({ calls: [call("c1")], sequential: false, ended: false, queue: "w-1" }),
+        runModelCall: async () => ({
+          calls: [call("c1")],
+          sequential: false,
+          ended: false,
+          queue: "w-1",
+        }),
         runToolCall: async () => {
           sharedTools++;
           return { outcome: "unknown" };
@@ -369,10 +379,14 @@ async function main() {
       nonCancellable: (fn) => fn(),
     });
     const result = await step(INPUT).then(() => undefined, (error: unknown) => error);
-    check("an uncertain pinned attempt records results without shared tools", sharedTools === 0 && sharedSeals === 1 && recoverySeal, {
-      sharedTools,
-      sharedSeals,
-    });
+    check(
+      "an uncertain pinned attempt records results without shared tools",
+      sharedTools === 0 && sharedSeals === 1 && recoverySeal,
+      {
+        sharedTools,
+        sharedSeals,
+      },
+    );
     check("and its failure reaches the turn", result === gone, String(result));
   }
 
@@ -387,7 +401,12 @@ async function main() {
     };
     const step = makeSteppedStep({
       activities: {
-        runModelCall: async () => ({ calls: [call("held")], sequential: false, ended: false, queue: "host-a" }),
+        runModelCall: async () => ({
+          calls: [call("held")],
+          sequential: false,
+          ended: false,
+          queue: "host-a",
+        }),
         runToolCall: async () => ({ outcome: "settled" }),
         sealStep: seal,
       },
@@ -397,11 +416,15 @@ async function main() {
       nonCancellable: (fn) => fn(),
     });
     const error = await step(INPUT).then(() => undefined, (error: unknown) => error);
-    check("an uncertain pinned tool permits only a recovery seal", normalSeals === 0 && recoverySeals === 1 && error === failed, {
-      normalSeals,
-      recoverySeals,
-      error: String(error),
-    });
+    check(
+      "an uncertain pinned tool permits only a recovery seal",
+      normalSeals === 0 && recoverySeals === 1 && error === failed,
+      {
+        normalSeals,
+        recoverySeals,
+        error: String(error),
+      },
+    );
   }
 
   {
@@ -436,10 +459,18 @@ async function main() {
       nonCancellable: (fn) => fn(),
     });
     const error = await step(INPUT).then(() => undefined, (failure: unknown) => failure);
-    check("a cancelled shared call stops the queued fallback", sharedCalls.join(",") === "cancel", sharedCalls);
-    check("a fallback cancellation preserves the original stop and seals results", error === cancelled && recoverySeals === 1, {
-      error: String(error), recoverySeals,
-    });
+    check(
+      "a cancelled shared call stops the queued fallback",
+      sharedCalls.join(",") === "cancel",
+      sharedCalls,
+    );
+    check(
+      "a fallback cancellation preserves the original stop and seals results",
+      error === cancelled && recoverySeals === 1,
+      {
+        error: String(error), recoverySeals,
+      },
+    );
   }
 
   const bad = failures.length;

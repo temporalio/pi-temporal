@@ -154,7 +154,13 @@ async function forgetWaits() {
   assert.deepEqual(await fs.readdir(`${file}.tree`), []);
 }
 
-const checks = { staleSweep, behindRetirement, forgottenRetirement, adoptedAfterForget, forgetWaits };
+const checks = {
+  staleSweep,
+  behindRetirement,
+  forgottenRetirement,
+  adoptedAfterForget,
+  forgetWaits,
+};
 try {
   const selected = process.argv[2] as keyof typeof checks | undefined;
   for (const [name, check] of Object.entries(checks)) {

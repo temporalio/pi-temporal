@@ -15,18 +15,21 @@ const project = join(root, "project");
 const sessionDir = join(root, "sessions");
 const id = `unschedule-${randomUUID()}`;
 const template = join(sessionDir, `schedule-${id}.jsonl`);
-const connection = await Connection.connect({ address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233" });
+const connection = await Connection.connect({
+  address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
+});
 const client = new Client({ connection, namespace: process.env.TEMPORAL_NAMESPACE ?? "default" });
 const execute = promisify(execFile);
-const cli = (args: string[]) => execute(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
-  env: {
-    ...process.env,
-    PI_TEMPORAL_DATA: join(root, "host"),
-    PI_SESSION_DIR: sessionDir,
-    PI_TEMPORAL_SHIP_TREE: "1",
-    PI_TEMPORAL_TASK_QUEUE: id,
-  },
-});
+const cli = (args: string[]) =>
+  execute(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
+    env: {
+      ...process.env,
+      PI_TEMPORAL_DATA: join(root, "host"),
+      PI_SESSION_DIR: sessionDir,
+      PI_TEMPORAL_SHIP_TREE: "1",
+      PI_TEMPORAL_TASK_QUEUE: id,
+    },
+  });
 let firing: string | undefined;
 try {
   await mkdir(project);
@@ -40,10 +43,16 @@ try {
   }
   assert.ok(firing, "the schedule must start a firing before deletion");
   const history = await client.workflow.getHandle(firing).fetchHistory();
-  assert.ok(!history.events?.some((event) => event.workflowTaskStartedEventAttributes), "the firing must still be waiting for a worker");
+  assert.ok(
+    !history.events?.some((event) => event.workflowTaskStartedEventAttributes),
+    "the firing must still be waiting for a worker",
+  );
   await cli(["unschedule", id]);
   const target = join(sessionDir, "firing.jsonl");
-  await makeActivities({ projectDir: project, shipTree: true }).adoptProject({ sessionFile: target, template });
+  await makeActivities({ projectDir: project, shipTree: true }).adoptProject({
+    sessionFile: target,
+    template,
+  });
   assert.equal(await worktree.established(target), true);
   console.log("PASS a queued firing can adopt after the schedule is deleted");
 } finally {

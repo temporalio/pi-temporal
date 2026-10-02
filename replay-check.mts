@@ -113,7 +113,10 @@ async function main() {
     );
     await writeFile(path, shown.stdout);
     const history = historyFromJSON(JSON.parse(shown.stdout));
-    check("a step with a failed pinned dispatch produced a history", (history.events?.length ?? 0) > 0);
+    check(
+      "a step with a failed pinned dispatch produced a history",
+      (history.events?.length ?? 0) > 0,
+    );
     // Under this code the work does not move, so nothing scheduled a shared tool call.
     check("this code refused to migrate the started failure", sharedTools === 0, {
       sharedTools,
@@ -128,7 +131,11 @@ async function main() {
     ).catch((err) => {
       ownReplay = err;
     });
-    check("a worker on this code replays a history this code wrote", ownReplay === undefined, String(ownReplay));
+    check(
+      "a worker on this code replays a history this code wrote",
+      ownReplay === undefined,
+      String(ownReplay),
+    );
 
     // And the ones from before each rule. Recorded by running this file against the code that
     // predates it and keeping the export; without its patch, each is where the nondeterminism
@@ -153,7 +160,11 @@ async function main() {
       ).catch((err) => {
         oldReplay = err;
       });
-      check(`and one written ${older.what}, through its patch`, oldReplay === undefined, String(oldReplay).slice(0, 200));
+      check(
+        `and one written ${older.what}, through its patch`,
+        oldReplay === undefined,
+        String(oldReplay).slice(0, 200),
+      );
     }
 
     console.log(

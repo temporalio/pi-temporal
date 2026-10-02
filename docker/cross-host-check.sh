@@ -37,8 +37,9 @@ hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
   || { bad "worker A came up"; exit 1; }
 
 # --- a client that is only ever a client hands over a task and exits
-sid=$($COMPOSE run --rm -T client start \
-  "Run this exact command with the bash tool: sleep 45 && echo CROSS-HOST >> /sessions/ran.txt. Then report it." \
+task="Run this exact command with the bash tool: sleep 45 && echo CROSS-HOST "
+task+=">> /sessions/ran.txt. Then report it."
+sid=$($COMPOSE run --rm -T client start "$task" \
   2>/dev/null | tr -d '\r' | head -1)
 [ -n "$sid" ] && ok "a client container started the session ($sid)" \
   || { bad "client could not start a session"; exit 1; }
@@ -83,7 +84,8 @@ esac
 # Counted on the shared volume rather than in the transcript. A second execution records no second
 # result (the retry throws it away), so the transcript cannot tell "did not run again" from "ran
 # again and we dropped it". The side effect can. This is the `git push` case.
-ran=$($COMPOSE exec -T worker-b sh -c 'wc -l < /sessions/ran.txt 2>/dev/null || echo 0' 2>/dev/null | tr -d '\r ')
+ran=$($COMPOSE exec -T worker-b sh -c 'wc -l < /sessions/ran.txt 2>/dev/null || echo 0' \
+  2>/dev/null | tr -d '\r ')
 [ "${ran:-0}" = "1" ] && ok "the tool really ran once, not once per host" \
   || bad "the tool really ran once" "$ran lines"
 

@@ -14,7 +14,12 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { fromEnv, sessionFileFor } from "./src/config.js";
 import { WORKFLOW_TYPE, workflowId } from "./src/protocol.js";
-import type { PromptInput, RunStepInput, RunStepResult, SessionTurnOptions } from "./src/protocol.js";
+import type {
+  PromptInput,
+  RunStepInput,
+  RunStepResult,
+  SessionTurnOptions,
+} from "./src/protocol.js";
 
 const cfg = fromEnv();
 const failures: string[] = [];
@@ -89,7 +94,11 @@ async function main() {
       await sleep(200);
     }
     const missing = wanted.filter((t) => !answered.includes(t));
-    check("and every prompt it accepted is still answered", missing.length === 0, { missing, answered });
+    check(
+      "and every prompt it accepted is still answered",
+      missing.length === 0,
+      { missing, answered },
+    );
     check("each of them once", answered.length === wanted.length, answered);
   } finally {
     worker.shutdown();
@@ -98,7 +107,11 @@ async function main() {
     await nativeConnection.close();
   }
 
-  console.log(failures.length === 0 ? "\nrollover-check: OK" : `\nrollover-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "\nrollover-check: OK"
+      : `\nrollover-check: ${failures.length} failed`,
+  );
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

@@ -117,13 +117,21 @@ async function main() {
     // workflow drives: the bound is checked after a step, because that is when its cost is known.
     tokensPerStep = 100;
     const spent = await turn({ tokens: 250 });
-    check("a turn that runs out of tokens is stopped where it got to", spent.finished?.outcome === "budget", spent.finished);
+    check(
+      "a turn that runs out of tokens is stopped where it got to",
+      spent.finished?.outcome === "budget",
+      spent.finished,
+    );
     check("after the step that crossed the bound, not before it", spent.taken === 3, spent.taken);
 
     // And a turn well inside its bound is not touched by any of it.
     answerAfter = 2;
     const inside = await turn({ tokens: 250 });
-    check("a turn inside its bound answers as usual", inside.finished?.outcome === "answered", inside.finished);
+    check(
+      "a turn inside its bound answers as usual",
+      inside.finished?.outcome === "answered",
+      inside.finished,
+    );
     check("and runs every step it needed", inside.taken === 2, inside.taken);
 
     // A session's own bound, which is the number somebody is billed for. A session of cheap turns
@@ -132,20 +140,40 @@ async function main() {
     tokensPerStep = 100;
     const session = `${queue}-session-budget`;
     const first = await turn({ tokens: 10_000, sessionTokens: 250 }, session);
-    check("a turn inside both bounds answers", first.finished?.outcome === "answered", first.finished);
-    check("and the session's spend is reported with it", (first.finished?.spent?.tokens ?? 0) === 200, first.finished?.spent);
+    check(
+      "a turn inside both bounds answers",
+      first.finished?.outcome === "answered",
+      first.finished,
+    );
+    check(
+      "and the session's spend is reported with it",
+      (first.finished?.spent?.tokens ?? 0) === 200,
+      first.finished?.spent,
+    );
     // The same session again: 200 already spent, so this turn crosses 250 on its first step.
     const second = await turn({ tokens: 10_000, sessionTokens: 250 }, session);
-    check("a later turn of that session is stopped by what the session has spent", second.finished?.outcome === "budget", second.finished);
-    check("and the session's total is what it was measured against", (second.finished?.spent?.tokens ?? 0) >= 250, second.finished?.spent);
+    check(
+      "a later turn of that session is stopped by what the session has spent",
+      second.finished?.outcome === "budget",
+      second.finished,
+    );
+    check(
+      "and the session's total is what it was measured against",
+      (second.finished?.spent?.tokens ?? 0) >= 250,
+      second.finished?.spent,
+    );
 
     // And it is the record that answers, not the run. A session that went idle and was woken again
-    // is a fresh workflow with an empty count of its own; what it has been billed is in the session,
-    // and the host reports it.
+    // is a fresh workflow with an empty count of its own; what it has been billed is in the
+    // session, and the host reports it.
     answerAfter = 2;
     const woken = `${queue}-woken-session`;
     const firstRun = await turn({ sessionTokens: 250 }, woken, `${woken}-run-1`);
-    check("a turn of a fresh session answers", firstRun.finished?.outcome === "answered", firstRun.finished);
+    check(
+      "a turn of a fresh session answers",
+      firstRun.finished?.outcome === "answered",
+      firstRun.finished,
+    );
     const secondRun = await turn({ sessionTokens: 250 }, woken, `${woken}-run-2`);
     check(
       "and a later run of that session is bounded by what the record says it spent",
@@ -160,7 +188,11 @@ async function main() {
     tokensPerStep = 0;
     secondsPerStep = 5;
     const hard = await turn({ hardSeconds: 2 });
-    check("a turn past its deadline is stopped where it is", hard.finished?.outcome === "budget", hard.finished);
+    check(
+      "a turn past its deadline is stopped where it is",
+      hard.finished?.outcome === "budget",
+      hard.finished,
+    );
     check(
       "inside the step that was running, not after it",
       hard.ran < 5_000,
@@ -173,7 +205,11 @@ async function main() {
     tokensPerStep = 0;
     secondsPerStep = 1;
     const late = await turn({ seconds: 2 });
-    check("a turn that runs out of time is stopped too", late.finished?.outcome === "budget", late.finished);
+    check(
+      "a turn that runs out of time is stopped too",
+      late.finished?.outcome === "budget",
+      late.finished,
+    );
     // Not before it has spent it: more than one step, and the turn really did run for its bound.
     // How many steps that is depends on what each one costs to schedule, which is not this check's
     // business; that it did not stop early is.
@@ -190,7 +226,11 @@ async function main() {
     const survivor = `${queue}-stale-deadline`;
     const t0 = Date.now();
     const early = await turn({ hardSeconds: 5 }, survivor);
-    check("a turn well inside its deadline answers", early.finished?.outcome === "answered", early.finished);
+    check(
+      "a turn well inside its deadline answers",
+      early.finished?.outcome === "answered",
+      early.finished,
+    );
     await sleep(2_000);
     gateUntil = t0 + 5_500;
     const next = await turn({ hardSeconds: 5 }, survivor);
@@ -216,7 +256,11 @@ async function main() {
     native.close();
   }
 
-  console.log(failures.length === 0 ? "budget-check: OK" : `budget-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "budget-check: OK"
+      : `budget-check: ${failures.length} failed`,
+  );
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

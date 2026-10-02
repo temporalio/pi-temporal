@@ -35,7 +35,8 @@ pinned_fork
 # Every run, and layer-cached when nothing changed. The source this checks is mounted over the
 # image below, but what it is mounted onto is the fork and the runtime, and an image older than
 # those runs code nobody wrote today.
-docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null || { echo "build failed"; exit 1; }
+docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null \
+  || { echo "build failed"; exit 1; }
 
 # `--user root` is not asked for: the point is the readings this worker's own user can make.
 exec docker run --rm \

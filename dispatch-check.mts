@@ -52,14 +52,22 @@ try {
   fs.writeFile = originalWriteFile;
   syncBuiltinESMExports();
   assert.equal(arrivals, 2, "both activity attempts must reach the dispatch claim");
-  assert.equal(await readFile(effectFile, "utf8"), "effect\n", "one activity may execute the effect");
+  assert.equal(
+    await readFile(effectFile, "utf8"),
+    "effect\n",
+    "one activity may execute the effect",
+  );
   assert.deepEqual(results.map((result) => result.outcome).sort(), ["settled", "unknown"]);
   console.log("PASS overlapping activities execute one effect");
 
   const refused = { ...input, sessionFile: join(root, "refused.jsonl") };
   await writeFile(`${refused.sessionFile}.pending`, "not a directory");
   await assert.rejects(activities.runToolCall(refused));
-  assert.equal(await readFile(effectFile, "utf8"), "effect\n", "a failed dispatch write must block the effect");
+  assert.equal(
+    await readFile(effectFile, "utf8"),
+    "effect\n",
+    "a failed dispatch write must block the effect",
+  );
   console.log("PASS a failed dispatch write blocks the effect");
 
   // A failure before any attempt claimed the call is one the tool cannot have started from, and the

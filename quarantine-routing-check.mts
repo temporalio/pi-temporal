@@ -1,6 +1,6 @@
 // A refused directory must cost that directory, not the session. The refusal stands for as long as
-// the host cannot show the writer is over, and here it cannot: the marker names a live process. What
-// must not follow is a session that cannot run anywhere.
+// the host cannot show the writer is over, and here it cannot: the marker names a live process.
+// What must not follow is a session that cannot run anywhere.
 //
 // Two workers on one queue, each standing in its own project directory, and in their own processes
 // because that is what two hosts are. One of them is refused. What is asserted is that the work
@@ -108,11 +108,14 @@ async function main() {
   await writeFile(
     helper,
     `import { NativeConnection, Worker } from "@temporalio/worker";\n` +
-      `import { makeActivities } from ${JSON.stringify(fileURLToPath(new URL("./src/activities.js", import.meta.url)))};\n` +
+      `import { makeActivities } from ${JSON.stringify(
+        fileURLToPath(new URL("./src/activities.js", import.meta.url)),
+      )};\n` +
       `const native = await NativeConnection.connect({ address: ${JSON.stringify(address)} });\n` +
       `const worker = await Worker.create({\n` +
       `  connection: native, namespace: "default", taskQueue: ${JSON.stringify(queue)},\n` +
-      `  activities: makeActivities({ projectDir: ${JSON.stringify(hosts.free)}, shipTree: true }, {\n` +
+      `  activities: makeActivities({ projectDir: ${JSON.stringify(hosts.free)}, ` +
+      `shipTree: true }, {\n` +
       `    openSession: async () => {\n` +
       `      console.log("RAN_ON free");\n` +
       `      return (${fakeSession})();\n` +
@@ -183,7 +186,11 @@ async function main() {
     await rm(root, { recursive: true, force: true });
   }
 
-  console.log(failures.length === 0 ? "quarantine-routing-check: OK" : `quarantine-routing-check: ${failures.length} failed`);
+  console.log(
+    failures.length === 0
+      ? "quarantine-routing-check: OK"
+      : `quarantine-routing-check: ${failures.length} failed`,
+  );
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

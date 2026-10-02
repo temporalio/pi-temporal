@@ -62,7 +62,11 @@ try {
   check("in money as well as tokens", result.spent?.cost === 0.125, result.spent);
   // And the total, which is what a session's bound is measured against and what a run that starts
   // after an idle retirement has no other way to know.
-  check("and what the session has been billed in total", result.total?.tokens === 1_250, result.total);
+  check(
+    "and what the session has been billed in total",
+    result.total?.tokens === 1_250,
+    result.total,
+  );
   check("with the same two numbers", result.total?.cost === 0.625, result.total);
 
   // A session that cannot say is reported as nothing rather than as zero: a bound that reads a
@@ -88,7 +92,11 @@ try {
     text: "run",
     step: 1,
   });
-  check("a session that keeps no totals reports none", silent.spent === undefined && silent.total === undefined, silent);
+  check(
+    "a session that keeps no totals reports none",
+    silent.spent === undefined && silent.total === undefined,
+    silent,
+  );
 } finally {
   await rm(root, { recursive: true, force: true });
 }
