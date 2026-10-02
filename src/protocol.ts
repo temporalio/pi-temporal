@@ -70,6 +70,9 @@ export interface SessionTurnOptions {
   // Drive each step as a model call, one activity per tool call, and a seal, instead of one
   // activity for the whole step. Off by default: the whole-step mode is what runs today.
   readonly stepped?: boolean;
+  // The bound on one tool call in stepped mode. A call that crosses it is not run again, because
+  // its dispatch note says it started, so this is the longest any tool may take.
+  readonly toolTimeoutMinutes?: number;
 }
 
 // A call the model asked for, recorded but not run. The arguments stay in the transcript: the
