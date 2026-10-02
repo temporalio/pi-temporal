@@ -171,6 +171,8 @@ Two attempts of the same activity can still both be alive, so every activity tha
 
 The kept results live in `<session>.jsonl.pending/<step>/`, scoped by step because a call id is only unique within the message that asked for it, and the next step's model call drops the step before it. The seal deliberately does not drop its own: a seal whose answer never reached Temporal runs again, and a batch it reads as empty is a batch it reads as wanting another step, even when a tool asked the turn to stop.
 
+Each tool call gets 30 minutes per attempt by default. A call that crosses it is not run again, since its note says it started, so it ends as an unknown outcome while the tool may still be running. A deployment with longer tools sets `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` on the client that starts the session.
+
 They stay out of Temporal's history on purpose: tool output is capped at 50KB by Pi, but a step's worth of it per activity result, per step, for the life of a session, is a history nobody wants to read.
 
 What it costs: each activity opens the session file and builds an `AgentSession` of its own, so a step with four calls pays six session opens instead of one. Against a model call that takes seconds, the boundaries measure in milliseconds (see below), but the cost is real and it grows with the transcript.
