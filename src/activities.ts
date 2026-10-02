@@ -10,7 +10,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { Context } from "@temporalio/activity";
+import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
   createAgentSession,
   findDanglingToolCalls,
@@ -25,12 +25,19 @@ import type {
   RunStepInput,
   RunStepResult,
   SealStepInput,
+  Spend,
   ToolCallInput,
   ToolCallResult,
 } from "./protocol.js";
+import { FAILED_BEFORE_CLAIM } from "./protocol.js";
 import * as pending from "./pending.js";
+import * as worktree from "./worktree.js";
 import { withSessionLock } from "./session-lock.js";
 import { textOf } from "./messages.js";
+
+// Long enough not to spin on a directory that stays refused, short enough that the work reaches a
+// free host in about the time one dispatch takes.
+const REFUSAL_RETRY = "2 seconds";
 
 const heartbeatEvery = (ms: number) => {
   const timer = setInterval(() => {
@@ -91,10 +98,15 @@ const danglingCallIds = (messages: Msg[]) =>
     (call) => call.id,
   );
 
-const noDispatchStarted = async (file: string, step: number, callIds: readonly string[]) => {
+const noDispatchStarted = async (
+  file: string,
+  turn: string,
+  step: number,
+  callIds: readonly string[],
+) => {
   if (callIds.length === 0) return false;
   for (const callId of callIds) {
-    if (await pending.wasDispatched(file, step, callId)) return false;
+    if (await pending.wasDispatched(file, turn, step, callId)) return false;
   }
   return true;
 };
@@ -107,14 +119,113 @@ export interface ActivityOptions {
   readonly modelHint?: string;
   // Only needed when the key is not already in Pi's auth store.
   readonly apiKey?: string;
+  // Ship the project's files with the session, so a worker on another machine finds the work the
+  // last one did. Without it the transcript travels and the files do not.
+  readonly shipTree?: boolean;
+  // The queue this worker polls on its own. Reported by the model call so the rest of the step can
+  // be sent back to this host, which is the one standing in the directory the tools will write.
+  readonly stepQueue?: string;
 }
 
-export function makeActivities(opts: ActivityOptions) {
+export function makeActivities(
+  opts: ActivityOptions,
+  dependencies: { openSession?: (file: string, guard?: () => void) => Promise<AgentSession> } = {},
+) {
   const provider = opts.provider ?? "openai";
 
-  async function openSession(sessionFile: string): Promise<AgentSession> {
+  // Before anything the model asked for can run, and after the step that ran it is written down.
+  // Both are no-ops when the tree is off, and the restore is a no-op on the host that captured,
+  // because the tree it holds is already the one the shared directory names.
+  // Deliberately not caught. A step that cannot get the project's files must not run against
+  // whatever is in the directory: the model would be told those files are the project. Failing
+  // sends the work to a host that can do it.
+  const bringTree = async (sessionFile: string, current?: worktree.Writer) => {
+    if (!opts.shipTree) return;
+    await worktree.ensure(opts.projectDir, sessionFile, current).catch((err: unknown) => {
+      // A refused directory is not a failing unit of work. It is this host saying no, and the same
+      // dispatch on any other host would do fine, so it must not climb the retry backoff: the
+      // interval doubles per attempt, and a host that answers first and refuses fastest is exactly
+      // the one that would push the next attempt minutes out while a free host sits idle.
+      if (err instanceof worktree.Quarantined) {
+        throw ApplicationFailure.create({
+          message: err.message,
+          type: "WorktreeQuarantined",
+          nextRetryDelay: REFUSAL_RETRY,
+        });
+      }
+      throw err;
+    });
+  };
+  // A lock can be reclaimed while its holder is blocked, so the holder asks again on the way to
+  // the write. Failing here is the right answer: Temporal retries, and the retry takes the lock.
+  const stillOurs = async (owned: () => Promise<boolean>, what: string) => {
+    if (!(await owned())) {
+      throw new Error(`lost the session lock before ${what}; another attempt has it`);
+    }
+  };
+
+  // Handed to the session so every append asks before it lands. `stillOurs` guards the writes this
+  // file makes; this guards the ones Pi makes inside a call, and the assistant message is the one
+  // that matters: it is written at the end of a stream that can run for minutes, long after the
+  // last thing anyone checked.
+  const writeGuard = (ownedNow: () => boolean, what: string) => () => {
+    if (!ownedNow()) {
+      throw new Error(`lost the session lock during ${what}; another attempt has it`);
+    }
+  };
+
+  const shipTree = async (
+    sessionFile: string,
+    of: { readonly current?: worktree.Writer; readonly fence?: worktree.Fence } = {},
+  ) => {
+    if (!opts.shipTree) return;
+    // A capture that fails must not fail the step: the tool has already run and its result is
+    // recorded, and a retry finds that result rather than running it again, so throwing here costs
+    // an attempt and still ships nothing. What it must not do is lose the work. The files are the
+    // only record of what the tool did, so they are kept where they can be recovered.
+    await worktree.capture(opts.projectDir, sessionFile, of).catch(async (err) => {
+      console.error(`could not ship the project tree: ${String(err)}`);
+      await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
+        console.error(`and could not set it aside either: ${String(keepErr)}`);
+      });
+    });
+  };
+
+  // What the session has been billed for, as it reports it. Aggregated over every entry, including
+  // history a compaction rewrote, so the difference across one activity is what that activity
+  // spent. A faked session in a check has no such thing to say, and then nothing is reported and
+  // the budget has nothing to add up.
+  const billed = (session: AgentSession) => {
+    type Stats = { tokens?: { total?: number }; cost?: number };
+    const stats = (session as { getSessionStats?: () => Stats }).getSessionStats;
+    if (typeof stats !== "function") return undefined;
+    try {
+      const now = stats.call(session);
+      return { tokens: now.tokens?.total ?? 0, cost: now.cost ?? 0 };
+    } catch {
+      return undefined;
+    }
+  };
+
+  const spentSince = (
+    before: ReturnType<typeof billed>,
+    session: AgentSession,
+  ): Spend | undefined => {
+    const after = billed(session);
+    if (!before || !after) return undefined;
+    return { tokens: after.tokens - before.tokens, cost: after.cost - before.cost };
+  };
+
+  // What the record says the whole session has been billed, which is the number a session's own
+  // bound is about. Nothing the workflow keeps can answer it: a session that went idle and was
+  // woken again is a fresh run with an empty count, and the file is what remembers.
+  const totalOf = (session: AgentSession): Spend | undefined => billed(session);
+
+  async function openSession(sessionFile: string, guard?: () => void): Promise<AgentSession> {
+    if (dependencies.openSession) return dependencies.openSession(sessionFile, guard);
     await mkdir(dirname(sessionFile), { recursive: true });
     const sessionManager = SessionManager.open(sessionFile);
+    sessionManager.setWriteGuard(guard);
 
     const modelRuntime = await ModelRuntime.create();
     if (opts.apiKey) await modelRuntime.setRuntimeApiKey(provider, opts.apiKey);
@@ -145,12 +256,12 @@ export function makeActivities(opts: ActivityOptions) {
     const messages = () => session.state.messages as Msg[];
     // What the step before this one kept. Its own results stay until the step after it, so a
     // retried seal still reads real outcomes.
-    if (stepped) await pending.sweep(input.sessionFile, input.step);
+    if (stepped) await pending.sweep(input.sessionFile, input.promptId, input.step);
 
     if (!markerPresent(messages(), input.promptId)) {
       // Everything the last turn left. Steps are numbered per turn, so sweeping by step number
       // alone never reaches a turn that ran further than this one will.
-      if (stepped) await pending.sweepAll(input.sessionFile);
+      if (stepped) await pending.sweepResults(input.sessionFile);
       // Settle what the turn that stopped left behind first. A call with no result is a payload no
       // provider accepts, so a prompt recorded behind one makes every later turn of the session
       // fail rather than just the interrupted one.
@@ -168,7 +279,8 @@ export function makeActivities(opts: ActivityOptions) {
     // tell the model that tools which never ran may have taken effect, and pay for a second
     // response on top.
     const dangling = danglingCallIds(messages());
-    if (stepped && (await noDispatchStarted(input.sessionFile, input.step, dangling))) {
+    const started = noDispatchStarted(input.sessionFile, input.promptId, input.step, dangling);
+    if (stepped && (await started)) {
       return undefined;
     }
 
@@ -183,21 +295,33 @@ export function makeActivities(opts: ActivityOptions) {
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async () => {
-        const session = await openSession(input.sessionFile);
+      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+        await bringTree(input.sessionFile);
+        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the step"));
         try {
+          await stillOurs(owned, "the step");
           const settled = await readyForStep(session, input, false);
           if (settled) return settled;
 
           // prepareStep settled anything the crash left dangling, so this is a plain step: a tool
           // whose result never landed is reported as unknown, not re-run behind the model's back.
+          const before = billed(session);
           const { done } = await session.step();
           await session.waitForIdle();
           const messages = session.state.messages as Msg[];
+          const spent = spentSince(before, session);
           // Whole-step mode has no carry. Its session is rebuilt per activity too, so its retry
           // budget starts at zero on every step and only the step ceiling bounds it. That is how
           // it has always been; giving it the carry means giving step() the seal's post-run pass.
-          return { done, retryAttempt: 0, finalText: done ? lastAssistantText(messages) : "" };
+          await shipTree(input.sessionFile);
+          const total = totalOf(session);
+          return {
+            done,
+            retryAttempt: 0,
+            finalText: done ? lastAssistantText(messages) : "",
+            ...(spent ? { spent } : {}),
+            ...(total ? { total } : {}),
+          };
         } finally {
           session.dispose();
         }
@@ -209,20 +333,40 @@ export function makeActivities(opts: ActivityOptions) {
 
   /** The model call of one step. The calls it reports are recorded and left for the workflow to
    * dispatch, one activity each. */
+  // Tools of one step can be dispatched to different hosts, and each ships what its own directory
+  // holds. Run two at once and the second to capture publishes a tree without the first one's
+  // work. That is what serializing them costs, and what pinning the step to this worker buys back:
+  // with a queue of our own they all land here, on one directory, and the tree never moves between
+  // them.
+  const mustSerialize = (sequential: boolean) =>
+    sequential || (opts.shipTree === true && opts.stepQueue === undefined);
+
   async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async () => {
-        const session = await openSession(input.sessionFile);
+      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+        await bringTree(input.sessionFile);
+        const session = await openSession(
+          input.sessionFile,
+          writeGuard(ownedNow, "the model call"),
+        );
         try {
+          // Before the prompt is recorded, which is this activity's first write.
+          await stillOurs(owned, "the model call");
           const settled = await readyForStep(session, input, true);
           if (settled) return { settled, calls: [], sequential: false, ended: true };
 
+          const before = billed(session);
           const outcome = await session.modelCall();
+          const spent = spentSince(before, session);
+          const total = totalOf(session);
           return {
             calls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
-            sequential: outcome.sequential,
+            sequential: mustSerialize(outcome.sequential),
             ended: outcome.ended,
+            ...(opts.stepQueue === undefined ? {} : { queue: opts.stepQueue }),
+            ...(spent ? { spent } : {}),
+            ...(total ? { total } : {}),
           };
         } finally {
           session.dispose();
@@ -233,21 +377,63 @@ export function makeActivities(opts: ActivityOptions) {
     }
   }
 
+  // Typed only when no attempt of the call has a dispatch note: the workflow sees the last
+  // attempt's failure, and an earlier one may have claimed the call and still be running the tool.
+  const beforeClaim = async (err: unknown, input: ToolCallInput): Promise<unknown> => {
+    if (err instanceof ApplicationFailure) return err;
+    const { sessionFile, turn, step, call } = input;
+    const noted = await pending.wasDispatched(sessionFile, turn, step, call.id).catch(() => true);
+    if (noted) return err;
+    return ApplicationFailure.create({
+      message: err instanceof Error ? err.message : String(err),
+      type: FAILED_BEFORE_CLAIM,
+      cause: err instanceof Error ? err : undefined,
+    });
+  };
+
   /** One recorded call of the current step. Its result is kept beside the session file until the
    * seal records it, so a tool that ran is not asked to run again. */
   async function runToolCall(input: ToolCallInput): Promise<ToolCallResult> {
     const stop = heartbeatEvery(3000);
+    let claimed = false;
     try {
-      const session = await openSession(input.sessionFile);
+      // A tool call is its own dispatch, so it can land on a worker that ran neither the model
+      // call nor any sibling tool. Without this it runs against whatever files that host happens
+      // to have, and reports the answer as if it were the project's.
+      //
+      // Under the session lease, so this session's transcript recovery and its tree restore are
+      // ordered against each other. It is not what keeps two hosts from publishing at once: the
+      // tree store takes its own host-directory and shared-store leases for that.
+      const writer: worktree.Writer = { turn: input.turn, step: input.step, callId: input.call.id };
+      await withSessionLock(input.sessionFile, () => bringTree(input.sessionFile, writer));
+      // Opening a session can append to it (a first thinking-level entry), and two of these run at
+      // once. The lock covers the open and is given back before the tool runs, which is the part
+      // that has to stay parallel.
+      // The guard has to change when the lease does. Opening a session can append (a first
+      // thinking-level entry), so it is allowed while the lease is held; once the lease is given
+      // back, `ownedNow` can never go false again, so a guard closed over it would wave every
+      // later write through. A tool activity has no business appending at all, and an extension
+      // appending from `tool_execution_end` runs right here.
+      let opening = true;
+      const session = await withSessionLock(input.sessionFile, (_owned, ownedNow) =>
+        openSession(input.sessionFile, () => {
+          if (opening) return writeGuard(ownedNow, "opening the session")();
+          throw new Error(
+            "a tool activity must not write to the session: " +
+              "the seal records what the step produced",
+          );
+        }),
+      );
+      opening = false;
       try {
         // The transcript first: a result in it means a whole dispatch and a seal already
         // happened, and the kept files for the call are what is left behind.
         if (answeredInTranscript(session.state.messages as Msg[], input.call.id)) {
-          await pending.forget(input.sessionFile, input.step, [input.call.id]);
+          await pending.forgetResults(input.sessionFile, input.turn, input.step, [input.call.id]);
           return { outcome: "already-settled" };
         }
 
-        if (await pending.readResult(input.sessionFile, input.step, input.call.id)) {
+        if (await pending.readResult(input.sessionFile, input.turn, input.step, input.call.id)) {
           return { outcome: "already-settled" };
         }
 
@@ -259,27 +445,46 @@ export function makeActivities(opts: ActivityOptions) {
           throw new Error(`no recorded tool call ${input.call.id} in ${input.sessionId}`);
         }
 
-        if (await pending.wasDispatched(input.sessionFile, input.step, input.call.id)) {
+        const { turn, step, call } = input;
+        if (!(await pending.noteDispatch(input.sessionFile, turn, step, call.id))) {
           // A dispatch was inside this tool when it stopped, so the tool can have taken effect.
           // Re-running a push or a delete that already happened is the worse failure, so the
           // model is told the outcome instead of the tool being asked again.
           const unknown = unknownToolCallOutcome(input.call);
-          await pending.keepResult(input.sessionFile, input.step, input.call.id, unknown);
+          await pending.keepResult(input.sessionFile, turn, step, call.id, unknown);
           return { outcome: "unknown" };
         }
+        claimed = true;
 
-        // Before the tool can have any effect, so what follows reads as "a dispatch was inside
-        // it". A stop in the moment between costs one call an unknown outcome, which is the
-        // direction to be wrong in.
-        await pending.noteDispatch(input.sessionFile, input.step, input.call.id);
-        const outcome = await session.runToolCall(input.call.id);
+        // Said on this host before the tool can touch anything, and taken back below when the body
+        // returns. It is the only local record of a tool that is still inside its own execution,
+        // and what a later turn checks before it reuses this directory: Temporal giving up on this
+        // attempt stops it being waited for, not being run.
+        if (opts.shipTree) await worktree.beginWrite(opts.projectDir, writer);
+        const outcome = await session.runToolCall(input.call.id).finally(async () => {
+          if (opts.shipTree) await worktree.endWrite(opts.projectDir, input.call.id);
+        });
         if (!outcome) return { outcome: "already-settled" };
 
-        await pending.keepResult(input.sessionFile, input.step, input.call.id, outcome);
+        await pending.keepResult(
+          input.sessionFile,
+          input.turn,
+          input.step,
+          input.call.id,
+          outcome,
+        );
+        // Shipped from here, because this host ran the tool and is the only one holding what it
+        // did. The seal can land anywhere, and capturing there would ship a directory that never
+        // saw this tool. Under the shared lock, for the reason the restore above is.
+        await withSessionLock(input.sessionFile, () =>
+          shipTree(input.sessionFile, { current: writer, fence: { turn, step } }),
+        );
         return { outcome: "settled" };
       } finally {
         session.dispose();
       }
+    } catch (err) {
+      throw claimed ? err : await beforeClaim(err, input);
     } finally {
       stop();
     }
@@ -289,20 +494,32 @@ export function makeActivities(opts: ActivityOptions) {
   async function sealStep(input: SealStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async () => {
-        const session = await openSession(input.sessionFile);
+      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+        // Before the step is written down, and before anything else takes the project on: a host
+        // the driver stopped waiting for is still standing on the tip it read, so what it publishes
+        // afterwards reverts whatever replaced it. Saying the step is closed is what makes that
+        // capture refusable on the host it comes from.
+        if (input.lost && opts.shipTree) {
+          await worktree.closeStep(input.sessionFile, { turn: input.turn, step: input.step });
+        }
+        // A cancelled tool may still be writing on another host.
+        if (!input.interrupted) await bringTree(input.sessionFile);
+        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the seal"));
         try {
           const results: TurnToolCallOutcome[] = [];
           for (const call of input.calls) {
             // A call with nothing kept for it is one whose dispatch never came back. Sealing
             // without it would leave the transcript holding a call no result answers, which is a
             // payload no provider accepts.
-            const kept = await pending.readResult(input.sessionFile, input.step, call.id);
+            const { turn, step } = input;
+            const kept = await pending.readResult(input.sessionFile, turn, step, call.id);
             results.push(kept ?? unknownToolCallOutcome(call));
           }
 
           // Named, so a message something else appended between the model call and here cannot
           // be the one these results are attributed to.
+          await stillOurs(owned, "the seal");
+          const before = billed(session);
           const sealed = await session.sealStep(results, {
             expectCalls: input.calls.map((call) => call.id),
             retryAttempt: input.retryAttempt,
@@ -316,7 +533,19 @@ export function makeActivities(opts: ActivityOptions) {
           // results would leave a retry of that seal reading an empty batch, and an empty batch
           // reads as one that wants another step even when a tool asked the turn to stop.
           const answer = lastAssistantText(session.state.messages as Msg[]);
-          return { done, retryAttempt: sealed.retryAttempt, finalText: done ? answer : "" };
+          // After the step is written down, so what ships is a tree whose transcript explains it.
+          if (!input.interrupted) {
+            await shipTree(input.sessionFile, { fence: { turn: input.turn, step: input.step } });
+          }
+          const spent = spentSince(before, session);
+          const total = totalOf(session);
+          return {
+            done,
+            retryAttempt: sealed.retryAttempt,
+            finalText: done ? answer : "",
+            ...(spent ? { spent } : {}),
+            ...(total ? { total } : {}),
+          };
         } finally {
           session.dispose();
         }
@@ -326,7 +555,32 @@ export function makeActivities(opts: ActivityOptions) {
     }
   }
 
-  return { runStep, runModelCall, runToolCall, sealStep };
+  /** Give the project directory back when the session stops being driven. Without a caller for
+   * this, a worker with one `PI_PROJECT_DIR` serves one session for as long as it lives and every
+   * later one is refused. It also records that the session is over, which is the only way the hosts
+   * that do not draw this activity can hand their own directories back. */
+  async function retireSession(input: { readonly sessionFile: string }): Promise<void> {
+    if (!opts.shipTree) return;
+    const freed = await worktree.retire(opts.projectDir, input.sessionFile).catch((err) => {
+      console.warn(`could not hand back ${opts.projectDir}: ${String(err)}`);
+      return false;
+    });
+    if (freed) console.log(`handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
+  }
+
+  /** Take the copy of the project a client left for a session that has nobody to send it. Runs
+   * before the first step of a scheduled session, and does nothing once that session has a tip of
+   * its own, so a re-driven activity does not copy twice. */
+  async function adoptProject(input: {
+    readonly sessionFile: string;
+    readonly template: string;
+  }): Promise<void> {
+    if (!opts.shipTree) return;
+    const copied = await worktree.adopt(input.template, input.sessionFile);
+    if (copied) console.log(`took the project from ${input.template} for ${input.sessionFile}`);
+  }
+
+  return { runStep, runModelCall, runToolCall, sealStep, retireSession, adoptProject };
 }
 
 export type Activities = ReturnType<typeof makeActivities>;

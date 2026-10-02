@@ -36,7 +36,10 @@ COPY detached-check.mts ./
 # Where the session log lives. A volume mounted here in more than one container is the shared
 # storage the config comments point at.
 ENV PI_SESSION_DIR=/sessions
-RUN mkdir -p /sessions
+# /project is where the tools run, and it is deliberately NOT a shared volume: a project reaches a
+# second container only by travelling with the session.
+ENV PI_PROJECT_DIR=/project
+RUN mkdir -p /sessions /project
 
 # One process, not npx -> tsx -> node. A container stops by signalling PID 1, and a wrapper would
 # swallow that the same way it swallows a kill.

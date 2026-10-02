@@ -6,8 +6,9 @@
 #   docker compose -f docker/compose.yml up -d temporal worker-a
 #   docker compose -f docker/compose.yml run --rm client start "..."
 #
-# What this does NOT test: /sessions is a local volume, so the O_EXCL caveats in session-lock.ts
-# (NFSv3) are still untested. A real fleet wants a filesystem that answers those.
+# /sessions is a local volume here, which answers the exclusive-create and atomic-rename questions
+# by construction. `NFS=1` puts it on a real NFSv4 server instead (docker/compose.nfs.yml), which is
+# the shape that tests them rather than assuming them.
 
 name: pi-temporal-l3
 
@@ -38,6 +39,10 @@ services:
       - PI_SESSION_DIR=/sessions
       - PI_TEMPORAL_TASK_QUEUE=${PI_TEMPORAL_TASK_QUEUE:-pi-session}
       - PI_TEMPORAL_STEPPED=1
+      - PI_TEMPORAL_SHIP_TREE=${PI_TEMPORAL_SHIP_TREE:-0}
+      # Where the tools run. Each worker gets its own, so a project only reaches a second host by
+      # travelling with the session.
+      - PI_PROJECT_DIR=/project
       - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY}
     volumes:
       - sessions:/sessions
@@ -51,6 +56,13 @@ services:
     <<: *worker
     entrypoint: ["node", "--import", "tsx", "src/cli.ts"]
     command: ["running"]
+    # Its own project, because with the tree on the client is what sends it. A client that has no
+    # project has nothing to send, and it used to send an empty tree that then became the project
+    # on every worker.
+    volumes:
+      - sessions:/sessions
+      - clientproject:/project
 
 volumes:
   sessions:
+  clientproject:

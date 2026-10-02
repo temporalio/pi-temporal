@@ -123,6 +123,16 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs?
 async function main() {
   if (!process.env.OPENAI_API_KEY) throw new Error("set OPENAI_API_KEY");
   const sessions = await mkdtemp(join(tmpdir(), "pi-l3-"));
+  // A side effect we can count. A second execution records no second result, because the retry
+  // throws it away, so the transcript cannot tell "did not run again" from "ran again and the
+  // result was dropped". This can. It is the `git push` case in one line.
+  //
+  // The write comes before the sleep, not after it. With the sleep first, the kill below takes the
+  // whole process group and the tool never reaches the write, so the file is empty however the
+  // handover goes and the count proves nothing. This way the effect has already happened when the
+  // worker dies, which is the case worth asserting: the tool ran, nothing recorded it, and the
+  // takeover must not run it again.
+  const ranFile = join(sessions, "ran.txt");
   const env = {
     TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7241",
     PI_SESSION_DIR: sessions,
@@ -144,7 +154,8 @@ async function main() {
       "tsx",
       "src/cli.ts",
       "start",
-      "Run this exact command with the bash tool: sleep 45 && echo HANDOVER. Then report it.",
+      `Run this exact command with the bash tool: echo HANDOVER >> ${ranFile} && sleep 45. ` +
+        "Then report it.",
     ],
     env,
   );
@@ -160,7 +171,11 @@ async function main() {
   let toolInFlight = false;
   for (let i = 0; i < 60 && !toolInFlight; i++) {
     const log = await readFile(sessionLog, "utf8").catch(() => "");
-    toolInFlight = log.includes('"toolCall"') && !log.includes('"toolResult"');
+    const dispatched = log.includes('"toolCall"') && !log.includes('"toolResult"');
+    // And the effect has landed. Killing between the dispatch and the write leaves nothing to
+    // count, and the assertion at the end would then pass for the wrong reason.
+    const effected = (await readFile(ranFile, "utf8").catch(() => "")).includes("HANDOVER");
+    toolInFlight = dispatched && effected;
     if (!toolInFlight) await sleep(1_000);
   }
   check("a tool is in flight before the kill", toolInFlight);
@@ -170,7 +185,15 @@ async function main() {
   const died = await killWorker(workerA, workerA.pid ? [workerA.pid] : []);
   // Asked of the OS by pattern, not only of the pid we hold: the whole point of the next step is
   // that nothing of worker A is left that could finish this turn itself.
-  const left = (await workerPids()).filter((pid) => !idle.includes(pid));
+  //
+  // Waited for rather than sampled. A process that has been signalled is listed until it is reaped,
+  // and a single reading catches one on its way out and calls it a survivor.
+  let left = await workerPids();
+  for (let i = 0; i < 40 && left.some((pid) => !idle.includes(pid)); i++) {
+    await sleep(250);
+    left = await workerPids();
+  }
+  left = left.filter((pid) => !idle.includes(pid));
   check("worker A is really gone", died && left.length === 0, { died, left });
 
   // --- 3. a worker that never saw this session picks the step up
@@ -182,13 +205,22 @@ async function main() {
   check("running lists it", listed.out.includes(sessionId), listed.out + listed.err);
 
   // --- 4. follow it across the handover, from a process that is only ever a client
-  const watch = cli(["watch", sessionId]);
-  const watched = await run(watch.cmd, watch.args, env, 120_000);
+  const watched = await run(
+    cli(["watch", sessionId]).cmd,
+    cli(["watch", sessionId]).args,
+    env,
+    300_000,
+  );
   check("watch returned rather than hanging", !watched.timedOut, watched.out.slice(-200));
+  // The step that lost its host is closed, and the turn goes on from there. What is not moved is
+  // the step: the attempt started, so nothing can say the tool stopped, and a sixth review
+  // reproduced what moving the rest of a started batch costs (`migration-rejoin-check.mts` is that
+  // reproduction). The next step is a fresh model call on whatever worker is free, made from a
+  // transcript that says which call has an outcome nobody can vouch for.
   check(
-    "watch followed the turn to its end",
+    "the turn is answered rather than dying with the worker",
     /answered/.test(watched.err),
-    watched.err.slice(-200),
+    watched.err.slice(-300),
   );
 
   const entries = (await readFile(join(sessions, `${sessionId}.jsonl`), "utf8").catch(() => ""))
@@ -206,13 +238,15 @@ async function main() {
     })
     .filter((e): e is NonNullable<typeof e> => e !== undefined);
 
-  // The turn finished after the only worker that had it was killed, so something else finished it.
-  const finishedAfterKill = entries.some(
-    (e) => e.message?.role === "assistant" && Date.parse(e.timestamp ?? "") > killedAt,
+  // The step still closes, on a worker that never ran it. That is the recovery seal: it records
+  // what the step had and does not touch the project, so the results of a call that finished are
+  // not thrown away with the host that ran it.
+  const sealedAfterKill = entries.some(
+    (e) => e.message?.role === "toolResult" && Date.parse(e.timestamp ?? "") > killedAt,
   );
   check(
-    "the turn was finished by the worker that took over",
-    finishedAfterKill,
+    "the results it already had are recorded anyway",
+    sealedAfterKill,
     new Date(killedAt).toISOString(),
   );
 
@@ -220,20 +254,27 @@ async function main() {
   const results = entries
     .filter((e) => e.message?.role === "toolResult")
     .map((e) => text(e.message?.content));
-  const calls = entries.filter(
-    (e) =>
-      e.message?.role === "assistant" &&
-      Array.isArray(e.message.content) &&
-      (e.message.content as { type?: string }[]).some((b) => b?.type === "toolCall"),
-  );
+  // Every block the model asked for that would append to the file, whichever step asked for it. A
+  // turn that carries on can ask again, and that is the model's call to make on an outcome it was
+  // told nobody can vouch for. What it must never be is the harness running one twice.
+  const asked = entries
+    .filter((e) => e.message?.role === "assistant" && Array.isArray(e.message.content))
+    .flatMap((e) => e.message!.content as { type?: string }[])
+    .filter((b) => b?.type === "toolCall" && text(b).includes("HANDOVER"));
   // The dispatch died between starting the tool and recording its result, which is exactly the case
   // a coding agent must not guess at: `sleep 45 && echo` is harmless, but `git push` is not.
-  check(
-    "a tool that may have run is reported unknown, not re-run",
-    results.length === 1 && /unknown/i.test(results[0]),
-    results,
+  check("a tool that may have run is reported unknown", /unknown/i.test(results[0] ?? ""), results);
+  const ran = (await readFile(ranFile, "utf8").catch(() => "")).split("\n").filter(Boolean);
+  // The file counts executions. One line per time the model asked, and never one per worker: the
+  // dispatch that was interrupted is reported, not retried, which is the whole thing this level
+  // promises. A second line means the model asked again after being told the first was unknown.
+  check("the tool ran once for each time the model asked", ran.length === asked.length, {
+    ran,
+    asked: asked.length,
+  });
+  console.log(
+    `  (the model asked for it ${asked.length} time(s) across ${results.length} result(s))`,
   );
-  check("the model asked for the tool once", calls.length === 1, calls.length);
 
   const verdict = failures.length === 0 ? "OK" : `${failures.length} failed`;
   console.log(`\ndetached-check: ${verdict}`);

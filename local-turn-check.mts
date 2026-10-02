@@ -76,7 +76,7 @@ function fakeTurn(options: { interruptAfter?: number } = {}) {
       },
       sealStep: async (results) => {
         seen.push(`seal:${step}:${results.length}`);
-        return { done: step === STEPS_TO_ANSWER };
+        return { done: step === STEPS_TO_ANSWER, retryAttempt: 0 };
       },
     },
   };
@@ -200,7 +200,7 @@ async function main() {
     } finally {
       live.delete(turnId);
     }
-    const nonRetryable = failure instanceof ApplicationFailure && failure.nonRetryable;
+    const nonRetryable = failure instanceof ApplicationFailure && failure.nonRetryable === true;
     check("a tool that fails on a stopped turn is not retried", nonRetryable && runs === 1, {
       failure: String(failure),
       runs,

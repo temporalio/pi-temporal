@@ -1,11 +1,12 @@
 // A turn of a live pi session, wrapped in a workflow. The turn itself runs in the pi process that
 // owns the session, which the activities reach through a task queue only that process polls. So
-// what this buys is a record of every turn and a retry policy around it, not portability: a turn
-// cannot move to another process, because the session it belongs to is in memory over there.
+// what this buys is a record of every turn and a retry policy around it, not portability: moving a
+// turn would mean handing that session's ownership to another process, which this does not do.
 //
 // Stepped mode splits the turn the same way the worker-owned path does, into a model call, one
 // activity per tool call, and a seal. It buys the same per-tool bounds and the same legible
-// history; it does not buy portability, which the local turn cannot have.
+// history. Reopening the session starts a new workflow from the transcript, so results the seal
+// never recorded are gone with the old process.
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 

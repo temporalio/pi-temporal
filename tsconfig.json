@@ -10,5 +10,8 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "extensions/**/*.ts"]
+  // The check scripts too. They drive the same protocol, so a shape they get wrong is a shape
+  // nothing else catches: `step-loop-check.mts` was building a RunStepResult without the retry
+  // count the workflow carries.
+  "include": ["src/**/*.ts", "extensions/**/*.ts", "*.mts"]
 }

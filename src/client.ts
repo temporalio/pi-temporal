@@ -4,14 +4,21 @@
 
 import { randomUUID } from "node:crypto";
 import { Client, Connection } from "@temporalio/client";
-import { fromEnv, sessionFileFor } from "./config.js";
+import { connectionOptions, fromEnv, sessionFileFor } from "./config.js";
 import { WORKFLOW_TYPE, workflowId } from "./protocol.js";
 import type { PromptInput, SessionTurnOptions } from "./protocol.js";
 
 export async function connect() {
   const cfg = fromEnv();
-  const connection = await Connection.connect({ address: cfg.address });
-  const client = new Client({ connection, namespace: cfg.namespace });
+  const connection = await Connection.connect(connectionOptions(cfg));
+  const client = new Client({
+    connection,
+    namespace: cfg.namespace,
+    // A closed workflow answers a query by default, with the state it held when it closed. A run
+    // that was terminated mid-turn then reports that turn as still running, and a follower polling
+    // it never stops. Rejecting the query is what turns that into "the session is over".
+    workflow: { queryRejectCondition: "NOT_OPEN" },
+  });
   return { cfg, client, connection };
 }
 
@@ -22,6 +29,7 @@ export async function submitPrompt(sessionId: string, text: string, promptId = r
     idleTimeout: cfg.idleTimeout,
     stepped: cfg.stepped,
     toolTimeoutMinutes: cfg.toolTimeoutMinutes,
+    budget: cfg.budget,
   };
   try {
     await client.workflow.signalWithStart(WORKFLOW_TYPE, {

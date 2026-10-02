@@ -201,6 +201,278 @@ async function main() {
     check("an unknown outcome still seals", run.seals.length === 1, run.seals);
   }
 
+  // Pinning the rest of a step to the worker that made its model call, and what happens when that
+  // worker is gone. The pin is what lets a step's tools run together again while the tree travels:
+  // they write one directory instead of shipping it to each other. The fallback is what keeps a
+  // dead worker from holding the step for good.
+  {
+    const pinnedTools: ToolCallInput[] = [];
+    const pinnedSeals: SealStepInput[] = [];
+    const sharedTools: ToolCallInput[] = [];
+    const sharedSeals: SealStepInput[] = [];
+    let refuse = false;
+    let refused = 0;
+    // What Temporal raises when nobody took the work. Matched by shape, because that is what the
+    // workflow's own predicate matches.
+    const unclaimed = () =>
+      Object.assign(new Error("activity failed"), {
+        name: "ActivityFailure",
+        cause: { name: "TimeoutFailure", timeoutType: "SCHEDULE_TO_START" },
+      });
+    const isUnclaimed = (err: unknown) =>
+      (err as { cause?: { timeoutType?: string } })?.cause?.timeoutType === "SCHEDULE_TO_START";
+
+    const pinnedStep = (calls: DeferredToolCall[]) =>
+      makeSteppedStep({
+        activities: {
+          runModelCall: async () => ({ calls, sequential: false, ended: false, queue: "mine" }),
+          runToolCall: async (input) => {
+            sharedTools.push(input);
+            return { outcome: "settled" };
+          },
+          sealStep: async (input) => {
+            sharedSeals.push(input);
+            return SEALED;
+          },
+        },
+        isCancellation,
+        isUnclaimed,
+        pinnedTo: (queue) => {
+          if (queue !== "mine") throw new Error(`pinned to ${queue}`);
+          return {
+            runToolCall: async (input) => {
+              if (refuse) {
+                refused++;
+                throw unclaimed();
+              }
+              pinnedTools.push(input);
+              return { outcome: "settled" };
+            },
+            sealStep: async (input) => {
+              if (refuse) {
+                refused++;
+                throw unclaimed();
+              }
+              pinnedSeals.push(input);
+              return SEALED;
+            },
+          };
+        },
+        nonCancellable: (fn) => fn(),
+      });
+
+    await pinnedStep([call("a"), call("b")])(INPUT);
+    check(
+      "a step's tools and seal go back to the worker that made the model call",
+      pinnedTools.length === 2 && pinnedSeals.length === 1 && sharedTools.length === 0,
+      { pinnedTools: pinnedTools.length, pinnedSeals: pinnedSeals.length },
+    );
+
+    refuse = true;
+    await pinnedStep([call("c")])(INPUT);
+    // Schedule-to-start is the one failure that says the activity never started, so moving the work
+    // cannot run a tool twice. One refusal, not two: the seal that follows already knows.
+    check(
+      "and move to the shared queue when nobody takes them",
+      sharedTools.length === 1 && sharedSeals.length === 1 && refused === 1,
+      { sharedTools: sharedTools.length, sharedSeals: sharedSeals.length, refused },
+    );
+  }
+
+  for (const outcome of ["completed", "failed", "cancelled"] as const) {
+    const pinnedFails = outcome !== "completed";
+    let finishPinned!: () => void;
+    const held = new Promise<void>((resolve) => { finishPinned = resolve; });
+    let pinnedStarted!: () => void;
+    const started = new Promise<void>((resolve) => { pinnedStarted = resolve; });
+    let sharedStarted = false;
+    let pinnedActive = false;
+    let crossedHosts = false;
+    const unavailable = new Error("unclaimed");
+    const failed =
+      outcome === "cancelled" ? new FakeCancel() : new Error("started attempt timed out");
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({
+          calls: [call("held"), call("waiting")],
+          sequential: false,
+          ended: false,
+          queue: "host-a",
+        }),
+        runToolCall: async () => {
+          sharedStarted = true;
+          crossedHosts ||= pinnedActive;
+          return { outcome: "settled" };
+        },
+        sealStep: async () => SEALED,
+      },
+      pinnedTo: () => ({
+        runToolCall: async (input) => {
+          if (input.call.id === "waiting") throw unavailable;
+          pinnedActive = true;
+          pinnedStarted();
+          try {
+            await held;
+            if (pinnedFails) throw failed;
+            return { outcome: "settled" };
+          } finally {
+            // This fake body ends here; a server timeout need not stop a real body.
+            pinnedActive = false;
+          }
+        },
+        sealStep: async () => SEALED,
+      }),
+      isCancellation,
+      isUnclaimed: (error) => error === unavailable,
+      nonCancellable: (fn) => fn(),
+    });
+    const result = step(INPUT).then(() => undefined, (error: unknown) => error);
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check("an unclaimed sibling waits for the pinned batch", !sharedStarted, { outcome });
+    finishPinned();
+    const error = await result;
+    check("fallback never overlaps a pinned tool", !crossedHosts, { outcome });
+    check(
+      outcome === "cancelled"
+        ? "a cancelled sibling blocks queued fallback"
+        : pinnedFails
+          ? "an uncertain pinned attempt blocks migration"
+          : "fallback resumes after the pinned tool ships",
+      pinnedFails ? !sharedStarted && error === failed : sharedStarted && error === undefined,
+      { sharedStarted, error: String(error), outcome },
+    );
+  }
+
+  // A timeout cannot distinguish a dead worker from one whose tool still writes.
+  {
+    const gone = new Error("the pinned attempt did not come back");
+    let sharedTools = 0;
+    let sharedSeals = 0;
+    let recoverySeal = false;
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({
+          calls: [call("c1")],
+          sequential: false,
+          ended: false,
+          queue: "w-1",
+        }),
+        runToolCall: async () => {
+          sharedTools++;
+          return { outcome: "unknown" };
+        },
+        sealStep: async (input) => {
+          sharedSeals++;
+          recoverySeal = input.interrupted === true;
+          return SEALED;
+        },
+      },
+      pinnedTo: () => ({
+        runToolCall: async () => {
+          throw gone;
+        },
+        sealStep: async () => SEALED,
+      }),
+      isCancellation,
+      isUnclaimed: () => false,
+      nonCancellable: (fn) => fn(),
+    });
+    const result = await step(INPUT).then(() => undefined, (error: unknown) => error);
+    check(
+      "an uncertain pinned attempt records results without shared tools",
+      sharedTools === 0 && sharedSeals === 1 && recoverySeal,
+      {
+        sharedTools,
+        sharedSeals,
+      },
+    );
+    check("and its failure reaches the turn", result === gone, String(result));
+  }
+
+  {
+    const failed = new Error("pinned attempt timed out");
+    let normalSeals = 0;
+    let recoverySeals = 0;
+    const seal = async (input: SealStepInput) => {
+      if (input.interrupted) recoverySeals++;
+      else normalSeals++;
+      return SEALED;
+    };
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({
+          calls: [call("held")],
+          sequential: false,
+          ended: false,
+          queue: "host-a",
+        }),
+        runToolCall: async () => ({ outcome: "settled" }),
+        sealStep: seal,
+      },
+      pinnedTo: () => ({ runToolCall: async () => { throw failed; }, sealStep: seal }),
+      isCancellation,
+      isUnclaimed: () => false,
+      nonCancellable: (fn) => fn(),
+    });
+    const error = await step(INPUT).then(() => undefined, (error: unknown) => error);
+    check(
+      "an uncertain pinned tool permits only a recovery seal",
+      normalSeals === 0 && recoverySeals === 1 && error === failed,
+      {
+        normalSeals,
+        recoverySeals,
+        error: String(error),
+      },
+    );
+  }
+
+  {
+    const cancelled = new FakeCancel();
+    const unavailable = new Error("unclaimed");
+    const sharedCalls: string[] = [];
+    let recoverySeals = 0;
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({
+          calls: [call("cancel"), call("must-not-run")],
+          sequential: false,
+          ended: false,
+          queue: "host-a",
+        }),
+        runToolCall: async (input) => {
+          sharedCalls.push(input.call.id);
+          if (input.call.id === "cancel") throw cancelled;
+          return { outcome: "settled" };
+        },
+        sealStep: async (input) => {
+          if (input.interrupted) recoverySeals++;
+          return SEALED;
+        },
+      },
+      pinnedTo: () => ({
+        runToolCall: async () => { throw unavailable; },
+        sealStep: async () => { throw unavailable; },
+      }),
+      isCancellation,
+      isUnclaimed: (error) => error === unavailable,
+      nonCancellable: (fn) => fn(),
+    });
+    const error = await step(INPUT).then(() => undefined, (failure: unknown) => failure);
+    check(
+      "a cancelled shared call stops the queued fallback",
+      sharedCalls.join(",") === "cancel",
+      sharedCalls,
+    );
+    check(
+      "a fallback cancellation preserves the original stop and seals results",
+      error === cancelled && recoverySeals === 1,
+      {
+        error: String(error), recoverySeals,
+      },
+    );
+  }
+
   const bad = failures.length;
   console.log(bad === 0 ? "l2-step-check: OK" : `l2-step-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);

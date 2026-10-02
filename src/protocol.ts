@@ -4,6 +4,9 @@
 
 export const WORKFLOW_TYPE = "piSession";
 export const WORKFLOW_ID_PREFIX = "pi-session-";
+// The failure type of a tool call that stopped before any attempt claimed it, so the tool cannot
+// have started and the workflow may move a pinned step instead of closing the call as unknown.
+export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
 
 export const workflowId = (sessionId: string) => `${WORKFLOW_ID_PREFIX}${sessionId}`;
 
@@ -28,7 +31,17 @@ export interface TurnState {
   // The last turn to stop, and why it stopped.
   readonly finished?: {
     readonly promptId: string;
-    readonly outcome: "answered" | "interrupted" | "ceiling";
+    // "interrupted" is the user pressing stop. A turn that died for any other reason is "failed",
+    // because reporting a crash as a stop tells whoever is watching that they did it.
+    // "budget" is the operator's bound reached, which is neither a failure nor somebody pressing
+    // stop: the turn is left where it got to and the session takes the next prompt.
+    readonly outcome: "answered" | "interrupted" | "failed" | "ceiling" | "budget";
+    // What the session has spent by the time this turn ended, for a client that wants to show it
+    // or an operator asking why a turn stopped.
+    readonly spent?: Spent;
+    // What went wrong, when something did. The session log holds the detail; this is for a
+    // client that is only reading turnState.
+    readonly error?: string;
     readonly finalText: string;
   };
 }
@@ -53,6 +66,16 @@ export interface RunStepInput extends PromptInput {
   readonly step: number;
 }
 
+/** What one unit of work cost, as the session's own accounting reports it. Reported per activity
+ * rather than as a running total, because the workflow is what adds them up: the session file is
+ * shared, so a total read from it includes turns this one did not run. */
+export interface Spend {
+  readonly tokens: number;
+  // What the session priced those tokens at. Reported where the host knows it, so an operator
+  // reading a stopped turn sees the number they care about rather than a proxy for it.
+  readonly cost?: number;
+}
+
 export interface RunStepResult {
   // Whether the turn is finished. False means the workflow schedules another step.
   readonly done: boolean;
@@ -61,6 +84,13 @@ export interface RunStepResult {
   readonly retryAttempt: number;
   // The assistant's final text, once the turn is done (the log is the truth; this is a courtesy).
   readonly finalText: string;
+  // What this step spent, for the turn's budget. Absent when the session cannot say.
+  readonly spent?: Spend;
+  // And what the session has been billed in total, which is what the session's own bound is about.
+  // Read off the record rather than added up here, so it survives everything the workflow does not:
+  // a run that rolled over, a session that went idle and was woken again, a turn some other client
+  // ran against the same file. Absent when the session cannot say.
+  readonly total?: Spend;
 }
 
 export interface SessionTurnOptions {
@@ -76,6 +106,27 @@ export interface SessionTurnOptions {
   // Where to keep the session log when the id is derived rather than given. A scheduled start has
   // no client to choose either, and the workflow may not read the environment.
   readonly sessionDir?: string;
+  // A project some client sent once, for a session that has nobody to send it. Every firing of a
+  // schedule is its own session, so each takes a copy of this store before its first activity.
+  readonly template?: string;
+  // What a run that rolled over was still holding. The queue is the whole of the control state, so
+  // handing it to the next run is what makes the rollover invisible to a client.
+  readonly queued?: readonly PromptInput[];
+  // What the session has spent, carried across a rollover for the same reason the queue is: a
+  // session that rolled over has not started again.
+  readonly spent?: Spent;
+  // What the last turn came to, carried across a rollover. A client polling `turnState` for its own
+  // prompt (the extension's `/background` does) otherwise never sees the answer: the new run starts
+  // with nothing finished, and the watcher gives up when the session retires.
+  readonly finished?: TurnState["finished"];
+  // What one turn may spend before the workflow stops driving it. Off unless an operator sets it:
+  // a bound that ends real work is worse than none, and only the operator knows which is which.
+  // The step ceiling above is not this. It is a runaway guard with a fixed number; this is policy.
+  readonly budget?: TurnBudget;
+  // Roll over at this many history events, on top of the server's own suggestion. The suggestion is
+  // what production runs on; this is for an operator who wants a tighter bound, and it is what
+  // makes the rollover reachable in a check.
+  readonly maxHistory?: number;
   // The bound on one tool call in stepped mode. A call that crosses it is not run again, because
   // its dispatch note says it started, so this is the longest any tool may take.
   readonly toolTimeoutMinutes?: number;
@@ -98,11 +149,28 @@ export interface ModelCallResult {
   // The response ended the run on its own. Nothing is dispatched, but the step is still sealed:
   // what answers for a failed model call (a retry, a compaction) happens there.
   readonly ended: boolean;
+  // The queue this worker polls on its own. The rest of the step is addressed there, because this
+  // is the host holding the directory the tools are about to write, which is what lets them run at
+  // once. Absent when the worker has none, and then the step runs on the shared queue as before.
+  //
+  // Falling back is narrow on purpose: only a dispatch nobody started may move, and only once every
+  // pinned sibling has settled. An attempt that started and failed may still have a tool writing
+  // that directory, and nothing here can see it.
+  readonly queue?: string;
+  // What the model call spent. The tools and the seal cost nothing at the provider unless the seal
+  // compacts, which is a model call of its own and reports its own.
+  readonly spent?: Spend;
+  // What the session has been billed in total, as the record holds it. See `RunStepResult`.
+  readonly total?: Spend;
 }
 
 export interface ToolCallInput {
   readonly sessionId: string;
   readonly sessionFile: string;
+  // The turn this call belongs to, which is the prompt's id. What a dispatch knows about a call is
+  // kept under it, and a turn numbers its steps from one again, so without it a step of the next
+  // turn reads the step before it as its own.
+  readonly turn: string;
   readonly step: number;
   readonly call: DeferredToolCall;
 }
@@ -122,15 +190,62 @@ export interface ToolCallResult {
 export interface SealStepInput {
   readonly sessionId: string;
   readonly sessionFile: string;
+  // Which turn's kept results to read. See `ToolCallInput`.
+  readonly turn: string;
   readonly step: number;
   readonly retryAttempt?: number;
   // The turn was stopped, so record the results and nothing else. A provider retry or a
   // compaction on the way out is work nobody asked for, and the interrupt waits for it.
   readonly interrupted?: boolean;
+  // This step is being closed without the host that was running it, which is not the same as being
+  // stopped: nobody asked for it to end, and a tool over there may still be inside its execution.
+  // Recorded where every host reads it, so what that one produces afterwards is kept rather than
+  // published over the step that replaces this one.
+  readonly lost?: boolean;
   // The step's calls, in the order the model asked for them. A call with no result is settled as
   // an unknown outcome, because a step that leaves one unanswered leaves a transcript no
   // provider accepts.
   readonly calls: readonly DeferredToolCall[];
+}
+
+/**
+ * What a turn may spend. Enforced between steps, never inside one: a step that has started is left
+ * to finish, because stopping it would leave a tool call the transcript cannot be made from.
+ *
+ * This is what the workflow having the loop buys. The agent is not asked to keep to it, and cannot
+ * be: the model decides what to ask for, and the thing that says no has to be somewhere the model
+ * does not reach.
+ */
+export interface TurnBudget {
+  // Wall clock for the whole turn, in seconds, measured with the workflow's own clock so it reads
+  // the same on a replay. A number rather than a duration string like the timeouts above it: the
+  // parser for those lives outside what a workflow bundle should be reaching for, and a budget
+  // nobody can be sure of the units of is worse than one that says them.
+  readonly seconds?: number;
+  // Tokens the turn's model calls may spend, added up as each one reports.
+  readonly tokens?: number;
+  // Wall clock again, but as a deadline rather than a bound checked between units of work. At
+  // `seconds` the turn stops where it can; at this one it stops where it is, which is what a user
+  // pressing stop does: the calls that have results keep them, the ones in flight come back to the
+  // model as outcomes nobody can vouch for, and the tools over there keep running until they are
+  // done. Nothing else here abandons work, so this is opt-in on top of the bound above.
+  readonly hardSeconds?: number;
+  // And the same two for the session, across every turn it runs. A per-turn bound says what one
+  // answer may cost; this says what the whole session may, which is the number somebody is billed
+  // for. Measured against what the session's own record says it has been billed, where the host
+  // reports that, so it survives a rollover, an idle retirement, and anything else that runs the
+  // session. Where it does not, the workflow's own count is used and carried across a rollover.
+  readonly sessionSeconds?: number;
+  readonly sessionTokens?: number;
+}
+
+/** What a session has spent so far, carried between runs of its workflow. */
+export interface Spent {
+  readonly tokens: number;
+  readonly cost: number;
+  // Wall clock the session's turns have used, rather than how long the session has existed: a
+  // session sitting idle overnight has spent nothing.
+  readonly seconds: number;
 }
 
 // A turn that never stops stepping is a bug (a model looping on the same tool, say), and the
