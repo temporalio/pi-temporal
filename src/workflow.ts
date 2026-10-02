@@ -16,17 +16,55 @@ import {
   log,
 } from "@temporalio/workflow";
 import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS } from "./protocol.js";
-import type { PromptInput, RunStepInput, RunStepResult, SessionTurnOptions, TurnState } from "./protocol.js";
+import type {
+  PromptInput,
+  RunStepInput,
+  RunStepResult,
+  SessionTurnOptions,
+  TurnState,
+} from "./protocol.js";
+import { makeSteppedStep, type SteppedActivities } from "./l2-step.js";
 
-const { runStep } = proxyActivities<{
-  runStep(input: RunStepInput): Promise<RunStepResult>;
-}>({
+const activityOptions = {
   // One step is a single model call plus the tools it asks for, so minutes, not hours. The
   // heartbeat is the real liveness bound and re-drives within seconds of a worker death.
   startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
   retry: { maximumAttempts: 100 },
-});
+} as const;
+
+const { runStep } = proxyActivities<{
+  runStep(input: RunStepInput): Promise<RunStepResult>;
+}>(activityOptions);
+
+// A total cap on top of the per-attempt one, so a unit that keeps timing out cannot hold the turn
+// and the session's queue for days.
+const CAP_MINUTES = 120;
+const cappedOptions = {
+  ...activityOptions,
+  scheduleToCloseTimeout: `${CAP_MINUTES} minutes`,
+} as const;
+
+const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
+
+// Overridable per deployment with PI_TEMPORAL_TOOL_TIMEOUT_MINUTES, read where the session starts.
+export const DEFAULT_TOOL_TIMEOUT_MINUTES = 30;
+
+function toolCallActivities(timeoutMinutes: number) {
+  // A call that fails for a reason no retry fixes must not hold the step, the turn and the
+  // session's queue behind it. The step waits for every call, so this ceiling is the one on all
+  // of it. A bound past the cap gets the room for at least one attempt.
+  return proxyActivities<SteppedActivities>({
+    ...activityOptions,
+    startToCloseTimeout: `${timeoutMinutes} minutes`,
+    scheduleToCloseTimeout: `${Math.max(CAP_MINUTES, timeoutMinutes)} minutes`,
+    retry: { maximumAttempts: 20 },
+  });
+}
+
+// The seal also runs what answers for a step that went wrong: a provider retry, and a compaction
+// that is itself a model call over the whole context. So it keeps the step-sized backstop.
+const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
@@ -38,6 +76,23 @@ export async function piSession(
   options?: SessionTurnOptions,
 ): Promise<void> {
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
+  // Same loop either way. Only what "one step" means differs, so wake, interrupt, the step
+  // ceiling and idle retirement are unchanged.
+  const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
+    ? makeSteppedStep({
+        activities: {
+          runModelCall,
+          runToolCall: toolCallActivities(
+            options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES,
+          ).runToolCall,
+          sealStep,
+        },
+        isCancellation,
+        nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
+        // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
+        log: (message, attributes) => log.info(message, attributes),
+      })
+    : runStep;
   const queue: PromptInput[] = [];
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
@@ -58,13 +113,17 @@ export async function piSession(
     const prompt = queue.shift()!;
     let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
     let finalText = "";
+    // The step's retry budget, kept here because the session that would count it is rebuilt per
+    // activity and the transcript it could be read off is something a compaction rewrites.
+    let retryAttempt = 0;
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
-          const input: RunStepInput = { sessionId, sessionFile, step, ...prompt };
-          const result = await runStep(input);
+          const input: RunStepInput = { sessionId, sessionFile, step, retryAttempt, ...prompt };
+          const result = await runTurnStep(input);
+          retryAttempt = result.retryAttempt;
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;

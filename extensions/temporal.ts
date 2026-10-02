@@ -13,11 +13,26 @@
 // Temporal side does not, which is why /background still works on stock pi against a worker
 // running elsewhere. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet worker owns the queue.
 
-import type { ExtensionAPI, ExtensionContext, TurnExecutorContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  TurnExecutorContext,
+} from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { Client, Connection } from "@temporalio/client";
-import { LOCAL_TURN_WORKFLOW, QUERIES, SIGNALS, WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
-import type { LocalTurnInput, PromptInput, SessionTurnOptions, TurnState } from "../src/protocol.js";
+import {
+  LOCAL_TURN_WORKFLOW,
+  QUERIES,
+  SIGNALS,
+  WORKFLOW_TYPE,
+  workflowId,
+} from "../src/protocol.js";
+import type {
+  LocalTurnInput,
+  PromptInput,
+  SessionTurnOptions,
+  TurnState,
+} from "../src/protocol.js";
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 
@@ -30,6 +45,7 @@ interface Env {
   readonly taskQueue: string;
   readonly sessionDir: string;
   readonly idleTimeout: string;
+  readonly stepped: boolean;
   readonly embeddedWorker: boolean;
   readonly durableTurns: boolean;
   readonly provider?: string;
@@ -44,6 +60,7 @@ const env = (): Env => ({
   taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
   sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
   idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
+  stepped: process.env.PI_TEMPORAL_STEPPED === "1",
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
   durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS !== "0",
   provider: process.env.PI_TEMPORAL_PROVIDER,
@@ -105,7 +122,8 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus(STATUS_KEY, "");
       return;
     }
-    ctx.ui.setStatus(STATUS_KEY, `${watching.size} background task${watching.size === 1 ? "" : "s"} running`);
+    const plural = watching.size === 1 ? "" : "s";
+    ctx.ui.setStatus(STATUS_KEY, `${watching.size} background task${plural} running`);
   };
 
   async function poll(ctx: ExtensionContext) {
@@ -113,7 +131,8 @@ export default function (pi: ExtensionAPI) {
     for (const [id, task] of [...watching]) {
       let state: TurnState;
       try {
-        state = await client.workflow.getHandle(workflowId(task.sessionId)).query<TurnState, []>(QUERIES.turnState);
+        const handle = client.workflow.getHandle(workflowId(task.sessionId));
+        state = await handle.query<TurnState, []>(QUERIES.turnState);
       } catch {
         // The session retires when it goes idle, so a missing workflow means the turn is over
         // and its answer is in the session file. Stop watching rather than reporting a failure.
@@ -130,7 +149,9 @@ export default function (pi: ExtensionAPI) {
         await pi.sendMessage(
           {
             customType: "pi-temporal",
-            content: `Background task "${task.text}" finished on a worker. It answered:\n\n${finalText}`,
+            content:
+              `Background task "${task.text}" finished on a worker. ` +
+              `It answered:\n\n${finalText}`,
             display: true,
             details: { sessionId: task.sessionId, promptId: task.promptId },
           },
@@ -184,12 +205,28 @@ export default function (pi: ExtensionAPI) {
 
   const runTurnDurably = async (turn: TurnExecutorContext) => {
     const turnId = randomUUID();
-    const input: LocalTurnInput = { sessionId: turn.sessionId, turnId, taskQueue: turnQueue };
+    const input: LocalTurnInput = {
+      sessionId: turn.sessionId,
+      turnId,
+      taskQueue: turnQueue,
+      stepped: cfg.stepped,
+    };
     let ran = false;
+    const ranHere = <T>(body: () => Promise<T>) => {
+      ran = true;
+      return body();
+    };
     liveTurns.set(turnId, {
-      run: async () => {
-        ran = true;
-        await turn.run();
+      run: () => ranHere(() => turn.run()),
+      // The same turn, a step at a time. Wrapped the same way, because a turn that got as far as
+      // its model call is one the fallback below must not run a second time.
+      steps: {
+        record: () => ranHere(() => turn.steps.record()),
+        // Not wrapped: asking whether the user stopped is not running the turn.
+        interrupted: () => turn.steps.interrupted(),
+        modelCall: () => ranHere(() => turn.steps.modelCall()),
+        runToolCall: (id) => ranHere(() => turn.steps.runToolCall(id)),
+        sealStep: (results, options) => ranHere(() => turn.steps.sealStep(results, options)),
       },
     });
 
@@ -212,7 +249,8 @@ export default function (pi: ExtensionAPI) {
       // Once. A session with no Temporal to reach would otherwise say it on every turn.
       if (!warnedNoTemporal) {
         warnedNoTemporal = true;
-        uiCtx?.ui.notify(`turns are not durable, Temporal is unreachable at ${cfg.address}`, "warning");
+        const where = `turns are not durable, Temporal is unreachable at ${cfg.address}`;
+        uiCtx?.ui.notify(where, "warning");
       }
     } finally {
       liveTurns.delete(turnId);
@@ -224,7 +262,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("background", {
-    description: "Send a task to a worker that keeps going after pi exits, and bring the answer back",
+    description: "Send a task to a worker that outlives pi, and bring its answer back",
     handler: async (args, ctx) => {
       const text = args.trim();
       if (!text) {
@@ -238,7 +276,7 @@ export default function (pi: ExtensionAPI) {
         text,
       };
       const prompt: PromptInput = { promptId: task.promptId, text };
-      const options: SessionTurnOptions = { idleTimeout: cfg.idleTimeout };
+      const options: SessionTurnOptions = { idleTimeout: cfg.idleTimeout, stepped: cfg.stepped };
 
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);

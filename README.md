@@ -4,11 +4,13 @@ A Temporal-backed durable executor for the [Pi coding agent](https://github.com/
 
 The durable unit is one step: a single model call and the tools it asks for. The workflow runs one Temporal activity per step, so a worker dying takes one step with it and every step before it stays done.
 
+Behind `PI_TEMPORAL_STEPPED=1` the unit is smaller still: the model call, each tool call, and the seal are activities of their own. See [A tool call per activity](#a-tool-call-per-activity).
+
 Status: verified end to end against a live Pi (SDK 0.84.2 fork). A turn that took three steps cost three activities. Killing the worker mid-step re-drove that step alone: the step before it stayed done and its `>>` append did not happen twice, the step in flight came back as attempt 2 on a fresh worker, the prompt was not re-added, and the turn ran on to its answer.
 
 ## Depends on the Pi fork
 
-This needs two pull requests on the fork, neither of which is in the published `@earendil-works/pi-coding-agent`. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
+This needs three pull requests on the fork, none of which is in the published `@earendil-works/pi-coding-agent`. [temporalio/pi#2](https://github.com/temporalio/pi/pull/2) adds the four calls a stepped driver needs:
 
 - `recordPrompt(text)` puts a prompt in the transcript without running it.
 - `step()` runs one model call and its tools, and reports whether the turn is done.
@@ -16,6 +18,8 @@ This needs two pull requests on the fork, neither of which is in the published `
 - `resumeInterruptedTurn()` is `prepareStep()` plus a run to the end of the turn, for a caller that wants the whole turn back in one call.
 
 [temporalio/pi#3](https://github.com/temporalio/pi/pull/3), stacked on it, adds `pi.registerTurnExecutor`, which lets an extension take over when a session's own turns run.
+
+[temporalio/pi#4](https://github.com/temporalio/pi/pull/4), stacked on that, splits a step into `modelCall`, `runToolCall` and `sealStep`, and hands the same three to a registered executor as `turn.steps`.
 
 So the dependency is a build of the fork, pinned by commit in `fork.pin`:
 
@@ -41,7 +45,8 @@ pi install -l /path/to/pi-temporal   # this project only
 Once it is installed, every turn of every session is durable. There is nothing to type and nothing
 to launch: the first turn registers a turn executor and starts a worker in this process, so each
 turn becomes a `piLocalTurn` workflow, and a turn a crash cut in half is finished when the session
-is opened again. `PI_TEMPORAL_DURABLE_TURNS=0` turns it off.
+is opened again. `PI_TEMPORAL_DURABLE_TURNS=0` turns it off, and `PI_TEMPORAL_STEPPED=1` makes each
+tool call of a turn an activity of its own.
 
 Be clear about what that is and is not. The turn runs in your pi process, against the live session,
 so the transcript and the streaming are pi's own. It does not run somewhere else, and it cannot:
@@ -142,16 +147,55 @@ The workflow loops that until a step reports done, so the number of activities i
 
 That makes a retry cheap and safe for a reason worth spelling out. A step that finished but never reported back is indistinguishable, on disk, from the step after it, so re-running it does exactly what the next step would have done anyway. No work is repeated. The one case that is not automatic is a crash between a tool starting and its result landing, and that is what `prepareStep` is for.
 
+## A tool call per activity
+
+`PI_TEMPORAL_STEPPED=1` splits the step into three:
+
+```
+runModelCall  ->  runToolCall (one per call)  ->  sealStep
+```
+
+Off by default. It applies to both halves: a `/background` task on a worker, and every turn of the session you are typing in.
+
+The calls of a step overlap on the worker half, where each activity opens a session of its own. They do not on the live half: those calls all reach the one agent that pi process holds, and it admits a single unit of work at a time, so a second call arriving while the first runs would be refused and reported as an unknown outcome for a tool that never ran.
+
+The point is what can now sit between the model asking for a tool and the tool running. A per-tool retry policy, a per-tool timeout, an approval, a budget: under the whole-step mode there was nowhere to put any of them, because one activity covered the model call and the whole batch. It also makes a turn legible: history shows the tools by name, and a tool that hangs no longer holds the model call under the same timeout.
+
+Two things are load-bearing and were easy to get wrong.
+
+**The seal is the step's only writer.** Pi's session file is a tree, and every entry takes its parent from the leaf the writer last saw. Two calls settling at once would each parent off the leaf they saw and branch the transcript, and Pi's own parallel path appends results in call order after the batch, which per-call activities would lose. So a call reports its result and the seal records the step's results together, in the order the model asked. The transcript ends up the one Pi would have written, which its own tests pin.
+
+Two attempts of the same activity can still both be alive, so every activity that writes takes a lock beside the session file first. A holder that stops refreshing it is reclaimed on age, which keeps one dead worker from taking the session with it. The tool calls take no lock, because they do not write.
+
+**A call that already started is not silently repeated.** A dispatch writes a note beside the session file before the tool can have any effect, and keeps the result there when it comes back. A second dispatch that finds a result returns it; one that finds only the note reports the outcome as unknown rather than running a `git push` that may already have landed. The attempt number would answer the same question far less precisely: it counts every way a dispatch can die, including the ones that never reached the tool.
+
+The kept results live in `<session>.jsonl.pending/<step>/`, scoped by step because a call id is only unique within the message that asked for it, and the next step's model call drops the step before it. The seal deliberately does not drop its own: a seal whose answer never reached Temporal runs again, and a batch it reads as empty is a batch it reads as wanting another step, even when a tool asked the turn to stop.
+
+Each tool call gets 30 minutes per attempt by default. A call that crosses it is not run again, since its note says it started, so it ends as an unknown outcome while the tool may still be running. A deployment with longer tools sets `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` on the client that starts the session.
+
+They stay out of Temporal's history on purpose: tool output is capped at 50KB by Pi, but a step's worth of it per activity result, per step, for the life of a session, is a history nobody wants to read.
+
+What it costs: each activity opens the session file and builds an `AgentSession` of its own, so a step with four calls pays six session opens instead of one. Against a model call that takes seconds, the boundaries measure in milliseconds (see below), but the cost is real and it grows with the transcript.
+
 ## What is durable, and what is not
 
 - **Between turns: clean.** A worker dying between turns loses nothing. The next prompt drives on any worker from the session file. A fresh worker that never saw the session serves it correctly.
 - **Between steps: clean.** Each step is its own activity, so a worker dying loses at most the step in flight. The steps before it are on disk and are not re-run.
 - **Mid-step: the tool is reported as unknown, not re-run.** A crash between a tool starting and its result landing leaves a tool call with no result. `prepareStep` settles it with "the outcome of this tool call is unknown", and the model decides whether to try again. Blindly re-running it is the wrong default for a coding agent: the `git push` may already have happened.
-- **A step is not atomic.** Pi runs the tools of one step as a batch, so a crash part way through that batch leaves some tools run and some not. The settled ones keep their results; only the unsettled one is reported as unknown.
+- **A step is not atomic.** Pi runs the tools of one step as a batch, so a crash part way through that batch leaves some tools run and some not. Under the whole-step mode none of the batch is in the transcript until the step ends, so a crash costs the work of every tool that had finished. The stepped mode is where the finished ones keep their results.
+- **An interrupt keeps what finished.** The step is closed on the way out, so a call that returned before the stop keeps its result. Only the one that was still running reads as an unknown outcome.
+- **Stepped mode keeps what a call produced.** A crash between a tool finishing and its result reaching Temporal loses the work under the whole-step mode: nothing recorded it. With a tool call per activity the result is kept beside the session file the moment the tool returns, so the retry finds it and the tool is not asked again. What is still lost is a tool that was inside its own execution when the process died, which is what an unknown outcome is for.
 
 ## Reproducing
 
-Helpers are at the repo root: `submit.mts` (submit one prompt), `inspect.mts` (summarize a session file), and `step-loop-check.mts` (run the executor against a Temporal server with a stubbed activity: one activity per step, an interrupt that ends the turn and not the session; no model key needed).
+Helpers are at the repo root, none of which needs a model key:
+
+- `submit.mts` submits one prompt, `inspect.mts` summarizes a session file.
+- `step-loop-check.mts` runs the executor against a Temporal server with the activities stubbed, in both modes: one step at a time and in order, an interrupt that ends the turn and not the session.
+- `local-turn-check.mts` does the same for a turn of a live session, with the turn itself faked: handed over once in whole-turn mode, and a model call, its calls and a seal per step in stepped mode. It also holds the two rules that half depends on: the calls of a step do not overlap there, and an interrupt stops the loop instead of buying another model call.
+- `l2-step-check.mts` needs no server either. It drives the stepped step body against fake activities: calls overlap unless the batch says otherwise, a failed tool still lets the step close, and an interrupt is not swallowed.
+- `session-lock-check.mts` covers the one-writer-at-a-time lock: two writers do not overlap, a dead holder's lock is reclaimed on age, and a live holder's is not stolen.
+- `pending-check.mts` needs neither a server nor a key. It covers the files a step keeps about its calls, which is what "a call that already started is not silently repeated" rests on: a fresh call looks fresh, scratch never reads as a result, and a sweep drops what the transcript answers and keeps what it does not.
 
 To see what a session is doing without reading its file, ask the workflow: `temporal workflow query --workflow-id pi-session-<id> --name turnState` reports the queue, the step in flight, and how the last turn ended.
 
@@ -163,8 +207,10 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - `src/config.ts` — Temporal + Pi wiring from env.
 - `src/protocol.ts` — workflow ids, signal/query names, shared types.
 - `src/local-turn-workflow.ts` — `piLocalTurn`: one workflow per turn of a live session.
-- `src/local-turn-activity.ts` — runs the turn the pi process is holding.
-- `src/activities.ts` — `runStep`: advances one Pi turn by one step via `@earendil-works/pi-coding-agent`, session file as the log.
+- `src/local-turn-activity.ts` — works on the turn the pi process is holding: the whole turn, or its parts.
+- `src/activities.ts` — `runStep`, and the `runModelCall` / `runToolCall` / `sealStep` that split it, via `@earendil-works/pi-coding-agent`, session file as the log.
+- `src/l2-step.ts` — the stepped step body: how a step's calls are fanned out and how an interrupt reaches them.
+- `src/pending.ts` — what a step knows about its calls before it is sealed, beside the session file.
 - `src/workflow.ts` — `piSession`: per-session durable executor (submit prompt, step to the end of the turn, interrupt, idle-terminate).
 - `src/session-worker.ts` — builds the worker; used by the standalone process and by the extension.
 - `src/worker.ts` — the standalone worker process.
@@ -187,6 +233,15 @@ The crash test: start a worker; submit a turn that appends to a file with one ba
 - [x] Packaged as a pi package: `pi install` registers the commands, and a task submitted from the TUI came back as context for the next prompt.
 - [x] A worker inside pi, so a task runs with nothing else launched (verified with no worker process anywhere).
 - [x] Every turn durable by default via `registerTurnExecutor`, with a crash mid tool call finished on reopen.
+- [x] A tool call per activity, behind `PI_TEMPORAL_STEPPED=1`, on both halves.
+
+Live, on `gpt-4o-mini`, with the stepped mode on:
+
+- A worker-owned turn that read two files cost six activities: `runModelCall`, two `runToolCall`, `sealStep`, then `runModelCall` and `sealStep`. The two tool calls were scheduled 17 microseconds apart and ran in the same 31ms window. The seal took 8ms; the model calls took 3.1s and 2.6s, which is where a turn's time actually goes.
+- Crash mid tool call: a bash call that appended one line and then slept for 60 seconds, with every worker killed while it slept. On a fresh worker the call came back as attempt 2, found its dispatch note, and reported the outcome as unknown rather than running again. The model then ran `cat counter.txt` itself, saw the one line, and answered. The file had one line, not two.
+- Interrupt: with a `sleep 90` in flight, the signal and `ActivityTaskCancelRequested` landed in the same second, the turn was recorded as interrupted, and the workflow stayed running. The next prompt settled the unanswered call before it was recorded, so the session kept serving instead of failing on every later turn.
+- A turn of the session you type in cost five activities: `runLocalModelCall`, `runLocalToolCall`, `runLocalSeal`, then `runLocalModelCall` and `runLocalSeal`. The transcript is the one pi writes without an executor.
+- Crash mid tool call on that half too: pi killed while a tool slept, reopened with `-c`. The unanswered call was settled as an unknown outcome, the model checked the file rather than re-running the command, the interrupted turn finished, and the new prompt was answered.
 
 ## Prior art
 
