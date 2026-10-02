@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { ApplicationFailure } from "@temporalio/activity";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { unknownToolCallOutcome } from "@earendil-works/pi-coding-agent";
@@ -177,6 +178,33 @@ async function main() {
     }
     const records = seen.filter((s) => s === "record").length;
     check("a retried model call does not record the prompt twice", records === 1, seen);
+  }
+
+  // A tool that throws once the user has stopped the turn must not be started again by a retry,
+  // because nothing kept says it ran.
+  {
+    const turnId = randomUUID();
+    const { turn } = fakeTurn({ interruptAfter: 0 });
+    let runs = 0;
+    turn.steps.runToolCall = async () => {
+      runs++;
+      throw new Error("aborted");
+    };
+    live.set(turnId, turn);
+    const activities = makeLocalTurnActivities(live);
+    let failure: unknown;
+    try {
+      await activities.runLocalToolCall({ turnId, step: 1, call: { id: "c1", name: "bash" } });
+    } catch (err) {
+      failure = err;
+    } finally {
+      live.delete(turnId);
+    }
+    const nonRetryable = failure instanceof ApplicationFailure && failure.nonRetryable;
+    check("a tool that fails on a stopped turn is not retried", nonRetryable && runs === 1, {
+      failure: String(failure),
+      runs,
+    });
   }
 
   worker.shutdown();
