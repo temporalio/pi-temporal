@@ -11,6 +11,7 @@
 // placement is what you think, and that the other hosts agree are the operator's to verify.
 
 import { readFileSync } from "node:fs";
+import type { TurnBudget } from "./protocol.js";
 
 export type Profile = "local" | "fleet";
 
@@ -36,6 +37,8 @@ export interface Config {
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
   // How long one tool call may run in stepped mode. Unset keeps the workflow's default.
   readonly toolTimeoutMinutes?: number;
+  // What a turn and a session may spend before the workflow stops driving them. Unset is no bound.
+  readonly budget?: TurnBudget;
 }
 
 const read = (path: string | undefined) => (path ? readFileSync(path, "utf8") : undefined);
@@ -63,6 +66,7 @@ export function fromEnv(): Config {
     // rather than a whole step, and a tool call is where the retry policy and the approval belong.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
     toolTimeoutMinutes: minutesFromEnv("PI_TEMPORAL_TOOL_TIMEOUT_MINUTES"),
+    budget: budgetFromEnv(),
     // In a fleet the files have to travel or a worker runs the tools against a directory that is
     // not the project and tells the model those files are it.
     shipTree: onOff("PI_TEMPORAL_SHIP_TREE", fleet),
@@ -167,19 +171,40 @@ export function describe(cfg: Config): Record<string, string> {
     stepped: String(cfg.stepped),
     toolTimeoutMinutes: cfg.toolTimeoutMinutes ? `${cfg.toolTimeoutMinutes} minutes` : "default",
     shipTree: String(cfg.shipTree),
+    budget: cfg.budget
+      ? Object.entries(cfg.budget)
+          .map(([name, value]) => `${name}=${value}`)
+          .join(", ")
+      : "none",
     credentials: cfg.apiKey ? "api key" : cfg.tls ? "certificate pair" : "none (plaintext)",
   };
 }
 
-export function minutesFromEnv(name: string): number | undefined {
+export const minutesFromEnv = (name: string) => wholeFromEnv(name, "minutes");
+
+function wholeFromEnv(name: string, unit: string): number | undefined {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return undefined;
-  const minutes = Number(raw);
-  // A typo here would otherwise become a timeout nobody asked for.
-  if (!Number.isInteger(minutes) || minutes <= 0) {
-    throw new Error(`${name} must be a whole number of minutes, got ${JSON.stringify(raw)}`);
+  const value = Number(raw);
+  // A typo here would otherwise become a bound nobody asked for, or none at all.
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a whole number of ${unit}, got ${JSON.stringify(raw)}`);
   }
-  return minutes;
+  return value;
+}
+
+// Read where a session starts and carried in its options, because the workflow may not read the
+// environment. Each bound is separate, and none is set unless an operator sets it.
+function budgetFromEnv(): TurnBudget | undefined {
+  const budget: TurnBudget = {
+    tokens: wholeFromEnv("PI_TEMPORAL_BUDGET_TOKENS", "tokens"),
+    seconds: wholeFromEnv("PI_TEMPORAL_BUDGET_SECONDS", "seconds"),
+    hardSeconds: wholeFromEnv("PI_TEMPORAL_BUDGET_HARD_SECONDS", "seconds"),
+    sessionTokens: wholeFromEnv("PI_TEMPORAL_BUDGET_SESSION_TOKENS", "tokens"),
+    sessionSeconds: wholeFromEnv("PI_TEMPORAL_BUDGET_SESSION_SECONDS", "seconds"),
+  };
+  const set = Object.entries(budget).filter(([, value]) => value !== undefined);
+  return set.length > 0 ? (Object.fromEntries(set) as TurnBudget) : undefined;
 }
 
 export const sessionFileFor = (sessionDir: string, sessionId: string) =>

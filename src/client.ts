@@ -29,6 +29,7 @@ export async function submitPrompt(sessionId: string, text: string, promptId = r
     idleTimeout: cfg.idleTimeout,
     stepped: cfg.stepped,
     toolTimeoutMinutes: cfg.toolTimeoutMinutes,
+    budget: cfg.budget,
   };
   try {
     await client.workflow.signalWithStart(WORKFLOW_TYPE, {

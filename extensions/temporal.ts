@@ -50,6 +50,7 @@ interface Env {
   readonly sessionDir: string;
   readonly idleTimeout: string;
   readonly stepped: boolean;
+  readonly toolTimeoutMinutes?: number;
   readonly embeddedWorker: boolean;
   readonly durableTurns: boolean;
   readonly provider?: string;
@@ -280,7 +281,11 @@ export default function (pi: ExtensionAPI) {
         text,
       };
       const prompt: PromptInput = { promptId: task.promptId, text };
-      const options: SessionTurnOptions = { idleTimeout: cfg.idleTimeout, stepped: cfg.stepped };
+      const options: SessionTurnOptions = {
+        idleTimeout: cfg.idleTimeout,
+        stepped: cfg.stepped,
+        toolTimeoutMinutes: cfg.toolTimeoutMinutes,
+      };
 
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);

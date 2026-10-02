@@ -462,6 +462,22 @@ filesystem and clock behavior meet the lease assumptions. Operators must check t
 The profile also refuses a shared-workspace deployment with shipping disabled, even if that
 deployment could work under a different placement contract.
 
+Settings no profile decides, read where a session starts (the client, the CLI, or `/background`)
+and carried in the session's options, because the workflow may not read the environment. Each is
+a whole number, and a value that is not one is refused rather than ignored:
+
+| variable | what it bounds | unset |
+|---|---|---|
+| `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` | one attempt of one tool call, in stepped mode | 30 minutes |
+| `PI_TEMPORAL_BUDGET_TOKENS` | tokens one turn may spend | no bound |
+| `PI_TEMPORAL_BUDGET_SECONDS` | wall clock for one turn, checked between units of work | no bound |
+| `PI_TEMPORAL_BUDGET_HARD_SECONDS` | wall clock for one turn, stopping it where it is | no bound |
+| `PI_TEMPORAL_BUDGET_SESSION_TOKENS` | tokens the whole session may spend | no bound |
+| `PI_TEMPORAL_BUDGET_SESSION_SECONDS` | wall clock for the whole session | no bound |
+
+A tool call that crosses its timeout is not run again, because its dispatch note says it started,
+so it ends as an unknown outcome while the tool may still be running. `doctor` prints what is set.
+
 Reaching a server that is not the dev server:
 
 ```bash
