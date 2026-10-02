@@ -16,7 +16,8 @@ import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 
-/** Short enough to stay readable in the Temporal UI, long enough that a collision is implausible. */
+/** Short enough to stay readable in the Temporal UI; long enough that a collision is
+ * implausible. */
 const DIGEST_LENGTH = 12;
 
 export function queueForWorker(base: string, projectDir: string, host = hostname()): string {
