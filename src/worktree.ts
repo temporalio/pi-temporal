@@ -36,12 +36,23 @@
 //      and the only thing that makes it harmless is that nobody else publishes during it.
 //   2. Once the session has closed that step, what that host publishes for it is refused.
 //
-// `lost-host-check.mts` holds this one to both clauses, and `packages/temporal/test/lost-host.test.ts`
-// in the OpenCode fork holds that one to the same two, in the same order.
+// `lost-host-check.mts` holds this one to both clauses, and the OpenCode fork's
+// `packages/temporal/test/lost-host.test.ts` holds that one to the same two, in the same order.
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { access, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
 import { dirname, join } from "node:path";
@@ -97,7 +108,8 @@ const bundleName = (seq: number) => `${String(seq).padStart(8, "0")}.bundle`;
 
 // Host-local, and keyed by the path the tools run in. Two projects on one worker get a shadow
 // repository each; the same project on two workers gets one on each of them.
-const treesRoot = () => join(process.env.PI_TEMPORAL_DATA ?? join(homedir(), ".pi-temporal"), "trees");
+const treesRoot = () =>
+  join(process.env.PI_TEMPORAL_DATA ?? join(homedir(), ".pi-temporal"), "trees");
 
 function hostDir(projectDir: string) {
   return join(treesRoot(), createHash("sha256").update(projectDir).digest("hex").slice(0, 16));
@@ -139,9 +151,17 @@ const sharedLockPath = (sessionFile: string) => join(shareDir(sessionFile), "wri
 
 // Always in this order. Two locks taken in two orders is the one way to turn exclusion into a
 // deadlock, and the directory is the outer one because a host takes it for every session.
-const withTreeLocks = <T>(projectDir: string, sessionFile: string, body: () => Promise<T>) =>
+//
+// The body is handed the shared lease's ownership read. Most callers have no use for it; `capture`
+// asks it again before each write the shared directory keeps, because a lease can be reclaimed
+// while its holder is stalled and a reclaimed holder must not finish publishing.
+const withTreeLocks = <T>(
+  projectDir: string,
+  sessionFile: string,
+  body: (owned: () => Promise<boolean>) => Promise<T>,
+) =>
   withSessionLock(treeLockPath(projectDir), () =>
-    withSessionLock(sharedLockPath(sessionFile), body),
+    withSessionLock(sharedLockPath(sessionFile), (owned) => body(owned)),
   );
 
 async function readJson<T>(path: string): Promise<T | undefined> {
@@ -221,7 +241,10 @@ class WrongTree extends Error {}
 // can serve it.
 const writersDir = (projectDir: string) => join(hostDir(projectDir), "writers");
 const writerPath = (projectDir: string, callId: string) =>
-  join(writersDir(projectDir), `${createHash("sha256").update(callId).digest("hex").slice(0, 16)}.json`);
+  join(
+    writersDir(projectDir),
+    `${createHash("sha256").update(callId).digest("hex").slice(0, 16)}.json`,
+  );
 
 /** What a tool call is, for telling this step's writers from an earlier turn's. */
 export interface Writer {
@@ -327,7 +350,8 @@ async function liveHere(projectDir: string): Promise<LiveHere | undefined> {
         if (Number.isFinite(pgrp)) groups.add(pgrp);
         // Readable whoever owns the process, unlike the two below it.
         const cgroup = await readFile(`/proc/${name}/cgroup`, "utf8").catch(() => undefined);
-        const path = cgroup?.split("\n")[0]?.slice(cgroup.indexOf(":", cgroup.indexOf(":") + 1) + 1);
+        const line = cgroup?.split("\n")[0];
+        const path = line && line.slice(line.indexOf(":", line.indexOf(":") + 1) + 1);
         if (path) cgroups.add(path.trim());
         // Readable for this user's processes, which is what a tool of ours is. Anything else is
         // not something this worker started, unless it was started through `sudo`, and that one is
@@ -348,7 +372,14 @@ async function liveHere(projectDir: string): Promise<LiveHere | undefined> {
           break;
         }
       }
-      return { groups, workers, cgroups, holding, ourGroup: await group(), ourCgroup: await cgroup() };
+      return {
+        groups,
+        workers,
+        cgroups,
+        holding,
+        ourGroup: await group(),
+        ourCgroup: await cgroup(),
+      };
     }
 
     // `-E` prints each process's environment after its command, for the processes this user owns.
@@ -369,7 +400,9 @@ async function liveHere(projectDir: string): Promise<LiveHere | undefined> {
     }
     // One reading for every process, rather than walking the directory: `lsof +D` stats the whole
     // tree, and the answer wanted here is about the processes, not about the files.
-    const cwds = await execFileAsync("lsof", ["-a", "-d", "cwd", "-Fpn"], asked).catch(() => undefined);
+    const cwds = await execFileAsync("lsof", ["-a", "-d", "cwd", "-Fpn"], asked).catch(
+      () => undefined,
+    );
     let at: number | undefined;
     for (const line of cwds?.stdout.split("\n") ?? []) {
       if (line.startsWith("p")) at = Number.parseInt(line.slice(1), 10);
@@ -378,7 +411,14 @@ async function liveHere(projectDir: string): Promise<LiveHere | undefined> {
         holding.push({ pid: at, how: "its working directory is in it" });
       }
     }
-    return { groups, workers, cgroups, holding, ourGroup: await group(), ourCgroup: await cgroup() };
+    return {
+      groups,
+      workers,
+      cgroups,
+      holding,
+      ourGroup: await group(),
+      ourCgroup: await cgroup(),
+    };
   } catch {
     return undefined;
   }
@@ -409,7 +449,8 @@ async function readCgroup(): Promise<string | undefined> {
   const text = await readFile("/proc/self/cgroup", "utf8").catch(() => undefined);
   const line = text?.split("\n")[0];
   // `<hierarchy>:<controllers>:<path>`, and the path is the part that names the unit or container.
-  return line ? line.slice(line.indexOf(":", line.indexOf(":") + 1) + 1).trim() || undefined : undefined;
+  if (!line) return undefined;
+  return line.slice(line.indexOf(":", line.indexOf(":") + 1) + 1).trim() || undefined;
 }
 
 let ourCgroup: Promise<string | undefined> | undefined;
@@ -469,7 +510,9 @@ export function insideBecause(note: WriterNote, live: LiveHere | undefined): str
   // passes on and this survives it. Only when the writer was in a group of its own, which a
   // service manager or a container per worker gives it: in the container this process is in, every
   // process shares one, and finding ourselves there is not evidence about anything.
-  if (note.cgroup !== undefined && note.cgroup !== live.ourCgroup && live.cgroups.has(note.cgroup)) {
+  const cgrouped =
+    note.cgroup !== undefined && note.cgroup !== live.ourCgroup && live.cgroups.has(note.cgroup);
+  if (cgrouped) {
     return `something is still in ${note.cgroup}`;
   }
   // The process group, for a tool that was given an environment of somebody else's choosing. Only
@@ -517,8 +560,9 @@ async function refuseWhenStranded(projectDir: string, current?: Writer): Promise
   if (stranded.length === 0) return;
   const one = stranded[0];
   throw new Quarantined(
-    `not using ${projectDir}: ${stranded.length} tool call(s) from an earlier step never returned ` +
-      `(${one.callId} of turn ${one.turn} step ${one.step}, pid ${one.pid} on ${one.host}, started ` +
+    `not using ${projectDir}: ${stranded.length} tool call(s) from an earlier step never ` +
+      `returned (${one.callId} of turn ${one.turn} step ${one.step}, pid ${one.pid} on ` +
+      `${one.host}, started ` +
       `${one.started}). Still refused because ${one.because}. Stop it, then clear the directory ` +
       `with \`pi-temporal release-tree ${projectDir}\`.`,
   );
@@ -538,7 +582,8 @@ export interface Fence {
 // a capture belonging to it is refused wherever it comes from.
 const closedPath = (sessionFile: string) => join(shareDir(sessionFile), "closed.json");
 // Long enough that a session's abandoned steps all stay named, short enough that this stays a file
-// somebody can read. A step drops off the end only after hundreds of later ones closed the same way.
+// somebody can read. A step drops off the end only after hundreds of later ones closed the same
+// way.
 const CLOSED_KEPT = 500;
 
 interface ClosedStep extends Fence {
@@ -590,7 +635,8 @@ async function moveAside(
   if (!held?.built) return undefined;
   if (current) {
     const here = await writersHere(projectDir);
-    if (here.some((note) => note.turn === current.turn && note.step === current.step)) return undefined;
+    const ours = here.some((note) => note.turn === current.turn && note.step === current.step);
+    if (ours) return undefined;
   }
   const moved = `${projectDir}.stranded.${new Date().toISOString().replace(/[:.]/g, "-")}`;
   try {
@@ -693,7 +739,18 @@ async function publish(
   tip: Tip | undefined,
   tree: string,
   built: boolean | undefined,
+  owned: () => Promise<boolean>,
 ) {
+  // Asked again right before each write the shared directory keeps. The lease can be reclaimed
+  // while this holder is stalled, and a reclaimed holder must not finish publishing: its late
+  // bundle replaces the one the new holder wrote under the same number, and its late tip names a
+  // commit whose bundle the new holder dropped as an orphan, which refuses every capture and
+  // restore after it. Neither read is atomic with its write; like `stillOurs` on the session file,
+  // this narrows the hole to the gap between the question and the write.
+  const stillHeld = async (what: string) => {
+    if (await owned()) return;
+    throw new Error(`lost the tree-store lease before ${what}: another writer has ${sessionFile}`);
+  };
   const seq = (tip?.seq ?? 0) + 1;
   // Every so often the chain restarts instead of growing. The bundle written here carries the whole
   // tree rather than the difference, and stands on nothing, so every bundle before it can go: a
@@ -729,7 +786,9 @@ async function publish(
         `not shipping ${projectDir}: the session is already at bundle ${now?.seq ?? seq}`,
       );
     }
-    console.warn(`dropping bundle ${seq} for ${sessionFile}: nothing names it and the tip is behind it`);
+    console.warn(
+      `dropping bundle ${seq} for ${sessionFile}: nothing names it and the tip is behind it`,
+    );
     await rm(join(dir, bundleName(seq)), { force: true });
   }
   // Written to a scratch name and renamed, so a host reading the directory never unbundles a file
@@ -737,8 +796,10 @@ async function publish(
   const scratch = join(dir, `${bundleName(seq)}.${scratchToken()}.writing`);
   const incremental = tip && !restart ? ["--not", tip.commit] : [];
   await git(projectDir, ["bundle", "create", scratch, ref, ...incremental]);
+  await stillHeld("renaming its bundle into place");
   await rename(scratch, join(dir, bundleName(seq)));
 
+  await stillHeld("naming the tip");
   await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
   await rm(forgottenPath(sessionFile), { force: true });
   // After the tip names the self-contained one, never before: a crash in between leaves bundles
@@ -792,7 +853,8 @@ async function handBack(projectDir: string, sessionFile: string, held: Held) {
   if ((await treeHere(projectDir)) !== held.tree) return false;
   await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
   // `-x` as well, because what the next session finds has to be an empty directory and not a nearly
-  // empty one. On a tree this host built there is nothing to lose, which is why only those get here.
+  // empty one. On a tree this host built there is nothing to lose, which is why only those get
+  // here.
   await git(projectDir, ["clean", "-fdxq"]);
   return await isEmptyDir(projectDir);
 }
@@ -847,7 +909,7 @@ export async function capture(
 ): Promise<void> {
   // One at a time per directory. Two captures share an index and a shadow repository, so a second
   // one collides on `index.lock`, and that failure reads as a session that stopped shipping.
-  await withTreeLocks(projectDir, sessionFile, async () => {
+  await withTreeLocks(projectDir, sessionFile, async (owned) => {
     // What this directory holds is not this session's to publish while a writer from another step
     // is unaccounted for: its files are in there too.
     await refuseWhenStranded(projectDir, opts.current);
@@ -885,7 +947,7 @@ export async function capture(
     const tree = await treeHere(projectDir);
     if (tip?.tree === tree) return;
     if (tip) await ingest(projectDir, sessionFile, held?.seq ?? 0);
-    await publish(projectDir, sessionFile, tip, tree, held?.built);
+    await publish(projectDir, sessionFile, tip, tree, held?.built, owned);
   });
 }
 
@@ -894,7 +956,11 @@ export async function capture(
  * the directory holds something this session did not put there, because running against it would
  * describe somebody else's files as the project.
  */
-export async function ensure(projectDir: string, sessionFile: string, current?: Writer): Promise<void> {
+export async function ensure(
+  projectDir: string,
+  sessionFile: string,
+  current?: Writer,
+): Promise<void> {
   await withTreeLocks(projectDir, sessionFile, async () => {
     // Before anything is written or checked out. A restore is what brings this host to the tip, and
     // doing that under an abandoned writer is what makes its next capture look current.
@@ -929,7 +995,8 @@ export async function ensure(projectDir: string, sessionFile: string, current?: 
     // became the project on every host. The client sends it, before the session starts.
     if (!tip) {
       throw new WrongTree(
-        `no project established for ${sessionFile}: send it with \`pi-temporal start --project=...\``,
+        `no project established for ${sessionFile}: ` +
+          `send it with \`pi-temporal start --project=...\``,
       );
     }
 
@@ -1072,8 +1139,8 @@ export const unclaim = (projectDir: string, sessionFile: string) =>
 export async function sweep(): Promise<number> {
   let freed = 0;
   for (const dir of await readdir(treesRoot()).catch(() => [] as string[])) {
-    const names = (await readdir(join(treesRoot(), dir)).catch(() => [] as string[])).filter((name) =>
-      name.startsWith("held-"),
+    const names = (await readdir(join(treesRoot(), dir)).catch(() => [] as string[])).filter(
+      (name) => name.startsWith("held-"),
     );
     for (const name of names) {
       const path = join(treesRoot(), dir, name);
@@ -1085,7 +1152,9 @@ export async function sweep(): Promise<number> {
           !current || current.session !== note.session || current.directory !== note.directory ||
           !(await isRetired(note.session!))
         ) return false;
-        if (current.built && !(await handBack(note.directory!, note.session!, current))) return false;
+        if (current.built && !(await handBack(note.directory!, note.session!, current))) {
+          return false;
+        }
         await rm(path, { force: true });
         return true;
       }).catch(() => false);
