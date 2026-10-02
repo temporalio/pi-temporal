@@ -92,7 +92,7 @@ const recordedInTranscript = (messages: Msg[], callId: string) =>
       blocksOf(m.content).some((b) => b.type === "toolCall" && b.id === callId),
   );
 
-/** The calls of the trailing assistant message, which is what prepareStep would settle. */
+/** The calls nothing answered yet, which is what prepareStep would settle. */
 const danglingCallIds = (messages: Msg[]) =>
   findDanglingToolCalls(messages as unknown as Parameters<typeof findDanglingToolCalls>[0]).map(
     (call) => call.id,
@@ -245,6 +245,17 @@ export function makeActivities(
     return session;
   }
 
+  /** Whether the session has work, after settling what a stopped turn left behind. A session
+   * rebuilt for this activity has no run under way, so a busy one means something else is driving
+   * it, and the answer it would give is not one to act on. */
+  const settleWhatStopped = (session: AgentSession): boolean => {
+    const settled = session.prepareStep();
+    if (settled === "busy") {
+      throw new Error("the session is already running a unit of work; retrying");
+    }
+    return settled;
+  };
+
   /** Put the prompt in the transcript, or settle what an earlier attempt left behind. Returns the
    * turn's answer when there is nothing left to run. Only the stepped mode keeps dispatch notes,
    * so only it can tell an interrupted call from one nothing has run yet. */
@@ -265,7 +276,7 @@ export function makeActivities(
       // Settle what the turn that stopped left behind first. A call with no result is a payload no
       // provider accepts, so a prompt recorded behind one makes every later turn of the session
       // fail rather than just the interrupted one.
-      session.prepareStep();
+      settleWhatStopped(session);
       // Record the prompt without running it, so the first step is a step like any other and the
       // crash window before it is one Temporal already covers.
       if (!(await session.recordPrompt(`${input.text}${marker(input.promptId)}`))) {
@@ -278,13 +289,19 @@ export function makeActivities(
     // interrupted work, so leave them for the model call to hand back. Settling them here would
     // tell the model that tools which never ran may have taken effect, and pay for a second
     // response on top.
+    // Only while the message that asked for them is the last one: a model call hands back the
+    // calls of a trailing assistant message, and from behind results it would ask the provider
+    // again with calls nothing answers.
     const dangling = danglingCallIds(messages());
-    const started = noDispatchStarted(input.sessionFile, input.promptId, input.step, dangling);
-    if (stepped && (await started)) {
+    const last = messages()[messages().length - 1];
+    const handBack =
+      last?.role === "assistant" &&
+      (await noDispatchStarted(input.sessionFile, input.promptId, input.step, dangling));
+    if (stepped && handBack) {
       return undefined;
     }
 
-    if (!session.prepareStep()) {
+    if (!settleWhatStopped(session)) {
       // The prompt is recorded and the turn already has its answer. That is a retry landing after
       // the last step finished but before its result reached Temporal.
       return { done: true, retryAttempt: 0, finalText: lastAssistantText(messages()) };
@@ -306,7 +323,12 @@ export function makeActivities(
           // prepareStep settled anything the crash left dangling, so this is a plain step: a tool
           // whose result never landed is reported as unknown, not re-run behind the model's back.
           const before = billed(session);
-          const { done } = await session.step();
+          const stepped = await session.step();
+          // A refusal, not a step that wanted another: nothing ran, so there is no `done` to read.
+          if (stepped.ran === false) {
+            throw new Error("the session refused the step: another unit of work is running in it");
+          }
+          const { done } = stepped;
           await session.waitForIdle();
           const messages = session.state.messages as Msg[];
           const spent = spentSince(before, session);
