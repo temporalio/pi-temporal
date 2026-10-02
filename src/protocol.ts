@@ -76,6 +76,9 @@ export interface SessionTurnOptions {
   // Where to keep the session log when the id is derived rather than given. A scheduled start has
   // no client to choose either, and the workflow may not read the environment.
   readonly sessionDir?: string;
+  // The bound on one tool call in stepped mode. A call that crosses it is not run again, because
+  // its dispatch note says it started, so this is the longest any tool may take.
+  readonly toolTimeoutMinutes?: number;
 }
 
 // A call the model asked for, recorded but not run. The arguments stay in the transcript: the

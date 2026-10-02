@@ -110,6 +110,7 @@ async function schedule(args: string[]) {
           {
             idleTimeout: cfg.idleTimeout,
             stepped: cfg.stepped,
+            toolTimeoutMinutes: cfg.toolTimeoutMinutes,
             sessionDir: cfg.sessionDir,
             initialPrompt: { promptId: `scheduled-${id}`, text },
           },

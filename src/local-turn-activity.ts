@@ -118,7 +118,17 @@ export function makeLocalTurnActivities(live: LiveTurns) {
     return heartbeating(async () => {
       if (state.results.has(input.call.id)) return { outcome: "already-settled" };
 
-      const outcome = await turn.steps.runToolCall(input.call.id);
+      let outcome: TurnToolCallOutcome | undefined;
+      try {
+        outcome = await turn.steps.runToolCall(input.call.id);
+      } catch (err) {
+        // Nothing kept says the tool started, so a retry would run it again on a turn the user
+        // stopped. The seal reports the call as an unknown outcome instead.
+        if (turn.steps.interrupted()) {
+          throw ApplicationFailure.nonRetryable(`turn ${input.turnId} was stopped`, "TurnStopped");
+        }
+        throw err;
+      }
       if (!outcome) return { outcome: "already-settled" };
 
       state.results.set(input.call.id, outcome);

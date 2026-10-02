@@ -12,7 +12,8 @@ port="${TEMPORAL_PORT:-7233}"
 ui_port="${TEMPORAL_UI_PORT:-$((port + 1000))}"
 
 command -v temporal >/dev/null || {
-  echo "the temporal CLI is not on PATH. 'brew install temporal', or see https://docs.temporal.io/cli" >&2
+  echo "the temporal CLI is not on PATH." \
+    "'brew install temporal', or see https://docs.temporal.io/cli" >&2
   exit 1
 }
 
