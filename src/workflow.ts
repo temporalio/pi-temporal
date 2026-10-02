@@ -138,7 +138,13 @@ export async function piSession(
         current = CancellationScope.current();
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
-          const input: RunStepInput = { sessionId: id, sessionFile: file, step, retryAttempt, ...prompt };
+          const input: RunStepInput = {
+            sessionId: id,
+            sessionFile: file,
+            step,
+            retryAttempt,
+            ...prompt,
+          };
           const result = await runTurnStep(input);
           retryAttempt = result.retryAttempt;
           if (result.done) {

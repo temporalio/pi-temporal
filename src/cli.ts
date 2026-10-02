@@ -59,11 +59,19 @@ async function turnStateOf(
   }
 }
 
+/** The value of `--name=value` in `args`, if given. */
+function flag(args: string[], name: string): string | undefined {
+  return args
+    .find((a) => a.startsWith(`--${name}=`))
+    ?.split("=")
+    .slice(1)
+    .join("=");
+}
+
 async function start(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
-  const flag = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
-  const sessionId = flag("session") ?? `task-${randomUUID().slice(0, 8)}`;
+  const sessionId = flag(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
   // signal-with-start, so this both creates the session and hands it the prompt. Nothing waits for
   // the turn: whichever worker is polling the queue runs it.
   await submitPrompt(sessionId, text);
@@ -75,10 +83,9 @@ async function start(args: string[]) {
 // the session is created by the workflow rather than by whoever asked for it.
 async function schedule(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
-  const flag = (name: string) => args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
-  const every = flag("every");
-  const cron = flag("cron");
-  const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
+  const every = flag(args, "every");
+  const cron = flag(args, "cron");
+  const id = flag(args, "id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
 
@@ -128,7 +135,9 @@ async function running() {
     for await (const wf of client.workflow.list({
       query: `WorkflowType = '${WORKFLOW_TYPE}' AND ExecutionStatus = 'Running'`,
     })) {
-      if (wf.workflowId.startsWith(WORKFLOW_ID_PREFIX)) ids.push(wf.workflowId.slice(WORKFLOW_ID_PREFIX.length));
+      if (wf.workflowId.startsWith(WORKFLOW_ID_PREFIX)) {
+        ids.push(wf.workflowId.slice(WORKFLOW_ID_PREFIX.length));
+      }
     }
     if (ids.length === 0) {
       say("nothing running");
@@ -159,11 +168,14 @@ function render(entry: { message?: { role?: string; content?: unknown } }): stri
   if (!message?.role) return undefined;
   const text = textOf(message.content).trim();
   if (message.role === "user") return text ? `you: ${text.slice(0, 300)}` : undefined;
-  if (message.role === "toolResult") return `tool result: ${text.slice(0, 200).replace(/\n+/g, " ")}`;
+  if (message.role === "toolResult") {
+    return `tool result: ${text.slice(0, 200).replace(/\n+/g, " ")}`;
+  }
   if (message.role === "assistant") {
-    const calls = Array.isArray(message.content)
-      ? (message.content as { type?: string; name?: string }[]).filter((b) => b?.type === "toolCall")
+    const blocks = Array.isArray(message.content)
+      ? (message.content as { type?: string; name?: string }[])
       : [];
+    const calls = blocks.filter((b) => b?.type === "toolCall");
     if (calls.length) return `tool: ${calls.map((c) => c.name ?? "?").join(", ")}`;
     return text ? `said: ${text.slice(0, 400)}` : undefined;
   }

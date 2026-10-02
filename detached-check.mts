@@ -18,7 +18,8 @@ import { join } from "node:path";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
-  console.log(`${ok ? "PASS" : "FAIL"} ${what}${ok ? "" : ` (${JSON.stringify(detail)?.slice(0, 300)})`}`);
+  const why = ok ? "" : ` (${JSON.stringify(detail)?.slice(0, 300)})`;
+  console.log(`${ok ? "PASS" : "FAIL"} ${what}${why}`);
   if (!ok) failures.push(what);
 };
 
@@ -93,7 +94,10 @@ async function killWorker(child: ChildProcess, pids: number[]) {
 // hangs reports nothing at all.
 // The CLI as one process, for the same reason the worker is: a timeout that kills `npx` leaves the
 // node process underneath it running and holding the pipes, so the bound never takes effect.
-const cli = (args: string[]) => ({ cmd: process.execPath, args: ["--import", "tsx", "src/cli.ts", ...args] });
+const cli = (args: string[]) => ({
+  cmd: process.execPath,
+  args: ["--import", "tsx", "src/cli.ts", ...args],
+});
 
 function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs?: number) {
   return new Promise<{ code: number; out: string; err: string; timedOut: boolean }>((resolve) => {
@@ -178,9 +182,14 @@ async function main() {
   check("running lists it", listed.out.includes(sessionId), listed.out + listed.err);
 
   // --- 4. follow it across the handover, from a process that is only ever a client
-  const watched = await run(cli(["watch", sessionId]).cmd, cli(["watch", sessionId]).args, env, 120_000);
+  const watch = cli(["watch", sessionId]);
+  const watched = await run(watch.cmd, watch.args, env, 120_000);
   check("watch returned rather than hanging", !watched.timedOut, watched.out.slice(-200));
-  check("watch followed the turn to its end", /answered/.test(watched.err), watched.err.slice(-200));
+  check(
+    "watch followed the turn to its end",
+    /answered/.test(watched.err),
+    watched.err.slice(-200),
+  );
 
   const entries = (await readFile(join(sessions, `${sessionId}.jsonl`), "utf8").catch(() => ""))
     .split("\n")
@@ -201,10 +210,16 @@ async function main() {
   const finishedAfterKill = entries.some(
     (e) => e.message?.role === "assistant" && Date.parse(e.timestamp ?? "") > killedAt,
   );
-  check("the turn was finished by the worker that took over", finishedAfterKill, new Date(killedAt).toISOString());
+  check(
+    "the turn was finished by the worker that took over",
+    finishedAfterKill,
+    new Date(killedAt).toISOString(),
+  );
 
   const text = (content: unknown) => JSON.stringify(content ?? "");
-  const results = entries.filter((e) => e.message?.role === "toolResult").map((e) => text(e.message?.content));
+  const results = entries
+    .filter((e) => e.message?.role === "toolResult")
+    .map((e) => text(e.message?.content));
   const calls = entries.filter(
     (e) =>
       e.message?.role === "assistant" &&
@@ -220,7 +235,8 @@ async function main() {
   );
   check("the model asked for the tool once", calls.length === 1, calls.length);
 
-  console.log(failures.length === 0 ? "\ndetached-check: OK" : `\ndetached-check: ${failures.length} failed`);
+  const verdict = failures.length === 0 ? "OK" : `${failures.length} failed`;
+  console.log(`\ndetached-check: ${verdict}`);
   process.exitCode = failures.length === 0 ? 0 : 1;
 }
 
