@@ -20,6 +20,7 @@ import {
   isCancellation,
   log,
   ActivityFailure,
+  ApplicationFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
 import { MAX_STEPS_PER_TURN, QUERIES, SIGNALS, WORKFLOW_ID_PREFIX } from "./protocol.js";
