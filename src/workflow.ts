@@ -232,20 +232,29 @@ export async function piSession(
     let recorded: Spend | undefined;
     // Whether what cancelled this turn was its own deadline rather than somebody pressing stop.
     let deadline = false;
+    // The deadline timer's own scope, cancelled in the `finally` below. A scope cancels its timers
+    // when it is itself cancelled, not when its function returns, so a turn that answered before
+    // the deadline would otherwise leave the timer pending, and it would fire into whichever turn
+    // happened to be running then and stop it as if the user had.
+    let deadlineScope: CancellationScope | undefined;
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
         // A deadline that ends the turn where it is, rather than at the next place it can stop.
-        // The timer lives in this scope, so a turn that finishes first cancels it on the way out
-        // and the rejection that follows is the scope's own.
         if (options?.budget?.hardSeconds !== undefined && patched("a-turn-has-a-budget")) {
-          sleep(options.budget.hardSeconds * 1000).then(
-            () => {
-              deadline = true;
-              current?.cancel();
-            },
-            () => undefined,
-          );
+          const hardMs = options.budget.hardSeconds * 1000;
+          const expire = () => {
+            deadline = true;
+            current?.cancel();
+          };
+          if (patched("a-deadline-dies-with-its-turn")) {
+            deadlineScope = new CancellationScope();
+            deadlineScope.run(() => sleep(hardMs)).then(expire, () => undefined);
+          } else {
+            // The old shape, kept for runs that recorded it: the timer sat in the turn scope and
+            // outlived a turn that answered early.
+            sleep(hardMs).then(expire, () => undefined);
+          }
         }
         if (!projectAdopted && options?.template) {
           // Initialization is part of the turn, so stop and query apply while it waits.
@@ -274,7 +283,13 @@ export async function piSession(
         };
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
-          const input: RunStepInput = { sessionId: id, sessionFile: file, step, retryAttempt, ...prompt };
+          const input: RunStepInput = {
+            sessionId: id,
+            sessionFile: file,
+            step,
+            retryAttempt,
+            ...prompt,
+          };
           const result = await runTurnStep(input);
           retryAttempt = result.retryAttempt;
           tokens += result.spent?.tokens ?? 0;
@@ -329,6 +344,8 @@ export async function piSession(
         log.warn("turn failed", { sessionId: id, promptId: prompt.promptId, error });
       }
     } finally {
+      // Dead with its turn. A fired or already-cancelled timer makes this a no-op.
+      deadlineScope?.cancel();
       current = undefined;
       running = undefined;
       // Added up here rather than per step, so a turn that failed or was interrupted still counts
