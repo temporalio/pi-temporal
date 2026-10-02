@@ -19,8 +19,6 @@ import type {
   TurnExecutorContext,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { Client, Connection } from "@temporalio/client";
 import {
   LOCAL_TURN_WORKFLOW,
@@ -299,9 +297,10 @@ export default function (pi: ExtensionAPI) {
         if (cfg.shipTree) {
           // The same brake `start --project` has. A pi opened in a home directory would ship
           // every dotfile in it, `~/.ssh` and `~/.aws` included, because nothing there is ignored.
-          if (resolve(ctx.cwd) === homedir()) {
+          const refusal = await worktree.projectRefusal(ctx.cwd);
+          if (refusal) {
             ctx.ui.notify(
-              "not sending your home directory as the project; run /background from the project",
+              `not sending this directory as the project: ${refusal}. Run /background from it.`,
               "error",
             );
             return;

@@ -6,7 +6,7 @@
 
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import * as worktree from "./src/worktree.js";
 import { withSessionLock } from "./src/session-lock.js";
@@ -422,6 +422,18 @@ async function main() {
     .capture(projectA, other, { seed: true })
     .then(() => true, () => false);
   check("a finished session releases its directory", taken);
+
+  // A directory nobody named is not sent when it is a home directory or has nothing to keep
+  // secrets out of what ships.
+  const bare = await mkdtemp(join(tmpdir(), "pi-bare-"));
+  const ignoring = await mkdtemp(join(tmpdir(), "pi-ignoring-"));
+  await writeFile(join(ignoring, ".gitignore"), "node_modules\n");
+  const refusal = worktree.projectRefusal;
+  check("a home directory is refused", (await refusal(homedir())) !== undefined);
+  check("a directory with no repository or ignore file is refused", !!(await refusal(bare)));
+  check("a directory with an ignore file is sent", (await refusal(ignoring)) === undefined);
+  await rm(bare, { recursive: true, force: true });
+  await rm(ignoring, { recursive: true, force: true });
 
   console.log(failures.length === 0 ? "\nworktree-check: OK" : `\nworktree-check: ${failures.length} failed`);
   process.exit(failures.length === 0 ? 0 : 1);
