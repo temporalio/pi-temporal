@@ -8,7 +8,7 @@
 // following one is a query plus a tail. Both are reachable from any machine that can reach the
 // cluster and the session directory, which is what makes the session outlive its client.
 //
-// Usage: tsx src/cli.ts <start|running|watch|stop> ...
+// Usage: tsx src/cli.ts <command> ...; run it with no command for the list.
 
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
@@ -432,15 +432,16 @@ async function main() {
       return;
     }
     default:
-      say("usage: pi-temporal <start|running|watch|stop> [args]");
+      say("usage: pi-temporal <command> [args]");
       say('  start "<task>" [--session=<id>]   hand a task to a worker and return');
       say("  running                          what this deployment is running");
       say("  watch <sessionId>                follow one until its turn ends");
       say("  stop <sessionId>                 interrupt the turn in flight");
       say("  forget <sessionId>               drop the project files a finished session kept");
+      say("  release-tree <projectDir>        clear writers this host cannot account for");
       say("  doctor                           what this deployment resolved, and what is wrong");
-    say('  schedule "<task>" --every=1h     run it on a schedule, with no client at all');
-    say("  unschedule <scheduleId>          stop that schedule");
+      say('  schedule "<task>" --every=1h     run it on a schedule, with no client at all');
+      say("  unschedule <scheduleId>          stop that schedule");
       process.exitCode = command ? 1 : 0;
   }
 }
