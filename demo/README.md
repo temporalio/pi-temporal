@@ -27,7 +27,9 @@ show a turn that cannot move.
 
 - The chaos lines: which worker was killed and what it was running, and when it came back. A
   killed worker comes back as a fresh container with the same hostname, the way a replaced host
-  would.
+  would. `DEMO_RESTART_MODE=start` brings back the same container instead, the way a restart
+  policy would, and that recovers too: the restarted worker has the same pid, and it still tells
+  the call its predecessor was inside apart from itself.
 - The `|` lines: the session as `pi-temporal watch` follows it, the tool calls and the answer.
 - The `running:` lines: the activities in flight, the attempt each is on and the worker running
   it, read from Temporal. After a kill, the step that was running shows up again as attempt 2,
@@ -47,6 +49,7 @@ copy of the project the client sent, are kept under `demo/logs/<run>/`.
 | `DEMO_KILL_MIN`, `DEMO_KILL_MAX` | seconds between kills, picked at random in this range | 15, 40 |
 | `DEMO_KILL_ACTIVE` | percent of kills aimed at the worker running the current attempt | 70 |
 | `DEMO_RESTART_AFTER` | seconds a killed worker stays down | 5 |
+| `DEMO_RESTART_MODE` | `replace` starts a new container, `start` the killed one again | `replace` |
 | `DEMO_WORKERS` | how many worker containers | 3 |
 | `DEMO_TIMEOUT` | seconds to wait for the turn before giving up | 1200 |
 | `DEMO_UI_PORT`, `DEMO_TEMPORAL_PORT` | host ports for the UI and the server | 8233, 7243 |

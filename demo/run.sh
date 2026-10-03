@@ -16,6 +16,7 @@ kill_min="${DEMO_KILL_MIN:-15}"
 kill_max="${DEMO_KILL_MAX:-40}"
 restart_after="${DEMO_RESTART_AFTER:-5}"
 kill_active="${DEMO_KILL_ACTIVE:-70}"
+restart_mode="${DEMO_RESTART_MODE:-replace}"
 timeout_s="${DEMO_TIMEOUT:-1200}"
 ui_port="${DEMO_UI_PORT:-8233}"
 grpc_port="${DEMO_TEMPORAL_PORT:-7243}"
@@ -28,6 +29,11 @@ sessions="$name-sessions"
 queue="$name"
 session="demo-$run_id"
 image="pi-temporal:demo"
+
+case "$restart_mode" in
+  replace | start) ;;
+  *) echo "DEMO_RESTART_MODE is replace or start, not $restart_mode" >&2; exit 1 ;;
+esac
 
 say() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { say "$*" >&2; exit 1; }
@@ -116,10 +122,15 @@ start_worker() {
     -v "$sessions:/sessions" "${common_env[@]}" "$image" >/dev/null
 }
 
-# A killed worker comes back as a new container under the same name and hostname: a replacement
-# host. Restarting the old container would bring back a process with the same pid in the same
-# container, which its own writer marker reads as the stopped writer still running.
-replace_worker() {
+# A killed worker comes back as a new container under the same name and hostname, a replacement
+# host, which is what a crash that takes the machine looks like. With DEMO_RESTART_MODE=start it is
+# the same container started again, as a restart policy would: the same pid, the same filesystem,
+# and whatever the killed process left in it, including the marker of the call it was inside.
+bring_back() {
+  if [ "$restart_mode" = start ]; then
+    docker start "$name-worker-$1" >/dev/null
+    return
+  fi
   docker logs "$name-worker-$1" >> "$logs/worker-$1.log" 2>&1
   docker rm -f "$name-worker-$1" >/dev/null 2>&1
   start_worker "$1"
@@ -271,7 +282,9 @@ chaos() {
     echo "$(date +%s) worker-$victim" >> "$logs/kills.log"
     say "chaos: killed worker-$victim${doing:+ while running: $doing}"
     sleep "$restart_after"
-    replace_worker "$victim" && say "chaos: worker-$victim is back, as a fresh container"
+    local as="as a fresh container"
+    [ "$restart_mode" = start ] && as="in the same container"
+    bring_back "$victim" && say "chaos: worker-$victim is back, $as"
   done
 }
 : > "$logs/kills.log"
