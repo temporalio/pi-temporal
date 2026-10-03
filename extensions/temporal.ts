@@ -116,7 +116,7 @@ export default function (pi: ExtensionAPI) {
         projectDir: ctx.cwd,
         provider: cfg.provider ?? ctx.model?.provider,
         modelHint: cfg.modelHint ?? ctx.model?.id,
-        apiKey: modelApiKey(),
+        apiKey: modelApiKey(cfg.provider ?? ctx.model?.provider),
         shipTree: cfg.shipTree,
       });
       worker.run().catch((err) => {

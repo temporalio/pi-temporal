@@ -242,7 +242,8 @@ export function makeActivities(
     const modelRuntime = await ModelRuntime.create();
     if (opts.apiKey) await modelRuntime.setRuntimeApiKey(provider, opts.apiKey);
     const available = await modelRuntime.getAvailable(provider);
-    const hint = opts.modelHint ?? "mini";
+    // The small, cheap model of each provider, which is what a worker wants when nobody chose.
+    const hint = opts.modelHint ?? (provider === "anthropic" ? "haiku" : "mini");
     const model = available.find((m) => m.id.includes(hint)) ?? available[0];
     if (!model) {
       throw new Error(`no ${provider} model available; check the key and provider support`);

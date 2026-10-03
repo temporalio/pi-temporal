@@ -155,9 +155,15 @@ export function clientProblems(cfg: Config): string[] {
   return cfg.shipTree && !cfg.stepped ? [SHIP_TREE_NEEDS_STEPS] : [];
 }
 
-/** The model provider's key, from the environment or from a file, the way the scripts take it. */
-export function modelApiKey(): string | undefined {
-  return process.env.OPENAI_API_KEY ?? read(process.env.OPENAI_API_KEY_FILE)?.trim();
+/**
+ * The model provider's key, from the environment or from a file, the way the scripts take it. Each
+ * provider reads its own variables, so a worker for one never sends the other's key.
+ */
+export function modelApiKey(
+  provider = process.env.PI_TEMPORAL_PROVIDER ?? "openai",
+): string | undefined {
+  const prefix = provider === "anthropic" ? "ANTHROPIC" : "OPENAI";
+  return process.env[`${prefix}_API_KEY`] ?? read(process.env[`${prefix}_API_KEY_FILE`])?.trim();
 }
 
 /** Plaintext can be intentional on a private network, so it is a note rather than a refusal. */
