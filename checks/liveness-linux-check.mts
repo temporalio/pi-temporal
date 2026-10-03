@@ -5,13 +5,13 @@
 // second, which is the only one the other checks ever reach. So this is the same questions asked
 // inside a container, where `/proc` is what answers them.
 //
-// Usage: docker/liveness-check.sh   (or `npx tsx liveness-linux-check.mts` on a Linux host)
+// Usage: docker/liveness-check.sh   (or `npx tsx checks/liveness-linux-check.mts` on a Linux host)
 
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
-import * as worktree from "./src/worktree.js";
+import * as worktree from "../src/worktree.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {

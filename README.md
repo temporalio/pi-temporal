@@ -140,7 +140,7 @@ To check the whole path without typing:
 
 ```
 ./scripts/background-smoke.sh         # starts a worker, submits a turn, waits, exits non-zero on failure
-npx tsx step-loop-check.mts        # one activity per step, and interrupts; no model key needed
+npx tsx checks/step-loop-check.mts   # one activity per step, and interrupts; no model key needed
 ```
 
 `background-smoke.sh` drives the standalone worker rather than the one inside pi, because print mode exits the moment the command returns and takes that worker with it.
@@ -558,7 +558,8 @@ recognise, and the only sessions anyone could see would be the ones a client sta
 
 ## Reproducing
 
-The following checks need no model key:
+The checks live in `checks/`. `scripts/run-checks.sh` runs every one that needs neither a model
+key nor Docker, which is what CI runs. The following checks need no model key:
 
 - `step-loop-check.mts`, `local-turn-check.mts`, `workflow-init-check.mts`, and
   `rollover-check.mts` need a Temporal server. They use stub activities or turns
@@ -610,7 +611,7 @@ The following checks need no model key:
   activity against a faked session to check the two numbers it reports, the
   difference this step made and what the session has been billed in total.
 - `replay-check.mts` needs a Temporal server. It records a history, replays it,
-  and replays the histories under `histories/`, each recorded by the code that
+  and replays the histories under `checks/histories/`, each recorded by the code that
   predates a rule that changed what a step schedules. Record another by
   reverting that rule, running this check with `REPLAY_HISTORY=` pointing at a
   file to keep, and putting it there.
@@ -618,8 +619,8 @@ The following checks need no model key:
   accepted firing can still need.
 
 `detached-check.mts`, the smoke helpers, and container checks also need a model
-key. Their historical runs are described above. `submit.mts` submits a prompt;
-`inspect.mts` reads a session file.
+key. Their historical runs are described above. `scripts/submit.mts` submits a prompt;
+`scripts/inspect.mts` reads a session file.
 
 To inspect workflow state, run
 `temporal workflow query --workflow-id pi-session-<id> --name turnState`. It
@@ -644,6 +645,10 @@ worker or leave a wrapper's child alive, invalidating the test.
 - `src/worker.ts`: the standalone worker process.
 - `src/client.ts`: helpers to submit a prompt / interrupt a session.
 - `src/demo.ts`: end-to-end smoke once a model key is set.
+- `checks/`: the checks, the scripted-model worker they share (`faux-worker.mts`), and the kept
+  histories `replay-check.mts` replays. `scripts/run-checks.sh` runs every one that needs neither
+  a model key nor Docker.
+- `scripts/`: the fork setup, a local dev server, the smoke runs, and `submit.mts` / `inspect.mts`.
 
 ## What upstream would have to take
 

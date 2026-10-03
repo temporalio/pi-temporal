@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { ApplicationFailure } from "@temporalio/activity";
-import { makeActivities } from "./src/activities.js";
-import * as pending from "./src/pending.js";
-import { FAILED_BEFORE_CLAIM, type ToolCallInput } from "./src/protocol.js";
+import { makeActivities } from "../src/activities.js";
+import * as pending from "../src/pending.js";
+import { FAILED_BEFORE_CLAIM, type ToolCallInput } from "../src/protocol.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-dispatch-"));
 const effectFile = join(root, "effects");

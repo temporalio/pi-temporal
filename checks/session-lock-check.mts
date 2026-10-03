@@ -2,12 +2,12 @@
 // writers branch it rather than corrupt it, so this is what stops two attempts of the same
 // activity from doing that. No Temporal server and no model key.
 //
-// Usage: npx tsx session-lock-check.mts
+// Usage: npx tsx checks/session-lock-check.mts
 
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withSessionLock } from "./src/session-lock.js";
+import { withSessionLock } from "../src/session-lock.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {

@@ -2,13 +2,13 @@
 // primitives the whole "a call that already started is not silently repeated" claim rests on, and
 // they need no Temporal server and no model key.
 //
-// Usage: npx tsx pending-check.mts
+// Usage: npx tsx checks/pending-check.mts
 
 import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome } from "@earendil-works/pi-coding-agent";
-import * as pending from "./src/pending.js";
+import * as pending from "../src/pending.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {

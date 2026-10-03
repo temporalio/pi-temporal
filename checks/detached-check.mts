@@ -9,12 +9,16 @@
 // Needs a Temporal dev server, the fork build, and a model key. It is evidence rather than a unit
 // test: none of this shows up inside one process.
 //
-// Usage: OPENAI_API_KEY=... npx tsx detached-check.mts
+// Usage: OPENAI_API_KEY=... npx tsx checks/detached-check.mts
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Beside this file rather than the working directory, so the check runs from anywhere.
+const source = (path: string) => fileURLToPath(new URL(`../src/${path}`, import.meta.url));
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
@@ -32,7 +36,7 @@ const kids: ChildProcess[] = [];
 // and a check that means to prove a handover proves nothing instead. `node --import tsx` is the
 // same worker with nothing in front of it.
 function worker(env: NodeJS.ProcessEnv) {
-  const child = spawn(process.execPath, ["--import", "tsx", "src/worker.ts"], {
+  const child = spawn(process.execPath, ["--import", "tsx", source("worker.ts")], {
     env: { ...process.env, ...env },
     stdio: "ignore",
     detached: true,
@@ -96,7 +100,7 @@ async function killWorker(child: ChildProcess, pids: number[]) {
 // node process underneath it running and holding the pipes, so the bound never takes effect.
 const cli = (args: string[]) => ({
   cmd: process.execPath,
-  args: ["--import", "tsx", "src/cli.ts", ...args],
+  args: ["--import", "tsx", source("cli.ts"), ...args],
 });
 
 function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs?: number) {
@@ -152,7 +156,7 @@ async function main() {
     [
       "--import",
       "tsx",
-      "src/cli.ts",
+      source("cli.ts"),
       "start",
       `Run this exact command with the bash tool: echo HANDOVER >> ${ranFile} && sleep 45. ` +
         "Then report it.",

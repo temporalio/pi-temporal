@@ -2,7 +2,7 @@
 // whole-turn mode hands the turn over once, and the stepped mode records the turn once and then
 // drives a model call, its calls and a seal per step.
 //
-// Needs a Temporal server; no model key and no pi session. Usage: tsx local-turn-check.mts
+// Needs a Temporal server; no model key and no pi session. Usage: tsx checks/local-turn-check.mts
 
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -10,14 +10,14 @@ import { ApplicationFailure } from "@temporalio/activity";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { unknownToolCallOutcome } from "@earendil-works/pi-coding-agent";
-import { fromEnv } from "./src/config.js";
+import { fromEnv } from "../src/config.js";
 import {
   type LiveTurn,
   type LiveTurns,
   makeLocalTurnActivities,
-} from "./src/local-turn-activity.js";
-import { LOCAL_TURN_WORKFLOW } from "./src/protocol.js";
-import type { LocalTurnInput } from "./src/protocol.js";
+} from "../src/local-turn-activity.js";
+import { LOCAL_TURN_WORKFLOW } from "../src/protocol.js";
+import type { LocalTurnInput } from "../src/protocol.js";
 
 const STEPS_TO_ANSWER = 3;
 const cfg = fromEnv();
@@ -100,7 +100,7 @@ async function main() {
     connection: nativeConnection,
     namespace: cfg.namespace,
     taskQueue,
-    workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
     activities: makeLocalTurnActivities(live),
   });
   const running = worker.run();

@@ -7,7 +7,7 @@
 // lands on the other one, never on the refused one, and that the turn is answered rather than
 // stranded with the directory.
 //
-// Needs a Temporal server; no model key. Usage: npx tsx quarantine-routing-check.mts
+// Needs a Temporal server; no model key. Usage: npx tsx checks/quarantine-routing-check.mts
 
 import { appendFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -18,10 +18,10 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { makeActivities } from "./src/activities.js";
-import { QUERIES } from "./src/protocol.js";
-import type { TurnState } from "./src/protocol.js";
-import * as worktree from "./src/worktree.js";
+import { makeActivities } from "../src/activities.js";
+import { QUERIES } from "../src/protocol.js";
+import type { TurnState } from "../src/protocol.js";
+import * as worktree from "../src/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const run = promisify(execFile);
@@ -92,7 +92,7 @@ async function main() {
     // host never gets a look. A fleet has that on and more than one candidate; here it would only
     // hide what is being measured.
     maxEagerActivityReservationsPerWorkflowTask: 0,
-    workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
     activities: makeActivities(
       { projectDir: hosts.refused, shipTree: true },
       {
@@ -113,7 +113,7 @@ async function main() {
     helper,
     `import { NativeConnection, Worker } from "@temporalio/worker";\n` +
       `import { makeActivities } from ${JSON.stringify(
-        fileURLToPath(new URL("./src/activities.js", import.meta.url)),
+        fileURLToPath(new URL("../src/activities.js", import.meta.url)),
       )};\n` +
       `const native = await NativeConnection.connect({ address: ${JSON.stringify(address)} });\n` +
       `const worker = await Worker.create({\n` +

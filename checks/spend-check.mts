@@ -9,13 +9,13 @@
 // Driven through the real activity with the session faked, so what is checked is the activity
 // reading its session and reporting it, which no stub-driven check can say anything about.
 //
-// No server and no model key. Usage: npx tsx spend-check.mts
+// No server and no model key. Usage: npx tsx checks/spend-check.mts
 
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "./src/activities.js";
+import { makeActivities } from "../src/activities.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {

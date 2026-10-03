@@ -4,16 +4,16 @@
 // tool a second time. A fifth review reproduced that. Both cleanups run here, the one a later step
 // of the turn does and the one a later turn does, because the stall is not bounded by either.
 //
-// Usage: npx tsx stale-dispatch-check.mts
+// Usage: npx tsx checks/stale-dispatch-check.mts
 import assert from "node:assert/strict";
 import fs, { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "./src/activities.js";
-import * as pending from "./src/pending.js";
-import type { ToolCallInput, ToolCallResult } from "./src/protocol.js";
+import { makeActivities } from "../src/activities.js";
+import * as pending from "../src/pending.js";
+import type { ToolCallInput, ToolCallResult } from "../src/protocol.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-stale-dispatch-"));
 const file = join(root, "session.jsonl");

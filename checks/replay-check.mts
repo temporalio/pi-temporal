@@ -11,7 +11,7 @@
 // recorded by running this file against the code that predates a rule. Record another by reverting
 // that rule and pointing `REPLAY_HISTORY` at a file to keep.
 //
-// Needs a Temporal server; no model key. Usage: npx tsx replay-check.mts
+// Needs a Temporal server; no model key. Usage: npx tsx checks/replay-check.mts
 
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
@@ -24,7 +24,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 import { Context } from "@temporalio/activity";
-import type { RunStepInput } from "./src/protocol.js";
+import type { RunStepInput } from "../src/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const namespace = "default";
@@ -64,7 +64,7 @@ async function main() {
     connection: native,
     namespace,
     taskQueue: queue,
-    workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
     activities: {
       ...activities,
       async runToolCall() {
@@ -126,7 +126,7 @@ async function main() {
     // The same code replaying its own history is the case that must always work.
     let ownReplay: unknown;
     await Worker.runReplayHistory(
-      { workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)) },
+      { workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)) },
       history,
     ).catch((err) => {
       ownReplay = err;
@@ -155,7 +155,7 @@ async function main() {
       }
       let oldReplay: unknown;
       await Worker.runReplayHistory(
-        { workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)) },
+        { workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)) },
         historyFromJSON(JSON.parse(before)),
       ).catch((err) => {
         oldReplay = err;

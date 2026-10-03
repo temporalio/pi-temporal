@@ -48,15 +48,15 @@ cleanup() {
 trap cleanup EXIT
 
 echo "worker pid $worker, session $session, project $PI_PROJECT_DIR"
-node --import tsx submit.mts "$session" "Reply with the single word $word."
+node --import tsx scripts/submit.mts "$session" "Reply with the single word $word."
 
 for _ in $(seq 1 60); do
   sleep 2
   [ -f "$file" ] && grep -q "$word" "$file" && break
 done
 
-if [ -f "$file" ] && node --import tsx inspect.mts "$file" | grep -q "$word"; then
-  echo "PASS  $(node --import tsx inspect.mts "$file")"
+if [ -f "$file" ] && node --import tsx scripts/inspect.mts "$file" | grep -q "$word"; then
+  echo "PASS  $(node --import tsx scripts/inspect.mts "$file")"
   exit 0
 fi
 

@@ -9,7 +9,7 @@
 // worker that spawned them and pids come round again after a restart. A dead writer, nothing left
 // running that carries its name, an empty process group and the same boot together do.
 //
-// Usage: npx tsx quarantine-check.mts
+// Usage: npx tsx checks/quarantine-check.mts
 
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
@@ -19,8 +19,8 @@ import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ApplicationFailure } from "@temporalio/common";
-import { makeActivities } from "./src/activities.js";
-import * as worktree from "./src/worktree.js";
+import { makeActivities } from "../src/activities.js";
+import * as worktree from "../src/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const run = promisify(execFile);
