@@ -35,24 +35,28 @@ file="$sessions_dir/$session.jsonl"
 word="SMOKE$$"
 log="$(mktemp)"
 
-npx tsx src/worker.ts > "$log" 2>&1 &
+# Node directly and in a process group of its own: killing an npx wrapper leaves the node process
+# under it polling the queue, and a group kill reaches whatever the worker started too.
+set -m
+node --import tsx src/worker.ts > "$log" 2>&1 &
 worker=$!
+set +m
 cleanup() {
-  kill "$worker" 2>/dev/null || true
+  kill -- "-$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 echo "worker pid $worker, session $session, project $PI_PROJECT_DIR"
-npx tsx submit.mts "$session" "Reply with the single word $word."
+node --import tsx submit.mts "$session" "Reply with the single word $word."
 
 for _ in $(seq 1 60); do
   sleep 2
   [ -f "$file" ] && grep -q "$word" "$file" && break
 done
 
-if [ -f "$file" ] && npx tsx inspect.mts "$file" | grep -q "$word"; then
-  echo "PASS  $(npx tsx inspect.mts "$file")"
+if [ -f "$file" ] && node --import tsx inspect.mts "$file" | grep -q "$word"; then
+  echo "PASS  $(node --import tsx inspect.mts "$file")"
   exit 0
 fi
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs the fork's pi with the durable extension loaded, pointed at the local Temporal server.
-# Type /durable <task> once it is up. Extra arguments go through to pi.
+# Runs the fork's pi with the pi-temporal extension loaded, pointed at the local Temporal server.
+# Type /background <task> once it is up. Extra arguments go through to pi.
 #
-# The durable task's tools run in the directory you launch this from, so launch it in the project
-# you want the task to work on.
+# The background task's tools run in the directory you launch this from, so launch it in the
+# project you want the task to work on.
 #
 #   TEMPORAL_PORT          which server to talk to, default 7233
-#   OPENAI_API_KEY         the key for the durable task's model
+#   OPENAI_API_KEY         the key for the background task's model
 #   OPENAI_API_KEY_FILE    a file holding one instead
-#   PI_MODEL               model for the durable task, default gpt-4o-mini
+#   PI_MODEL               model for the background task, default gpt-4o-mini
 #   PI_TEMPORAL_PROVIDER   its provider, default openai
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
