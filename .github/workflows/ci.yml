@@ -19,3 +19,34 @@ jobs:
       # After npm ci, which wipes node_modules and would take the fork link with it.
       - run: scripts/setup-fork.sh
       - run: npm run typecheck
+  # The checks drive the real activities and workflows against a dev server, which is the only
+  # place the lock, claim and tree rules are exercised. Typecheck alone would merge a regression
+  # in any of them green.
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            fork.pin
+      - run: npm ci
+      - run: scripts/setup-fork.sh
+      - name: Install the Temporal CLI
+        run: |
+          curl -sSf https://temporal.download/cli.sh | sh
+          echo "$HOME/.temporalio/bin" >> "$GITHUB_PATH"
+      - name: Start a dev server
+        run: |
+          temporal server start-dev --headless --log-level warn > "$RUNNER_TEMP/temporal.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            temporal operator cluster health --address 127.0.0.1:7233 >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/temporal.log"
+          exit 1
+      - run: scripts/run-checks.sh
