@@ -33,9 +33,11 @@ const check = (what: string, ok: boolean, detail: unknown) => {
  * reach the one live agent this process holds, which admits a single unit of work at a time, so a
  * second call arriving while the first runs is refused.
  */
-function fakeTurn(options: { interruptAfter?: number } = {}) {
+function fakeTurn(options: { interruptAfter?: number; stopInFirstTool?: boolean } = {}) {
   const seen: string[] = [];
+  const postRuns: (boolean | undefined)[] = [];
   let step = 0;
+  let stoppedInTool = false;
   let inFlight = 0;
   let overlapped = false;
   const turn: LiveTurn = {
@@ -46,7 +48,8 @@ function fakeTurn(options: { interruptAfter?: number } = {}) {
       record: async () => {
         seen.push("record");
       },
-      interrupted: () => options.interruptAfter !== undefined && step >= options.interruptAfter,
+      interrupted: () =>
+        stoppedInTool || (options.interruptAfter !== undefined && step >= options.interruptAfter),
       modelCall: async () => {
         step++;
         seen.push(`model:${step}`);
@@ -66,6 +69,11 @@ function fakeTurn(options: { interruptAfter?: number } = {}) {
       },
       runToolCall: async (toolCallId) => {
         seen.push(`tool:${toolCallId}`);
+        // The user stops pi while this tool runs: the abort reaches it and it throws.
+        if (options.stopInFirstTool && !stoppedInTool) {
+          stoppedInTool = true;
+          throw new Error("aborted");
+        }
         inFlight++;
         if (inFlight > 1) overlapped = true;
         // Long enough that a second call dispatched at the same time would be seen here.
@@ -73,13 +81,14 @@ function fakeTurn(options: { interruptAfter?: number } = {}) {
         inFlight--;
         return unknownToolCallOutcome({ id: toolCallId, name: "probe" });
       },
-      sealStep: async (results) => {
+      sealStep: async (results, sealOptions) => {
         seen.push(`seal:${step}:${results.length}`);
+        postRuns.push(sealOptions?.postRun);
         return { done: step === STEPS_TO_ANSWER, retryAttempt: 0 };
       },
     },
   };
-  return { turn, seen, didOverlap: () => overlapped };
+  return { turn, seen, postRuns, didOverlap: () => overlapped };
 }
 
 async function main() {
@@ -99,9 +108,12 @@ async function main() {
   const connection = await Connection.connect({ address: cfg.address });
   const client = new Client({ connection, namespace: cfg.namespace });
 
-  const drive = async (stepped: boolean, options: { interruptAfter?: number } = {}) => {
+  const drive = async (
+    stepped: boolean,
+    options: { interruptAfter?: number; stopInFirstTool?: boolean } = {},
+  ) => {
     const turnId = randomUUID();
-    const { turn, seen, didOverlap } = fakeTurn(options);
+    const { turn, seen, postRuns, didOverlap } = fakeTurn(options);
     live.set(turnId, turn);
     const input: LocalTurnInput = { sessionId: "ses_1", turnId, taskQueue, stepped };
     try {
@@ -113,7 +125,7 @@ async function main() {
     } finally {
       live.delete(turnId);
     }
-    return { seen, didOverlap };
+    return { seen, postRuns, didOverlap };
   };
 
   // The whole turn is handed over once, and pi runs it the way it always did.
@@ -153,6 +165,27 @@ async function main() {
   check("stepped: an interrupt stops the loop", !stopped.seen.includes("model:2"), stopped.seen);
   const resealed = stopped.seen.includes("seal:2:0");
   check("stepped: an interrupted turn is not sealed again", !resealed, stopped.seen);
+
+  // A stop that lands inside a tool call. The call fails because of the stop, and that has to end
+  // the step as a stop: its sibling does not run, the step is sealed without the post-run pass,
+  // and the turn ends there rather than asking the model again.
+  const midTool = await drive(true, { stopInFirstTool: true });
+  check(
+    "stepped: a stop inside a tool call does not run its sibling",
+    !midTool.seen.includes("tool:c1b"),
+    midTool.seen,
+  );
+  check(
+    "stepped: and seals the step once, as stopped",
+    midTool.seen.filter((s) => s.startsWith("seal:")).length === 1 &&
+      JSON.stringify(midTool.postRuns) === "[false]",
+    { seen: midTool.seen, postRuns: midTool.postRuns },
+  );
+  check(
+    "stepped: and asks the model nothing more",
+    !midTool.seen.includes("model:2"),
+    midTool.seen,
+  );
 
   // A stop between the executor being handed the turn and the first model call still has to leave
   // the prompt somewhere. Dropped, the user's text is gone with no error to show for it.

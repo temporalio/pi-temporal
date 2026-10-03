@@ -10,9 +10,16 @@
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
-import { CancellationScope, isCancellation, log, proxyActivities } from "@temporalio/workflow";
+import {
+  ActivityFailure,
+  ApplicationFailure,
+  CancellationScope,
+  isCancellation,
+  log,
+  proxyActivities,
+} from "@temporalio/workflow";
 import { dispatchStepCalls } from "./l2-step.js";
-import { MAX_STEPS_PER_TURN } from "./protocol.js";
+import { MAX_STEPS_PER_TURN, TURN_STOPPED } from "./protocol.js";
 import type {
   LocalModelCallResult,
   LocalSealInput,
@@ -28,6 +35,13 @@ interface LocalActivities {
   runLocalToolCall(input: LocalToolCallInput): Promise<ToolCallResult>;
   runLocalSeal(input: LocalSealInput): Promise<{ done: boolean }>;
 }
+
+// A call the user stopped from inside pi. Nothing cancelled the workflow, so only the failure's
+// type says it was a stop, and a stop has to end the step the way a cancellation does.
+const userStopped = (err: unknown) =>
+  err instanceof ActivityFailure &&
+  err.cause instanceof ApplicationFailure &&
+  err.cause.type === TURN_STOPPED;
 
 export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
   const options = {
@@ -64,7 +78,10 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
       // for a tool that never ran. The worker half opens a session per activity and does overlap.
       { ...model, sequential: true },
       (call) => runLocalToolCall({ turnId: input.turnId, step, call }),
-      { isCancellation, log: (message, attributes) => log.info(message, attributes) },
+      {
+        isCancellation: (err) => isCancellation(err) || userStopped(err),
+        log: (message, attributes) => log.info(message, attributes),
+      },
     );
     const seal = (interrupted: boolean) =>
       runLocalSeal({ turnId: input.turnId, step, calls: model.calls, interrupted });
@@ -75,6 +92,8 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
       await CancellationScope.nonCancellable(() => seal(true)).catch((err: unknown) => {
         log.warn("could not close a stopped step", { step, error: String(err) });
       });
+      // A stop from inside pi ends the turn the way one between calls does: closed, not failed.
+      if (userStopped(stopped)) return;
       throw stopped;
     }
     const { done } = await seal(false);
