@@ -213,13 +213,13 @@ fallback does not have Temporal recovery.
 
 ## Checks
 
-The checks live in `checks/`, one standalone script per contract, PASS/FAIL on exit code.
-`npm run checks` (`scripts/run-checks.sh`) runs every one that needs neither a model key nor
-Docker, which is what CI runs; most need only a local Temporal server. The serious ones run real
-workers in real processes: `seal-check.mts` kills a seal after its writes and retries it on another worker,
+The checks live in `checks/`, one standalone script per contract, PASS/FAIL on exit code. `npm run
+checks` (`scripts/run-checks.sh`) runs every one that needs neither a model key nor Docker, which is
+what CI runs; most need only a local Temporal server. The serious ones run real workers in real
+processes: `seal-check.mts` kills a seal after its writes and retries it on another worker,
 `fence-check.mts` freezes a worker mid-call and proves its late write is refused,
-`detached-check.mts` (model key needed) kills a worker mid-tool and watches a second machine
-finish the turn. What each check covers, and what it deliberately does not, is in
+`detached-check.mts` (model key needed) kills a worker mid-tool and watches a second machine finish
+the turn. What each check covers, and what it deliberately does not, is in
 [docs/guarantees.md](docs/guarantees.md).
 
 ## Layout
