@@ -56,9 +56,11 @@ async function main() {
 
   const ranOn: string[] = [];
   // Enough of a session for the real activity: recording a prompt has to leave it in the messages,
-  // because that is what the activity reads to decide whether this turn has started.
+  // because that is what the activity reads to decide whether this turn has started. One transcript
+  // per process, standing in for the session file each activity reopens, so the seal finds what
+  // the model call on the same host wrote.
   const fakeSession = `() => {
-    const messages = [];
+    const messages = (globalThis.__fakeTranscript ??= []);
     return {
       state: { messages },
       prepareStep: () => true,
