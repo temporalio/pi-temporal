@@ -52,3 +52,5 @@ jobs:
           cat "$RUNNER_TEMP/temporal.log"
           exit 1
       - run: npm run checks
+      # A worker restarted in its own container is the one case that needs a container to happen.
+      - run: docker/restart-check.sh
