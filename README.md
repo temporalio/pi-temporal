@@ -492,6 +492,16 @@ a whole number, and a value that is not one is refused rather than ignored:
 A tool call that crosses its timeout is not run again, because its dispatch note says it started,
 so it ends as an unknown outcome while the tool may still be running. `doctor` prints what is set.
 
+Other settings, read by whichever process uses them:
+
+| variable | what it sets | unset |
+|---|---|---|
+| `PI_TEMPORAL_TASK_QUEUE` | the queue sessions are started on and workers poll | `pi-session` |
+| `PI_SESSION_IDLE_TIMEOUT` | how long a session's workflow waits for a prompt before retiring | `5 minutes` |
+| `PI_TEMPORAL_PROVIDER` | the provider a worker's model comes from | `openai` |
+| `PI_MODEL` | matched as a substring of the provider's model ids; the first match is used | `mini` |
+| `PI_TEMPORAL_DATA` | the host-local directory for shadow repositories and writer markers | `~/.pi-temporal` |
+
 Reaching a server that is not the dev server:
 
 ```bash
@@ -563,6 +573,9 @@ The following checks need no model key:
 - `l2-step-check.mts` checks tool overlap, fallback policy, and cancellation with
   fake activities. `migration-rejoin-check.mts` also uses fake activities but real
   temporary project directories to test the stale-host migration case.
+- `dispatch-check.mts` drives the real tool activity over a fake session: two overlapping
+  attempts run one effect, a dispatch note that cannot be written blocks the effect, and a
+  failure before any claim is told apart from one after.
 - `pending-check.mts` checks claims, result files, and cleanup.
   `stale-dispatch-check.mts` drives a worker dispatch through cleanup while a
   competing attempt waits before claiming.
