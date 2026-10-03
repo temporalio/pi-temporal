@@ -22,6 +22,7 @@ import type {
   LocalTurnInput,
   ToolCallResult,
 } from "./protocol.js";
+import { TURN_STOPPED } from "./protocol.js";
 
 /** A turn this process is holding, waiting for its workflow to say run. */
 export interface LiveTurn {
@@ -129,7 +130,7 @@ export function makeLocalTurnActivities(live: LiveTurns) {
         // Nothing kept says the tool started, so a retry would run it again on a turn the user
         // stopped. The seal reports the call as an unknown outcome instead.
         if (turn.steps.interrupted()) {
-          throw ApplicationFailure.nonRetryable(`turn ${input.turnId} was stopped`, "TurnStopped");
+          throw ApplicationFailure.nonRetryable(`turn ${input.turnId} was stopped`, TURN_STOPPED);
         }
         throw err;
       }
