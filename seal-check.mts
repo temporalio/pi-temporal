@@ -11,13 +11,13 @@
 // or two.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { files, SCENARIO } from "./faux-worker.mjs";
-import { QUERIES, type TurnState } from "./src/protocol.js";
+import { QUERIES, SIGNALS, type TurnState } from "./src/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const failures: string[] = [];
@@ -254,6 +254,53 @@ async function main() {
         count(entries, custom("pi.turn-end-dispatched")) > 0 &&
           count(entries, custom("check-turn-end")) === 1,
         shape,
+      );
+      check("the session is one chain", linear(entries), shape);
+    }
+
+    // A stop in whole-step mode. The step is one activity, so the stop lands inside it, and what
+    // it must do is stop between units: the call that started finishes, the next one does not
+    // start, and the seal records what there is and nothing more.
+    {
+      const s = scenario("whole-stop");
+      dirs.push(s.dir);
+      writeFileSync(files(s.dir).slowProbe, "");
+      startWorker(s.queue, s.dir);
+      const { handle, finished } = await turn(s, `run two ${SCENARIO.twoCalls}`, 60_000, false);
+      await until(
+        "the first call to start",
+        () => lines(files(s.dir).probesStarted).length > 0,
+        60_000,
+      );
+      await handle.signal(SIGNALS.interrupt);
+      const answer = await finished();
+      check(
+        "a stopped whole-step turn reports the stop",
+        answer?.outcome === "interrupted",
+        answer,
+      );
+      // The activity outlives the cancellation by the call it was in; its seal lands after.
+      await until(
+        "the stopped step to be sealed",
+        () => entriesOf(s.file).filter(role("toolResult")).length === 2,
+        30_000,
+      ).catch(() => undefined);
+      const entries = entriesOf(s.file);
+      const shape = entries.map((e) => e.customType ?? e.message?.role ?? e.type);
+      check(
+        "the call that had started finished, and the next one never started",
+        lines(files(s.dir).probesStarted).length === 1 && lines(files(s.dir).probes).length === 1,
+        { started: lines(files(s.dir).probesStarted), finished: lines(files(s.dir).probes) },
+      );
+      check(
+        "the seal recorded both calls, the one that never ran as an unknown outcome",
+        count(entries, role("toolResult")) === 2,
+        shape,
+      );
+      check(
+        "and nothing ran after it: no second model call, no agent_before_settle",
+        lines(files(s.dir).modelCalls).length === 1 && lines(files(s.dir).settled).length === 0,
+        { modelCalls: lines(files(s.dir).modelCalls), settled: lines(files(s.dir).settled) },
       );
       check("the session is one chain", linear(entries), shape);
     }
