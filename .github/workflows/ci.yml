@@ -49,4 +49,4 @@ jobs:
           done
           cat "$RUNNER_TEMP/temporal.log"
           exit 1
-      - run: scripts/run-checks.sh
+      - run: npm run checks
