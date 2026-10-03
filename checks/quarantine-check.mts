@@ -288,6 +288,41 @@ async function main() {
   await editMarker({ bootAt: 0 });
   check("a marker from before the machine restarted clears itself", await usable());
 
+  // A worker restarted in the same container comes back with the same pid, on the same boot, in the
+  // same groups. A marker naming this pid with another start is that predecessor's, so it clears.
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ pidStartedAt: "before this process started" });
+  check("a marker from a previous run of this pid clears itself", await usable());
+  // The same pid and the same start is this process, which is still inside its call.
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  check("one from this very process keeps the directory refused", !(await usable()));
+  await worktree.clearWriters(project);
+
+  // Another process holding the marker's pid now, which is a reused pid when it started at another
+  // time than the writer did.
+  const holder = spawned("reused");
+  const reusedNote = { pid: holder.pid, pgid: gone.pgid, worker: `dead-writer-${runToken}` };
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ ...reusedNote, pidStartedAt: "not when that process started" });
+  check("a live pid that started after the writer did clears the marker", await usable());
+  // When it started at the time the marker says, it is the writer.
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ ...reusedNote, pidStartedAt: await worktree.startTimeOf(holder.pid!) });
+  check("one that started when the writer did keeps it refused", !(await usable()));
+  // A marker from an older worker records no start, and a live pid still reads as its writer.
+  await worktree.clearWriters(project);
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ ...reusedNote, pidStartedAt: undefined });
+  check("an older marker with no start keeps a live pid refused", !(await usable()));
+  await worktree.clearWriters(project);
+  // A start read in another pid namespace, as a container sharing this hostname would write, says
+  // nothing about the process holding that pid here.
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ ...reusedNote, pidStartedAt: "elsewhere", pidNs: "pid:[elsewhere]" });
+  check("one from another pid namespace keeps a live pid refused", !(await usable()));
+  await worktree.clearWriters(project);
+  await ended(holder);
+
   // What is left is a tool that put itself in a group of its own, which nothing here can follow.
   // That one needs a person, and what the person has is a command that says what it forgot.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });

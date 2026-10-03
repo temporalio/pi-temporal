@@ -268,6 +268,13 @@ export interface WriterNote extends Writer {
   readonly cgroup?: string;
   // When this machine last started, so a pid from before a restart is not read as a live one.
   readonly bootAt?: number;
+  // When the writer's process started, as the operating system says it. A worker restarted in the
+  // same container comes back with the same pid on the same boot, and this is what tells the two
+  // processes apart. Absent from markers older workers wrote.
+  readonly pidStartedAt?: string;
+  // Which pid namespace the pid is in, on Linux. Containers can share a hostname and not their
+  // pids, and a start read in one namespace says nothing about a pid in another.
+  readonly pidNs?: string;
   readonly started: string;
 }
 
@@ -456,6 +463,47 @@ async function readCgroup(): Promise<string | undefined> {
 let ourCgroup: Promise<string | undefined> | undefined;
 const cgroup = () => (ourCgroup ??= readCgroup());
 
+/**
+ * When a process started, in whatever form this host can say it. Only ever compared with another
+ * reading of the same kind on the same host. Linux counts clock ticks since boot in
+ * `/proc/<pid>/stat`, which is exact; elsewhere `ps` prints the start to the second. Undefined when
+ * neither can be read, which is answered the way an unreadable reading always is: still running.
+ * Exported for a check, which has to take the same reading to say what a matching one means.
+ */
+export async function startTimeOf(pid: number): Promise<string | undefined> {
+  const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => undefined);
+  if (stat !== undefined) {
+    // The command name is in parentheses and can hold spaces, so the fields are counted after it.
+    // The start time is field 22, the 20th after the name.
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] || undefined;
+  }
+  if (process.platform === "linux") return undefined;
+  try {
+    // Printed in local time and the locale's words, which differ between the worker that wrote a
+    // marker and the one reading it. Pinned, or a live writer reads as somebody else.
+    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+    });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+let ourStart: Promise<string | undefined> | undefined;
+const startedAt = () => (ourStart ??= startTimeOf(process.pid));
+
+let ourPidNs: Promise<string | undefined> | undefined;
+const pidNs = () => (ourPidNs ??= readlink("/proc/self/ns/pid").catch(() => undefined));
+
+// Whether a start read here can be compared with the one the marker recorded: the pid has to be in
+// the same namespace. Off Linux there are none, and neither side records one.
+async function samePids(note: WriterNote): Promise<boolean> {
+  const here = await pidNs();
+  if (process.platform === "linux" && here === undefined) return false;
+  return note.pidNs === here;
+}
+
 /** Say a tool call is about to write this directory. `endWrite` says it came back. */
 export async function beginWrite(projectDir: string, writer: Writer): Promise<void> {
   await mkdir(writersDir(projectDir), { recursive: true });
@@ -467,6 +515,8 @@ export async function beginWrite(projectDir: string, writer: Writer): Promise<vo
     ...((await cgroup()) === undefined ? {} : { cgroup: await cgroup() }),
     worker,
     bootAt: bootAt(),
+    ...((await startedAt()) === undefined ? {} : { pidStartedAt: await startedAt() }),
+    ...((await pidNs()) === undefined ? {} : { pidNs: await pidNs() }),
     started: new Date().toISOString(),
   } satisfies WriterNote);
 }
@@ -487,7 +537,13 @@ export async function endWrite(projectDir: string, callId: string): Promise<void
  * Exported for a check, because one of the readings it decides on is Linux's alone and a Mac cannot
  * produce it. Handing it the reading is the only way to ask it that question there.
  */
-export function insideBecause(note: WriterNote, live: LiveHere | undefined): string | undefined {
+export function insideBecause(
+  note: WriterNote,
+  live: LiveHere | undefined,
+  // When whatever holds the marker's pid now started. Read only for a marker that recorded its own
+  // start in this pid namespace, and undefined otherwise.
+  pidStartedNow?: string,
+): string | undefined {
   // A pid from another machine says nothing here, and two hosts sharing one data directory is the
   // only way to get one. Neither of them can see the other's processes.
   if (note.host !== hostname()) return `it was written on ${note.host}, and this is ${hostname()}`;
@@ -496,7 +552,15 @@ export function insideBecause(note: WriterNote, live: LiveHere | undefined): str
   if (note.bootAt === undefined) return "it does not say which boot its pid belongs to";
   // The machine restarted. Nothing it was running came back with it.
   if (Math.abs(note.bootAt - bootAt()) > SAME_BOOT) return undefined;
-  if (running(note.pid)) return `pid ${note.pid} is still running`;
+  // A live pid that started at another time than the writer did is a later process given its pid.
+  // A worker restarted in the same container is one: the same pid on the same boot, in the same
+  // groups, with the same environment, so nothing below could tell it from its dead predecessor.
+  // The readings below still decide, since the writer's children can outlive it.
+  const reused =
+    note.pidStartedAt !== undefined &&
+    pidStartedNow !== undefined &&
+    pidStartedNow !== note.pidStartedAt;
+  if (running(note.pid) && !reused) return `pid ${note.pid} is still running`;
   // The writer is gone, and what a tool starts can outlive it. Nothing below is asked of the pids
   // themselves, which come round again; it is asked of what those processes carry and where they
   // stand.
@@ -538,7 +602,9 @@ async function writersHere(projectDir: string): Promise<(WriterNote & { because:
     const path = join(writersDir(projectDir), name);
     const note = await readJson<WriterNote>(path);
     if (!note) continue;
-    const because = insideBecause(note, live);
+    const comparable = note.pidStartedAt !== undefined && (await samePids(note));
+    const startedNow = comparable ? await startTimeOf(note.pid) : undefined;
+    const because = insideBecause(note, live, startedNow);
     if (because !== undefined) found.push({ ...note, because });
     else await rm(path, { force: true });
   }
