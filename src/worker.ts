@@ -58,7 +58,7 @@ async function main() {
     projectDir,
     provider: process.env.PI_TEMPORAL_PROVIDER,
     modelHint: process.env.PI_MODEL,
-    apiKey: modelApiKey(),
+    apiKey: modelApiKey(process.env.PI_TEMPORAL_PROVIDER),
     shipTree: cfg.shipTree,
   });
 

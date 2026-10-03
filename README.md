@@ -153,8 +153,8 @@ Other settings, read by whichever process uses them:
 |---|---|---|
 | `PI_TEMPORAL_TASK_QUEUE` | the queue sessions are started on and workers poll | `pi-session` |
 | `PI_SESSION_IDLE_TIMEOUT` | how long a session's workflow waits for a prompt before retiring | `5 minutes` |
-| `PI_TEMPORAL_PROVIDER` | the provider a worker's model comes from | `openai` |
-| `PI_MODEL` | matched as a substring of the provider's model ids, first match used | `mini` |
+| `PI_TEMPORAL_PROVIDER` | the provider a worker's model comes from; `anthropic` reads `ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY_FILE`, others `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE` | `openai` |
+| `PI_MODEL` | matched as a substring of the provider's model ids, first match used | `haiku` for `anthropic`, `mini` otherwise |
 | `PI_TEMPORAL_DATA` | the host directory for shadow repositories and writer markers | `~/.pi-temporal` |
 | `PI_TEMPORAL_DURABLE_TURNS` | `0` turns off the workflow behind each live turn | on |
 | `PI_TEMPORAL_EMBEDDED_WORKER` | `0` when a standalone worker owns the queue (`npm run worker`) | on |
