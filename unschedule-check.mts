@@ -27,6 +27,8 @@ const cli = (args: string[]) =>
       PI_TEMPORAL_DATA: join(root, "host"),
       PI_SESSION_DIR: sessionDir,
       PI_TEMPORAL_SHIP_TREE: "1",
+    // Shipping needs the stepped path, and the CLI refuses a schedule that pairs it with less.
+    PI_TEMPORAL_STEPPED: "1",
       PI_TEMPORAL_TASK_QUEUE: id,
     },
   });

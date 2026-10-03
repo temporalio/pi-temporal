@@ -148,8 +148,10 @@ async function main() {
     const handle = await client.workflow.start("piSession", {
       workflowId: `${queue}-session`,
       taskQueue: queue,
+      // Stepped, because a worker that ships the tree refuses a whole-step session outright.
       args: ["routing", sessionFile, {
         idleTimeout: "100 milliseconds",
+        stepped: true,
         initialPrompt: { promptId: "routing", text: "run" },
       } as never],
     });

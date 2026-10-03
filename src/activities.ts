@@ -30,6 +30,7 @@ import type {
   ToolCallResult,
 } from "./protocol.js";
 import { FAILED_BEFORE_CLAIM } from "./protocol.js";
+import { SHIP_TREE_NEEDS_STEPS } from "./config.js";
 import * as pending from "./pending.js";
 import * as worktree from "./worktree.js";
 import { withSessionLock } from "./session-lock.js";
@@ -310,6 +311,14 @@ export function makeActivities(
   }
 
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
+    // Whoever started the session chose whole-step mode, and this worker ships the tree, whose
+    // fences only the stepped path keeps. Retrying cannot change either side, so it is said once.
+    if (opts.shipTree) {
+      throw ApplicationFailure.nonRetryable(
+        `a whole-step session reached a worker that ships the tree: ${SHIP_TREE_NEEDS_STEPS}`,
+        "ConfigConflict",
+      );
+    }
     const stop = heartbeatEvery(3000);
     try {
       return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {

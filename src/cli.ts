@@ -13,7 +13,14 @@
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { connect, interrupt, submitPrompt } from "./client.js";
-import { describe, fromEnv, notes, preflight, sessionFileFor } from "./config.js";
+import {
+  clientProblems,
+  describe,
+  fromEnv,
+  notes,
+  preflight,
+  sessionFileFor,
+} from "./config.js";
 import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
 import {
@@ -102,7 +109,14 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
 const flagOf = (args: string[], name: string) =>
   args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
 
+/** Refuse to start a session the workers would refuse, before anything is written for it. */
+function refuseConflicts() {
+  const problems = clientProblems(fromEnv());
+  if (problems.length > 0) throw new Error(`configuration: ${problems.join("; ")}`);
+}
+
 async function start(args: string[]) {
+  refuseConflicts();
   const text = args.find((a) => !a.startsWith("--"));
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
   const sessionId = flagOf(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
@@ -120,6 +134,7 @@ async function start(args: string[]) {
 // A task with no client at all. `start` still needs something to run it; a schedule does not, and
 // the session is created by the workflow rather than by whoever asked for it.
 async function schedule(args: string[]) {
+  refuseConflicts();
   const text = args.find((a) => !a.startsWith("--"));
   const every = flagOf(args, "every");
   const cron = flagOf(args, "cron");
