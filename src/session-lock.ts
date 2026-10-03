@@ -227,4 +227,3 @@ export async function withSessionLock<T>(
   }
 }
 
-export const lockDirFor = lockDir;
