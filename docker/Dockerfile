@@ -3,8 +3,8 @@
 # claim the README makes and could not otherwise show: on one host, "another worker" is another
 # process reading the same disk.
 #
-# The fork is copied in already fetched rather than cloned here. It lives in a private repo, and a
-# build argument holding a token is a worse answer than a build context that already has it.
+# The fork is copied in already fetched rather than cloned here, so the image carries the build
+# `setup-fork` pinned and checked rather than whatever a clone would find at build time.
 
 FROM node:22-slim
 

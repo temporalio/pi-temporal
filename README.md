@@ -54,10 +54,11 @@ Run `setup-fork` after any `npm ci`, which wipes `node_modules` and takes the li
 
 ## Install it into pi
 
-The repo is a pi package, so pi can install it:
+The repo is a pi package, so pi can install it. It is internal to the temporalio organization,
+so installing from GitHub needs access to it; the SSH form uses your key:
 
 ```
-pi install git:github.com/temporalio/pi-temporal
+pi install git:git@github.com:temporalio/pi-temporal
 pi install /path/to/pi-temporal      # a local checkout
 pi install -l /path/to/pi-temporal   # this project only
 ```
