@@ -4,12 +4,12 @@
 
 import { randomUUID } from "node:crypto";
 import { Client, Connection } from "@temporalio/client";
-import { connectionOptions, fromEnv, sessionFileFor } from "./config.js";
+import { type Config, connectionOptions, fromEnv, sessionFileFor } from "./config.js";
 import { WORKFLOW_TYPE, workflowId } from "./protocol.js";
 import type { PromptInput, SessionTurnOptions } from "./protocol.js";
 
-export async function connect() {
-  const cfg = fromEnv();
+/** Every client here is built by this, so the CLI and the extension follow sessions alike. */
+export async function openClient(cfg: Config = fromEnv()) {
   const connection = await Connection.connect(connectionOptions(cfg));
   const client = new Client({
     connection,
@@ -19,7 +19,12 @@ export async function connect() {
     // it never stops. Rejecting the query is what turns that into "the session is over".
     workflow: { queryRejectCondition: "NOT_OPEN" },
   });
-  return { cfg, client, connection };
+  return { client, connection };
+}
+
+export async function connect() {
+  const cfg = fromEnv();
+  return { cfg, ...(await openClient(cfg)) };
 }
 
 export async function submitPrompt(sessionId: string, text: string, promptId = randomUUID()) {
