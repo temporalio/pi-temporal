@@ -847,7 +847,7 @@ async function salvage(projectDir: string, sessionFile: string, tree: string) {
 // this session found it, and one holding work the session never shipped. Answers whether it came
 // out empty, because neither command below removes a `.git` at the root and a directory that is not
 // actually empty is one the next restore refuses.
-async function handBack(projectDir: string, sessionFile: string, held: Held) {
+async function handBack(projectDir: string, held: Held) {
   if (!held.built) return false;
   // A retired host may be behind the final tip. Its own accepted tree distinguishes local edits.
   if ((await treeHere(projectDir)) !== held.tree) return false;
@@ -879,7 +879,7 @@ async function heldByOthers(projectDir: string, sessionFile: string) {
       holdouts++;
       continue;
     }
-    if (note.built && !(await handBack(projectDir, note.session, note))) {
+    if (note.built && !(await handBack(projectDir, note))) {
       holdouts++;
       continue;
     }
@@ -1080,7 +1080,7 @@ export async function release(projectDir: string, sessionFile: string): Promise<
     if (!held) return false;
     // A directory that could not be emptied is one the next restore refuses, so dropping the note
     // there would wedge this host instead of handing it back. Keep the note and say no.
-    if (!(await handBack(projectDir, sessionFile, held))) return false;
+    if (!(await handBack(projectDir, held))) return false;
     await rm(heldPath(projectDir, sessionFile), { force: true });
     return true;
   });
@@ -1170,7 +1170,7 @@ export async function sweep(): Promise<number> {
           !current || current.session !== note.session || current.directory !== note.directory ||
           !(await isRetired(note.session!))
         ) return false;
-        if (current.built && !(await handBack(note.directory!, note.session!, current))) {
+        if (current.built && !(await handBack(note.directory!, current))) {
           return false;
         }
         await rm(path, { force: true });
@@ -1215,6 +1215,9 @@ export async function forget(sessionFile: string, projectDir?: string): Promise<
       await rm(join(shareDir(sessionFile), name), { recursive: true, force: true });
     }
     if (projectDir) await rm(heldPath(projectDir, sessionFile), { force: true });
+    // Kept tool results and dispatch notes are part of what the session cost, and nothing reads
+    // them once the session is over.
+    await rm(`${sessionFile}.pending`, { recursive: true, force: true });
   };
   if (projectDir) await withTreeLocks(projectDir, sessionFile, drop);
   else await withSessionLock(sharedLockPath(sessionFile), drop);
