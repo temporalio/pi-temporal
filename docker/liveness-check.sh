@@ -41,7 +41,7 @@ docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null \
 # `--user root` is not asked for: the point is the readings this worker's own user can make.
 exec docker run --rm \
   -v "$PWD/src:/app/src:ro" \
-  -v "$PWD/liveness-linux-check.mts:/app/liveness-linux-check.mts:ro" \
+  -v "$PWD/checks/liveness-linux-check.mts:/app/checks/liveness-linux-check.mts:ro" \
   -e PI_TEMPORAL_DATA=/tmp/data \
   pi-temporal:l3 \
-  node --import tsx liveness-linux-check.mts
+  node --import tsx checks/liveness-linux-check.mts

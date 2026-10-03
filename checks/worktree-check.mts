@@ -2,14 +2,14 @@
 // directories and separate project directories over one shared session directory. Needs no Temporal
 // server and no model key, because none of this involves either.
 //
-// Usage: npx tsx worktree-check.mts
+// Usage: npx tsx checks/worktree-check.mts
 
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import * as worktree from "./src/worktree.js";
-import { withSessionLock } from "./src/session-lock.js";
+import * as worktree from "../src/worktree.js";
+import { withSessionLock } from "../src/session-lock.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {

@@ -13,7 +13,8 @@ cd "$root"
 
 logs="$(mktemp -d)"
 failed=()
-for check in *-check.mts; do
+for path in checks/*-check.mts; do
+  check="$(basename "$path")"
   case "$check" in
     # Drives a real model, so it needs a key.
     detached-check.mts) continue ;;
@@ -21,7 +22,7 @@ for check in *-check.mts; do
     liveness-linux-check.mts) [ "$(uname -s)" = "Linux" ] || continue ;;
   esac
   log="$logs/${check%.mts}.log"
-  if node --import tsx "$check" > "$log" 2>&1; then
+  if node --import tsx "$path" > "$log" 2>&1; then
     echo "ok    $check"
   else
     echo "FAIL  $check"

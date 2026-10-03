@@ -5,10 +5,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
-import { makeActivities } from "./src/activities.js";
-import * as worktree from "./src/worktree.js";
+import { makeActivities } from "../src/activities.js";
+import * as worktree from "../src/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-unschedule-"));
 const project = join(root, "project");
@@ -20,8 +21,9 @@ const connection = await Connection.connect({
 });
 const client = new Client({ connection, namespace: process.env.TEMPORAL_NAMESPACE ?? "default" });
 const execute = promisify(execFile);
+const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const cli = (args: string[]) =>
-  execute(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
+  execute(process.execPath, ["--import", "tsx", cliPath, ...args], {
     env: {
       ...process.env,
       PI_TEMPORAL_DATA: join(root, "host"),

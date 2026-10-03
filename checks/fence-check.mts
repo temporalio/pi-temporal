@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { files, SCENARIO } from "./faux-worker.mjs";
-import { QUERIES, type TurnState } from "./src/protocol.js";
+import { QUERIES, type TurnState } from "../src/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const failures: string[] = [];

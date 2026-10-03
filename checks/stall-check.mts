@@ -6,7 +6,7 @@
 // from inside the process. No timer fires and no I/O completes, so the lock's mtime ages past
 // STALE_MS and the contender reclaims it.
 //
-// Usage: npx tsx stall-check.mts
+// Usage: npx tsx checks/stall-check.mts
 
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { withSessionLock } from "./src/session-lock.js";
+import { withSessionLock } from "../src/session-lock.js";
 
 const execFileAsync = promisify(execFile);
 const failures: string[] = [];

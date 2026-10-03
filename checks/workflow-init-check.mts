@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { Context } from "@temporalio/activity";
-import type { RunStepInput, TurnState } from "./src/protocol.js";
+import type { RunStepInput, TurnState } from "../src/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const namespace = process.env.TEMPORAL_NAMESPACE ?? "default";
@@ -56,7 +56,7 @@ const worker = await Worker.create({
   connection: native,
   namespace,
   taskQueue: queue,
-  workflowsPath: fileURLToPath(new URL("./src/workflow.ts", import.meta.url)),
+  workflowsPath: fileURLToPath(new URL("../src/workflow.ts", import.meta.url)),
   activities: {
     ...activities,
     async runToolCall() {

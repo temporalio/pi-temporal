@@ -25,16 +25,16 @@
 // `salvage/`, where OpenCode leaves it on that host's disk and logs. Both keep it; neither
 // publishes it.
 //
-// No server and no model key. Usage: npx tsx lost-host-check.mts
+// No server and no model key. Usage: npx tsx checks/lost-host-check.mts
 
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "./src/activities.js";
-import { makeSteppedStep } from "./src/l2-step.js";
-import * as worktree from "./src/worktree.js";
+import { makeActivities } from "../src/activities.js";
+import { makeSteppedStep } from "../src/l2-step.js";
+import * as worktree from "../src/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-lost-host-"));
 const originalData = process.env.PI_TEMPORAL_DATA;

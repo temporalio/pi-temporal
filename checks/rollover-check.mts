@@ -5,21 +5,21 @@
 // The rollover is driven by `maxHistory` here. In production it is the server's own
 // `continueAsNewSuggested`, which no check can reach without writing tens of thousands of events.
 //
-// Needs a Temporal server; no model key. Usage: tsx rollover-check.mts
+// Needs a Temporal server; no model key. Usage: tsx checks/rollover-check.mts
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { fromEnv, sessionFileFor } from "./src/config.js";
-import { WORKFLOW_TYPE, workflowId } from "./src/protocol.js";
+import { fromEnv, sessionFileFor } from "../src/config.js";
+import { WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
 import type {
   PromptInput,
   RunStepInput,
   RunStepResult,
   SessionTurnOptions,
-} from "./src/protocol.js";
+} from "../src/protocol.js";
 
 const cfg = fromEnv();
 const failures: string[] = [];
@@ -43,7 +43,7 @@ async function main() {
     connection: nativeConnection,
     namespace: cfg.namespace,
     taskQueue,
-    workflowsPath: fileURLToPath(new URL("./src/workflow.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow.ts", import.meta.url)),
     activities: {
       async runStep(input: RunStepInput): Promise<RunStepResult> {
         answered.push(input.text);

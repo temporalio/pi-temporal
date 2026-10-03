@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as worktree from "./src/worktree.js";
-import { withSessionLock } from "./src/session-lock.js";
+import * as worktree from "../src/worktree.js";
+import { withSessionLock } from "../src/session-lock.js";
 
 const root = await fs.mkdtemp(join(tmpdir(), "pi-storage-repair-"));
 const originalData = process.env.PI_TEMPORAL_DATA;

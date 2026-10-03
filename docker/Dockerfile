@@ -31,7 +31,7 @@ RUN mkdir -p /app/node_modules/@earendil-works \
 COPY tsconfig.json ./
 COPY src ./src
 COPY extensions ./extensions
-COPY detached-check.mts ./
+COPY checks/detached-check.mts ./checks/
 
 # Where the session log lives. A volume mounted here in more than one container is the shared
 # storage the config comments point at.

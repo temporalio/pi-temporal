@@ -9,15 +9,20 @@
 // Both bounds are driven with stub activities that report what they spent, so what is checked is
 // the workflow adding it up and stopping, not a provider's billing.
 //
-// Needs a Temporal server; no model key. Usage: npx tsx budget-check.mts
+// Needs a Temporal server; no model key. Usage: npx tsx checks/budget-check.mts
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { QUERIES } from "./src/protocol.js";
-import type { RunStepInput, RunStepResult, SessionTurnOptions, TurnState } from "./src/protocol.js";
+import { QUERIES } from "../src/protocol.js";
+import type {
+  RunStepInput,
+  RunStepResult,
+  SessionTurnOptions,
+  TurnState,
+} from "../src/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const queue = `pi-budget-${Date.now()}`;
@@ -68,7 +73,7 @@ async function main() {
     connection: native,
     namespace: "default",
     taskQueue: queue,
-    workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
     activities,
   });
   const running = worker.run();

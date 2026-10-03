@@ -7,7 +7,7 @@
 // the scratch directory, never from this process's memory, so a retry on a fresh process makes the
 // same choices the first attempt did.
 //
-// Run as a worker: npx tsx faux-worker.mts --queue=<task queue> --dir=<scratch dir>
+// Run as a worker: npx tsx checks/faux-worker.mts --queue=<task queue> --dir=<scratch dir>
 
 import { appendFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -23,11 +23,11 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "./src/activities.js";
+import { makeActivities } from "../src/activities.js";
 
 // The fork's own copies, loaded by path. The provider registry and the stream class are module
 // state, so a second copy resolved some other way would build streams the agent does not know.
-const codingAgent = new URL("./node_modules/@earendil-works/pi-coding-agent", import.meta.url);
+const codingAgent = new URL("../node_modules/@earendil-works/pi-coding-agent", import.meta.url);
 const forkPackages = join(realpathSync(fileURLToPath(codingAgent)), "..");
 const piAi = await import(pathToFileURL(join(forkPackages, "ai", "dist", "index.js")).href);
 const typebox = await import(
@@ -269,7 +269,7 @@ export async function runFauxWorker(queue: string, dir: string) {
     connection,
     namespace: "default",
     taskQueue: queue,
-    workflowsPath: fileURLToPath(new URL("./src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
     activities: makeActivities(
       { projectDir, provider: PROVIDER },
       { openSession: fauxOpenSession(dir, projectDir) },

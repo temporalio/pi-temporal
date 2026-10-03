@@ -10,12 +10,12 @@
 // is the outcome the review asserted, one holder at a time, and that the third contender was really
 // racing rather than arriving after everything had settled.
 //
-// Usage: npx tsx lock-gap-check.mts
+// Usage: npx tsx checks/lock-gap-check.mts
 
 import { mkdir, mkdtemp, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withSessionLock } from "./src/session-lock.js";
+import { withSessionLock } from "../src/session-lock.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {

@@ -3,15 +3,15 @@
 // without ending the session. Runs the same three checks in both modes, so the split is held to
 // the whole-step mode's behaviour rather than to its own.
 //
-// Needs a Temporal server; no model key. Usage: tsx step-loop-check.mts
+// Needs a Temporal server; no model key. Usage: tsx checks/step-loop-check.mts
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { fromEnv, sessionFileFor } from "./src/config.js";
-import { WORKFLOW_TYPE, workflowId } from "./src/protocol.js";
+import { fromEnv, sessionFileFor } from "../src/config.js";
+import { WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
 import type {
   ModelCallResult,
   PromptInput,
@@ -21,7 +21,7 @@ import type {
   SessionTurnOptions,
   ToolCallInput,
   ToolCallResult,
-} from "./src/protocol.js";
+} from "../src/protocol.js";
 
 const STEPS_TO_ANSWER = 3;
 const cfg = fromEnv();
@@ -108,7 +108,7 @@ async function runMode(stepped: boolean) {
     connection: nativeConnection,
     namespace: cfg.namespace,
     taskQueue,
-    workflowsPath: fileURLToPath(new URL("./src/workflow.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow.ts", import.meta.url)),
     activities,
   });
   const running = worker.run();

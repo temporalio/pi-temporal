@@ -3,9 +3,9 @@
 // cannot show you: every call reaches the seal, an interrupt is not swallowed, one broken tool
 // does not take the turn with it, and a batch that says so runs in order.
 //
-// Usage: npx tsx l2-step-check.mts
+// Usage: npx tsx checks/l2-step-check.mts
 
-import { makeSteppedStep } from "./src/l2-step.js";
+import { makeSteppedStep } from "../src/l2-step.js";
 import type {
   DeferredToolCall,
   ModelCallResult,
@@ -14,7 +14,7 @@ import type {
   SealStepInput,
   ToolCallInput,
   ToolCallResult,
-} from "./src/protocol.js";
+} from "../src/protocol.js";
 
 class FakeCancel extends Error {}
 const isCancellation = (err: unknown) => err instanceof FakeCancel;
