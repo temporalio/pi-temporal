@@ -9,9 +9,10 @@
 // worker owns, so it carries on after pi exits. That is offloading, not durability, which is why
 // it is a command rather than the default.
 //
-// The worker calls step(), which only the fork build has, so this needs pi to be the fork. The
-// Temporal side does not, which is why /background still works on stock pi against a worker
-// running elsewhere. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet worker owns the queue.
+// The worker drives the fork's step primitives, which only the fork build has, so this needs pi to
+// be the fork. The Temporal side does not, which is why /background still works on stock pi
+// against a worker running elsewhere. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet worker owns
+// the queue.
 
 import type {
   ExtensionAPI,
@@ -19,7 +20,12 @@ import type {
   TurnExecutorContext,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { Client, Connection } from "@temporalio/client";
+import {
+  type Client,
+  type Connection,
+  QueryRejectedError,
+  WorkflowNotFoundError,
+} from "@temporalio/client";
 import {
   LOCAL_TURN_WORKFLOW,
   QUERIES,
@@ -31,32 +37,32 @@ import type {
   LocalTurnInput,
   PromptInput,
   SessionTurnOptions,
-  TurnBudget,
   TurnState,
 } from "../src/protocol.js";
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 import * as worktree from "../src/worktree.js";
-import { connectionOptions, fromEnv } from "../src/config.js";
+import { openClient } from "../src/client.js";
+import {
+  clientProblems,
+  type Config,
+  connectionOptions,
+  fromEnv,
+  modelApiKey,
+  preflight,
+} from "../src/config.js";
 
 const STATUS_KEY = "pi-temporal";
 const POLL_MS = 2000;
+// Shorter than the poll interval, so a worker that never answers cannot stack polls behind it.
+const QUERY_MS = 1500;
 
-interface Env {
-  readonly address: string;
-  readonly namespace: string;
-  readonly taskQueue: string;
-  readonly sessionDir: string;
-  readonly idleTimeout: string;
-  readonly stepped: boolean;
-  readonly toolTimeoutMinutes?: number;
-  readonly budget?: TurnBudget;
+type Env = Config & {
   readonly embeddedWorker: boolean;
   readonly durableTurns: boolean;
   readonly provider?: string;
   readonly modelHint?: string;
-  readonly shipTree: boolean;
-}
+};
 
 // Read here rather than importing src/config.ts: that one is the worker's, and an extension has
 // no business inheriting the worker's defaults for the project directory.
@@ -87,12 +93,13 @@ export default function (pi: ExtensionAPI) {
   // The turn executor is handed a turn, not a context, so it borrows the session's for messages.
   let uiCtx: ExtensionContext | undefined;
   let warnedNoTemporal = false;
+  // What the embedded worker would be refused for if it were the standalone one. It hosts the same
+  // activities, so it is held to the same rules rather than quietly running where they fail.
+  const workerProblems = cfg.embeddedWorker ? preflight(cfg) : [];
+  let polling = false;
 
   const connect = () => {
-    connecting ??= (async () => {
-      const connection = await Connection.connect(connectionOptions(fromEnv()));
-      return { client: new Client({ connection, namespace: cfg.namespace }), connection };
-    })();
+    connecting ??= openClient(fromEnv());
     return connecting;
   };
 
@@ -109,6 +116,8 @@ export default function (pi: ExtensionAPI) {
         projectDir: ctx.cwd,
         provider: cfg.provider ?? ctx.model?.provider,
         modelHint: cfg.modelHint ?? ctx.model?.id,
+        apiKey: modelApiKey(),
+        shipTree: cfg.shipTree,
       });
       worker.run().catch((err) => {
         ctx.ui.notify(`background worker stopped: ${String(err)}`, "warning");
@@ -131,16 +140,31 @@ export default function (pi: ExtensionAPI) {
   };
 
   async function poll(ctx: ExtensionContext) {
+    if (polling) return;
+    polling = true;
+    try {
+      await pollOnce(ctx);
+    } finally {
+      polling = false;
+    }
+  }
+
+  async function pollOnce(ctx: ExtensionContext) {
     const { client } = await connect();
     for (const [id, task] of [...watching]) {
       let state: TurnState;
       try {
         const handle = client.workflow.getHandle(workflowId(task.sessionId));
-        state = await handle.query<TurnState, []>(QUERIES.turnState);
-      } catch {
-        // The session retires when it goes idle, so a missing workflow means the turn is over
-        // and its answer is in the session file. Stop watching rather than reporting a failure.
-        watching.delete(id);
+        state = await client.withDeadline(Date.now() + QUERY_MS, () =>
+          handle.query<TurnState, []>(QUERIES.turnState),
+        );
+      } catch (err) {
+        // A session that is closed or gone retired, and its answer is in the session file, so
+        // stop watching rather than reporting a failure. Anything else, a deadline included, is
+        // a worker that did not answer this time, and the next tick asks again.
+        if (err instanceof QueryRejectedError || err instanceof WorkflowNotFoundError) {
+          watching.delete(id);
+        }
         continue;
       }
       if (state.finished?.promptId !== task.promptId) continue;
@@ -210,6 +234,7 @@ export default function (pi: ExtensionAPI) {
 
   const runTurnDurably = async (turn: TurnExecutorContext) => {
     const turnId = randomUUID();
+    const turnWorkflow = `pi-turn-${turn.sessionId}-${turnId}`;
     const input: LocalTurnInput = {
       sessionId: turn.sessionId,
       turnId,
@@ -240,12 +265,16 @@ export default function (pi: ExtensionAPI) {
       const { client } = await connect();
       await client.workflow.execute(LOCAL_TURN_WORKFLOW, {
         taskQueue: turnQueue,
-        workflowId: `pi-turn-${turn.sessionId}-${turnId}`,
+        workflowId: turnWorkflow,
         args: [input],
       });
     } catch (err) {
       // If the turn itself failed, that is pi's error to report, not ours to retry.
       if (ran) {
+        // The turn is over for this process, so its workflow must not go on driving steps of it.
+        await connect()
+          .then(({ client }) => client.workflow.getHandle(turnWorkflow).terminate("turn failed"))
+          .catch(() => {});
         throw err;
       }
       // Durability is not worth losing a turn over. Temporal being unreachable means no record of
@@ -272,6 +301,13 @@ export default function (pi: ExtensionAPI) {
       const text = args.trim();
       if (!text) {
         ctx.ui.notify("usage: /background <task>", "warning");
+        return;
+      }
+      // Refused here rather than by the worker on its first activity, where the task would fail
+      // with nobody watching it the way this command does.
+      const problems = [...new Set([...clientProblems(cfg), ...workerProblems])];
+      if (problems.length > 0) {
+        ctx.ui.notify(`not sending the task: ${problems.join("; ")}`, "error");
         return;
       }
 
@@ -357,6 +393,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     uiCtx = ctx;
+    if (workerProblems.length > 0) {
+      ctx.ui.notify(
+        `pi-temporal will not run /background here: ${workerProblems.join("; ")}`,
+        "warning",
+      );
+    }
   });
 
   pi.on("session_shutdown", async () => {
