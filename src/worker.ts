@@ -3,7 +3,7 @@
 // directory. The pi extension runs the same worker inside pi (see src/session-worker.ts); this
 // one is for a fleet, or for keeping tasks moving with no pi open.
 
-import { connectionOptions, describe, fromEnv, notes, preflight } from "./config.js";
+import { connectionOptions, describe, fromEnv, modelApiKey, notes, preflight } from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
 import * as worktree from "./worktree.js";
 
@@ -58,7 +58,7 @@ async function main() {
     projectDir,
     provider: process.env.PI_TEMPORAL_PROVIDER,
     modelHint: process.env.PI_MODEL,
-    apiKey: process.env.OPENAI_API_KEY,
+    apiKey: modelApiKey(),
     shipTree: cfg.shipTree,
   });
 

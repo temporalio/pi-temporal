@@ -121,16 +121,7 @@ export function preflight(cfg: Config): string[] {
       );
     }
   }
-  // The writer markers and the closed-step fence exist only on the stepped path: a whole step
-  // never says which calls are inside their own execution, so a timed-out attempt's tool can keep
-  // writing a directory a later restore brings back to the tip, and the next capture ships what it
-  // wrote with nothing to refuse it.
-  if (cfg.shipTree && !cfg.stepped) {
-    problems.push(
-      "PI_TEMPORAL_SHIP_TREE=1 needs PI_TEMPORAL_STEPPED=1: only the stepped path keeps the " +
-        "writer markers and dispatch claims that fence a tool its activity stopped waiting for",
-    );
-  }
+  problems.push(...clientProblems(cfg));
   if (cfg.apiKey && LOOPBACK.test(cfg.address)) {
     problems.push(
       `an API key is set but TEMPORAL_ADDRESS is ${cfg.address}, which is a dev server`,
@@ -145,6 +136,28 @@ export function preflight(cfg: Config): string[] {
     problems.push("PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY come as a pair");
   }
   return problems;
+}
+
+// The writer markers and the closed-step fence exist only on the stepped path: a whole step never
+// says which calls are inside their own execution, so a timed-out attempt's tool can keep writing a
+// directory a later restore brings back to the tip, and the next capture ships what it wrote with
+// nothing to refuse it.
+export const SHIP_TREE_NEEDS_STEPS =
+  "PI_TEMPORAL_SHIP_TREE=1 needs PI_TEMPORAL_STEPPED=1: only the stepped path keeps the " +
+  "writer markers and dispatch claims that fence a tool its activity stopped waiting for";
+
+/**
+ * What a client can be refused for from its own environment. `stepped` rides the session's input
+ * from whoever starts it, so a client that would start a whole-step session for shipping workers
+ * finds out here rather than on the first activity.
+ */
+export function clientProblems(cfg: Config): string[] {
+  return cfg.shipTree && !cfg.stepped ? [SHIP_TREE_NEEDS_STEPS] : [];
+}
+
+/** The model provider's key, from the environment or from a file, the way the scripts take it. */
+export function modelApiKey(): string | undefined {
+  return process.env.OPENAI_API_KEY ?? read(process.env.OPENAI_API_KEY_FILE)?.trim();
 }
 
 /** Plaintext can be intentional on a private network, so it is a note rather than a refusal. */
