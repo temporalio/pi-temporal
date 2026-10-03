@@ -11,6 +11,7 @@
   "scripts": {
     "setup-fork": "scripts/setup-fork.sh",
     "typecheck": "tsc --noEmit",
+    "checks": "scripts/run-checks.sh",
     "worker": "tsx src/worker.ts",
     "demo": "tsx src/demo.ts"
   },

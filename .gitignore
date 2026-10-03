@@ -5,3 +5,5 @@ dist/
 .env.local
 sessions/
 .fork/
+# quarantine-routing-check writes this beside itself and removes it, unless it is killed first.
+checks/.free-host-worker.tmp.mts
