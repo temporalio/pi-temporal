@@ -40,6 +40,17 @@ import { textOf } from "./messages.js";
 // free host in about the time one dispatch takes.
 const REFUSAL_RETRY = "2 seconds";
 
+// Whether Temporal asked this activity to stop. Delivered through the heartbeats, so it is only
+// ever as fresh as the last one. Outside an activity (a check driving the function directly)
+// nothing can ask.
+const stopRequested = () => {
+  try {
+    return Context.current().cancellationSignal.aborted;
+  } catch {
+    return false;
+  }
+};
+
 const heartbeatEvery = (ms: number) => {
   const timer = setInterval(() => {
     try {
@@ -332,24 +343,42 @@ export function makeActivities(
           // prepareStep settled anything the crash left dangling, so this is a plain step: a tool
           // whose result never landed is reported as unknown, not re-run behind the model's back.
           // The same three units the stepped mode dispatches one by one, run here in one activity.
+          // A stop is honoured between units, which is as fine as a whole step can be: a unit
+          // that has started runs to its end, and nothing after it starts.
+          if (stopRequested()) throw Context.current().cancellationSignal.reason;
           const before = billed(session);
           const model = await session.modelCall();
           const calls = model.ended ? [] : model.toolCalls;
           const results = new Map<string, TurnToolCallOutcome>();
+          let stopped = false;
+          const notStarted = new Set<string>();
           for (const call of calls) {
+            if (stopped || stopRequested()) {
+              stopped = true;
+              notStarted.add(call.id);
+              continue;
+            }
             // One at a time: the session admits a single unit of work, so calls cannot overlap.
             const outcome = await session.runToolCall(call.id);
             if (outcome) results.set(call.id, outcome);
           }
+          stopped ||= stopRequested();
           const sealed = await session.sealStep(
             // A call with no outcome already has its result in the transcript, which the seal
-            // finds, so only the ones this attempt ran are handed over.
-            calls.flatMap((call) => results.get(call.id) ?? []),
+            // finds, so only the ones this attempt ran are handed over. One the stop kept from
+            // starting gets the outcome the stepped seal gives it, so the step still closes.
+            calls.flatMap((call) => {
+              if (notStarted.has(call.id)) return [unknownToolCallOutcome(call)];
+              return results.get(call.id) ?? [];
+            }),
             {
               expectCalls: calls.map((call) => call.id),
               // Carried by the workflow, because the seal reads no budget off the transcript and
               // this session is rebuilt for every step.
               retryAttempt: input.retryAttempt,
+              // A stopped turn wants its results written down and nothing else, as in the stepped
+              // seal: a retry or a compaction is work nobody asked for.
+              postRun: !stopped,
             },
           );
           const { done } = sealed;
@@ -357,6 +386,7 @@ export function makeActivities(
           const messages = session.state.messages as Msg[];
           const spent = spentSince(before, session);
           await shipTree(input.sessionFile);
+          if (stopped) throw Context.current().cancellationSignal.reason;
           const total = totalOf(session);
           return {
             done,

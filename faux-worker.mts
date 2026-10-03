@@ -9,7 +9,7 @@
 //
 // Run as a worker: npx tsx faux-worker.mts --queue=<task queue> --dir=<scratch dir>
 
-import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Context } from "@temporalio/activity";
@@ -42,11 +42,15 @@ export const SCENARIO = {
   killSeal: "[kill-seal]",
   pauseModel: "[pause-model]",
   continueOnce: "[continue-once]",
+  twoCalls: "[two-calls]",
 } as const;
 
 /** Files a scenario leaves in the scratch directory, for the check to read. */
 export const files = (dir: string) => ({
   probes: join(dir, "probe.log"),
+  probesStarted: join(dir, "probe-started.log"),
+  // Present while the probe should take long enough for the check to stop the turn inside it.
+  slowProbe: join(dir, "slow-probe"),
   modelCalls: join(dir, "model.log"),
   settled: join(dir, "settle.log"),
   refused: join(dir, "refused.log"),
@@ -78,9 +82,11 @@ const promptOf = (messages: readonly Message[]) =>
 function respond(messages: readonly Message[]) {
   const answered = messages.some((m) => m.role === "toolResult");
   if (!answered) {
-    return piAi.fauxAssistantMessage(piAi.fauxToolCall("probe", { note: "once" }), {
-      stopReason: "toolUse",
-    });
+    const calls = promptOf(messages).includes(SCENARIO.twoCalls) ? ["first", "second"] : ["once"];
+    return piAi.fauxAssistantMessage(
+      calls.map((note) => piAi.fauxToolCall("probe", { note })),
+      { stopReason: "toolUse" },
+    );
   }
   return piAi.fauxAssistantMessage("all done");
 }
@@ -121,6 +127,10 @@ function probeTool(dir: string): ToolDefinition {
     description: "Records that it ran",
     parameters: typebox.Type.Object({ note: typebox.Type.String() }),
     async execute(toolCallId: string) {
+      appendFileSync(files(dir).probesStarted, `${toolCallId}\n`);
+      if (existsSync(files(dir).slowProbe)) {
+        await new Promise((resolve) => setTimeout(resolve, 8_000));
+      }
       appendFileSync(files(dir).probes, `${toolCallId}\n`);
       return { content: [{ type: "text", text: "probed" }], details: {} };
     },
