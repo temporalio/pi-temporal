@@ -74,8 +74,6 @@ async function main() {
   const running = worker.run();
 
   // One workflow per session id, so two turns of the same session meet the same accumulator. A
-  // fresh id per call is a fresh session, which is what the per-turn cases want.
-  // One workflow per session id, so two turns of the same session meet the same accumulator. A
   // fresh id per call is a fresh session, which is what the per-turn cases want. The session cases
   // keep the run alive between turns: what a session has spent is this run's state, so a session
   // that goes idle and is woken again later starts a new run and counts from zero.
