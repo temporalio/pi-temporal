@@ -5,8 +5,9 @@ Run the [Pi coding agent](https://github.com/earendil-works/pi) on
 
 Pi keeps the conversation: the session file stays the record, the TUI stays the TUI. Temporal
 drives execution: a turn is a workflow, and every model call and tool call can be its own
-activity. Kill the worker mid-tool and a worker that has never seen the session finishes the
-turn. The tool that was cut off is settled as an unknown outcome, not run twice blind.
+activity. Kill the worker mid-tool and another machine that has never seen the session finishes
+the turn. The tool that was cut off ends as an unknown outcome. Nothing runs it a second time on
+a guess.
 
 What that buys:
 
@@ -20,8 +21,8 @@ What that buys:
 - Operator bounds: tokens and wall clock per turn and per session, and a hard deadline that stops
   a turn where it stands.
 
-Every claim about what survives a crash is tied to a named check in
-[docs/guarantees.md](docs/guarantees.md). The short version: completed work replays from Temporal
+[docs/guarantees.md](docs/guarantees.md) ties every claim about what survives a crash to a named
+check. The short version: completed work replays from Temporal
 history, the session record settles what a crash left half-done, and a worker that lost its lease
 cannot write.
 
@@ -63,8 +64,8 @@ npx tsx checks/step-loop-check.mts     # one activity per step, and interrupts; 
 
 ## Run it from anywhere
 
-`/background` lives inside a pi session, so those tasks could only be followed from the terminal
-that started them. `src/cli.ts` is the other half:
+`/background` lives inside a pi session, so a task started there can only be followed from that
+terminal. `src/cli.ts` is the other half:
 
 ```bash
 npx tsx src/cli.ts start "port the auth module to the new API"
@@ -102,7 +103,7 @@ a worker-owned session.
 One `runStep` activity does one step: record the prompt if it is not in the transcript, settle
 what an earlier attempt left behind, then one model call, its tool calls, and a seal that records
 the results and says whether the turn is done. The workflow loops until a step reports done. The
-transcript decides what runs next; the workflow only counts so a runaway turn hits a ceiling.
+transcript decides what runs next. The workflow only counts, so a runaway turn hits a ceiling.
 
 `PI_TEMPORAL_STEPPED=1` splits the step into separate activities instead:
 
@@ -111,9 +112,9 @@ runModelCall  ->  runToolCall (one per call)  ->  sealStep
 ```
 
 That exposes per-tool retry and timeout boundaries to workflow code, and it is what the `fleet`
-profile runs. The seal is the only writer of a step's results, dispatches keep a persistent
-admission claim beside the session file, and a user stop reaches both modes between units of
-work. The reasoning behind each of those rules, and what each one costs, is in
+profile runs. The seal is the only writer of a step's results. Dispatches keep a persistent
+admission claim beside the session file. A user stop reaches both modes between units of work.
+The reasoning behind each rule, and what each one costs, is in
 [docs/guarantees.md](docs/guarantees.md).
 
 ## Deploying it
