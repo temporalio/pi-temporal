@@ -362,3 +362,76 @@ Historical live measurements, reported during development with `gpt-4o-mini`:
 Those runs document earlier behavior. They were not repeated by this prose
 pass, and their retry outcomes do not override the current pinned-failure policy.
 
+## Running the checks
+
+The checks live in `checks/`. `scripts/run-checks.sh` runs every one that needs neither a model
+key nor Docker, which is what CI runs. The following checks need no model key:
+
+- `step-loop-check.mts`, `local-turn-check.mts`, `workflow-init-check.mts`, and
+  `rollover-check.mts` need a Temporal server. They use stub activities or turns
+  to check workflow control, initialization, and continue-as-new.
+- `seal-check.mts` and `fence-check.mts` need a Temporal server. They run the real
+  activities over a real session with a scripted model (`faux-worker.mts`), each worker in a
+  process of its own. `seal-check.mts` covers the last seal's boundaries, a seal killed after
+  its writes and retried elsewhere, a `turn_end` continuation, and a whole-step turn, which
+  builds its step from the same primitives inside one activity. `fence-check.mts` stops a
+  worker mid-model-call and checks that its late append is refused once another worker has
+  finished the turn. Each waits out a heartbeat and the lock's stale window.
+- `l2-step-check.mts` checks tool overlap, fallback policy, and cancellation with
+  fake activities. `migration-rejoin-check.mts` also uses fake activities but real
+  temporary project directories to test the stale-host migration case.
+- `dispatch-check.mts` drives the real tool activity over a fake session: two overlapping
+  attempts run one effect, a dispatch note that cannot be written blocks the effect, and a
+  failure before any claim is told apart from one after.
+- `pending-check.mts` checks claims, result files, and cleanup.
+  `stale-dispatch-check.mts` drives a worker dispatch through cleanup while a
+  competing attempt waits before claiming.
+- `session-lock-check.mts` covers selected acquisition, expiry, and refresh
+  interleavings. `lock-gap-check.mts` adds a third contender.
+  `stall-check.mts` stops a child process's event loop past the lease window and
+  takes about 70 seconds. Passing them is not proof of strict mutual exclusion
+  under arbitrary storage delays or clock skew.
+- `worktree-check.mts` and `storage-repair-check.mts` use separate host data
+  directories over a shared session directory. `quarantine-check.mts` covers the
+  writer markers, including each way one is retired: the call returns, the
+  writer left nothing running that carries its name and nothing in its group,
+  the machine restarted, or an operator ran `release-tree`. It spawns and kills
+  real processes to say so, including one that leaves its worker's group and one
+  that is given no environment of its own, which is what says the name reaches a
+  tool at all.
+- `docker/liveness-check.sh` asks those same questions inside a container, because the readings
+  are made from `/proc` on Linux and from `ps` and `lsof` everywhere else, and a laptop only ever
+  runs the second. It needs neither a server nor a key. Both container checks build the image
+  every run and refuse to start when `.fork/pi` is not the commit `fork.pin` names, or has
+  uncommitted changes: the driver's source is mounted over the image, the fork is not, so a
+  checkout left behind would be built in and read as current.
+- `lost-host-check.mts` closes a step without its host, then lets the abandoned
+  tool finish and try to publish. It uses fake activities and the real tree store,
+  and asserts the turn is handed back rather than ended.
+- `interrupted-seal-check.mts` exercises the worker seal with fake session
+  persistence and checks that interruption does not touch project storage, and
+  that a stop leaves the step open to its host where a lost host does not.
+- `budget-check.mts` needs a Temporal server. It bounds a turn and a session by
+  tokens, by wall clock and by a deadline, and checks where each stopped, with
+  stubs reporting the spend. `spend-check.mts` needs neither: it drives the real
+  activity against a faked session to check the two numbers it reports, the
+  difference this step made and what the session has been billed in total.
+- `replay-check.mts` needs a Temporal server. It records a history, replays it,
+  and replays the histories under `checks/histories/`, each recorded by the code that
+  predates a rule that changed what a step schedules. Record another by
+  reverting that rule, running this check with `REPLAY_HISTORY=` pointing at a
+  file to keep, and putting it there.
+- `unschedule-check.mts` checks that deleting a schedule retains a template an
+  accepted firing can still need.
+
+`detached-check.mts`, the smoke helpers, and container checks also need a model
+key. Their historical runs are described above. `scripts/submit.mts` submits a prompt;
+`scripts/inspect.mts` reads a session file.
+
+To inspect workflow state, run
+`temporal workflow query --workflow-id pi-session-<id> --name turnState`. It
+reports queued input, the current step, and the last turn outcome.
+
+For a process-death test, use `detached-check.mts`. It owns the worker process
+IDs and kills their process groups. A name-based `pkill` can kill an unrelated
+worker or leave a wrapper's child alive, invalidating the test.
