@@ -11,7 +11,7 @@ a guess.
 
 What that buys:
 
-- `/background <task>` gives a task its own worker-owned session and returns. Quit pi; the turn
+- `/background <task>` gives a task its own worker-owned session and returns. Quit pi, and the turn
   continues wherever a worker polls.
 - `start`, `running`, `watch`, and `stop` work from any machine that reaches the cluster and the
   session directory. A session is not tied to the terminal that started it.
@@ -52,7 +52,7 @@ get settled.
 
 For the other half, type `/background Use the bash tool to write hello into note.txt, then reply
 DONE.` It returns straight away and a worker takes it from there. The tools run in the directory
-you launched pi from, so `note.txt` lands there. `/background-status` shows what it waits on;
+you launched pi from, so `note.txt` lands there. `/background-status` shows what it waits on, and
 `/background-stop` interrupts it.
 
 To check the whole path without typing:
@@ -75,7 +75,7 @@ npx tsx src/cli.ts watch task-1a2b3c4d
 npx tsx src/cli.ts stop task-1a2b3c4d
 ```
 
-The workflow holds control state and answers `turnState`; the session file holds the
+The workflow holds control state and answers `turnState`. The session file holds the
 conversation. Following a session is a query plus a tail of its file, and both work from any
 machine that reaches the cluster and `PI_SESSION_DIR`. Point that directory at shared storage
 and the machine that starts a task, the machine that runs it, and the machine that watches it
@@ -90,7 +90,7 @@ npx tsx src/cli.ts unschedule morning
 ```
 
 The client sends the project once, into a template store, and each firing copies it into its own
-session. `unschedule` keeps the template, because an accepted firing may still need it; remove it
+session. `unschedule` keeps the template, because an accepted firing may still need it. Remove it
 later with `pi-temporal forget schedule-<scheduleId>`.
 
 The session you type in cannot itself be handed to a worker: the executor hook supplies control
@@ -129,11 +129,11 @@ Two deployments, not a dozen knobs, because the settings are not independent.
 | project files travel | no | yes |
 | unit of work | a whole step | the model call, each tool call, the seal |
 
-Anything above can still be set on its own; the profile only decides what it is when you do not.
+Anything above can still be set on its own. The profile only decides what it is when you do not.
 `preflight` requires an explicit `PI_SESSION_DIR` and tree shipping in the `fleet` profile, and
 refuses tree shipping without the stepped path, on the worker and on the client. It does not test
-that the directory is shared or that filesystem and clock behavior meet the lease assumptions;
-operators must check those properties.
+that the directory is shared or that filesystem and clock behavior meet the lease assumptions.
+Operators must check those properties.
 
 Settings no profile decides, read where a session starts and carried in the session's options.
 Each is a whole number, and a value that is not one is refused rather than ignored:
@@ -154,7 +154,7 @@ Other settings, read by whichever process uses them:
 | `PI_TEMPORAL_TASK_QUEUE` | the queue sessions are started on and workers poll | `pi-session` |
 | `PI_SESSION_IDLE_TIMEOUT` | how long a session's workflow waits for a prompt before retiring | `5 minutes` |
 | `PI_TEMPORAL_PROVIDER` | the provider a worker's model comes from | `openai` |
-| `PI_MODEL` | matched as a substring of the provider's model ids; the first match is used | `mini` |
+| `PI_MODEL` | matched as a substring of the provider's model ids, first match used | `mini` |
 | `PI_TEMPORAL_DATA` | the host directory for shadow repositories and writer markers | `~/.pi-temporal` |
 | `PI_TEMPORAL_DURABLE_TURNS` | `0` turns off the workflow behind each live turn | on |
 | `PI_TEMPORAL_EMBEDDED_WORKER` | `0` when a standalone worker owns the queue (`npm run worker`) | on |
@@ -216,7 +216,7 @@ fallback does not have Temporal recovery.
 
 The checks live in `checks/`, one standalone script per contract, PASS/FAIL on exit code. `npm run
 checks` (`scripts/run-checks.sh`) runs every one that needs neither a model key nor Docker, which is
-what CI runs; most need only a local Temporal server. The serious ones run real workers in real
+what CI runs. Most need only a local Temporal server. The serious ones run real workers in real
 processes: `seal-check.mts` kills a seal after its writes and retries it on another worker,
 `fence-check.mts` freezes a worker mid-call and proves its late write is refused,
 `detached-check.mts` (model key needed) kills a worker mid-tool and watches a second machine finish
@@ -228,7 +228,7 @@ the turn. What each check covers, and what it deliberately does not, is in
 - `extensions/temporal.ts`: the pi extension: the turn executor, and `/background`.
 - `src/workflow.ts`: `piSession`, the per-session durable executor.
 - `src/activities.ts`: `runStep`, and the `runModelCall` / `runToolCall` / `sealStep` that split
-  it; the session file is the log.
+  it. The session file is the log.
 - `src/local-turn-workflow.ts` and `src/local-turn-activity.ts`: `piLocalTurn`, one workflow per
   turn of a live session.
 - `src/l2-step.ts`: how a stepped step's calls fan out and how an interrupt reaches them.
@@ -240,7 +240,7 @@ the turn. What each check covers, and what it deliberately does not, is in
 - `checks/`: the checks, their scripted-model worker (`faux-worker.mts`), and the kept histories
   `replay-check.mts` replays.
 - `scripts/`: fork setup, a local dev server, the smoke runs, `submit.mts`, `inspect.mts`.
-- `docs/`: [guarantees.md](docs/guarantees.md), the durability contract and its evidence;
+- `docs/`: [guarantees.md](docs/guarantees.md), the durability contract and its evidence, and
   [upstream.md](docs/upstream.md), the upstreaming plan.
 
 ## Prior art
