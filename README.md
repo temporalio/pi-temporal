@@ -26,6 +26,17 @@ check. The short version: completed work replays from Temporal
 history, the session record settles what a crash left half-done, and a worker that lost its lease
 cannot write.
 
+## Install
+
+```
+git clone https://github.com/temporalio/pi-temporal
+cd pi-temporal
+./install.sh
+```
+
+The script fetches the Pi fork `fork.pin` names, builds it, links it into `node_modules`, and
+typechecks the result. Run it again after a pull; the fork is only refetched when the pin moves.
+
 ## Try it
 
 Two terminals. First the server:
@@ -43,7 +54,7 @@ cd /path/to/your/project
 ```
 
 `run-pi.sh` needs `OPENAI_API_KEY`, or `OPENAI_API_KEY_FILE` pointing at a file holding one. It
-runs the fork build from `.fork/pi`, so `npm ci && npm run setup-fork` has to have happened.
+runs the fork build from `.fork/pi`, so `./install.sh` has to have happened.
 
 With Temporal connected, each live turn gets a workflow: `temporal workflow list` shows one
 `piLocalTurn` per prompt. To see the recovery, kill pi during a tool call (`Use the bash tool to
