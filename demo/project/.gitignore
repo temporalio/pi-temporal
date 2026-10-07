@@ -1,0 +1,1 @@
+# `pi-temporal start --project` ships a directory only when a `.gitignore` or `.git` guards it.

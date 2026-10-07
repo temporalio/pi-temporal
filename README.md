@@ -20,7 +20,8 @@ can continue after you quit.
   Workers.
 - Worker sessions accept token and wall-clock budgets for each turn or the whole session.
 
-[docs/guarantees.md](docs/guarantees.md) describes the recovery limits and the checks that cover them.
+[docs/guarantees.md](docs/guarantees.md) describes the recovery limits and the checks that cover
+them.
 
 ## Install
 
@@ -47,8 +48,8 @@ Each live turn gets a `piLocalTurn` Workflow. Kill `pi` during a tool call, reop
 `run-pi.sh -c`, and Pi records an unknown outcome for an interrupted call with no saved result.
 
 Type `/background Use the bash tool to write hello into note.txt, then reply DONE.`
-The command returns while a Worker runs the turn. `/background-status` shows progress and
-`/background-stop` interrupts it.
+The command returns while a Worker runs the turn. `/background-status` lists the tasks you're
+waiting on, with their ids and task text, and `/background-stop` interrupts them.
 
 The [chaos demo](demo/README.md) kills Workers during a task so you can watch recovery.
 
@@ -67,7 +68,11 @@ npx tsx src/cli.ts doctor                 # resolved config and server reachabil
 
 The Workflow holds control state. The session file holds the conversation. To follow a session,
 the client queries the Workflow and tails the file. With `PI_SESSION_DIR` on shared storage, you
-can submit a task from one machine and watch it from another.
+can submit a task from one machine and watch it from another. `watch` exits with a nonzero status
+unless the turn was answered. `--timeout=<seconds>` bounds how long it follows.
+
+`start` and `schedule` send `--project` only when it's a git checkout or has a `.gitignore`, and
+never when it's your home directory. `/background` applies the same rule to its directory.
 
 The session you type in stays yours. `/background` and `start` create a new Worker-owned session
 instead of moving the live one.
@@ -133,7 +138,9 @@ TEMPORAL_ADDRESS=temporal.internal:7233 PI_TEMPORAL_TLS_CERT=/run/secrets/tls.cr
   PI_TEMPORAL_TLS_KEY=/run/secrets/tls.key PI_TEMPORAL_TLS_CA=/run/secrets/ca.crt
 ```
 
-If Temporal can’t be reached, the extension says so and runs plain Pi, without recovery.
+If Temporal can’t be reached before a turn starts, the extension says so and runs that turn as
+plain Pi, without recovery. If Temporal goes away mid-turn, the turn stops with an error, and the
+steps it already recorded stay in the session.
 
 ## The Pi fork
 
