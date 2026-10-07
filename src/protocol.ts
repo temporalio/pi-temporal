@@ -49,6 +49,8 @@ export interface RunStepInput extends PromptInput {
   // Failed attempts of this step so far. The workflow keeps the count because the session is
   // rebuilt per activity and compaction can rewrite the transcript.
   readonly retryAttempt?: number;
+  // Whether the turn spent its one compact-and-retry, kept by the workflow for the same reason.
+  readonly overflowRecoveryAttempted?: boolean;
   readonly sessionId: string;
   // Absolute path to the Pi session JSONL, the durable log. Shared storage across workers.
   readonly sessionFile: string;
@@ -69,6 +71,8 @@ export interface RunStepResult {
   readonly done: boolean;
   // Required, so a step cannot silently drop the retry cap.
   readonly retryAttempt: number;
+  // Optional, since a step that never reached a seal has nothing to say.
+  readonly overflowRecoveryAttempted?: boolean;
   // The assistant's final text once done. The log is the source of truth.
   readonly finalText: string;
   // This step's spend, for the turn budget.
@@ -160,6 +164,7 @@ export interface SealStepInput {
   readonly turn: string;
   readonly step: number;
   readonly retryAttempt?: number;
+  readonly overflowRecoveryAttempted?: boolean;
   // The turn was stopped. Record results only, with no provider retry or compaction.
   readonly interrupted?: boolean;
   // Closed without the host that ran it. A tool there may still be running, so this is recorded

@@ -25,10 +25,17 @@ const keyFor = (turn: string) =>
 const turnDir = (sessionFile: string, turn: string) => join(rootFor(sessionFile), keyFor(turn));
 const dirFor = (sessionFile: string, turn: string, step: number) =>
   join(turnDir(sessionFile, turn), String(step));
+// Provider IDs must stay within one file, so a claim can't overwrite another call's state. An
+// ID that can't be a file name is hashed, the same as a turn, so the call still gets a claim.
+// `~` keeps a hash apart from any ID a provider sends as it is.
+const callKey = (callId: string) =>
+  callId && !/[/\\\0]/.test(callId) && Buffer.byteLength(callId) <= 200 && !callId.startsWith("~")
+    ? callId
+    : `~${createHash("sha256").update(callId).digest("hex").slice(0, 32)}`;
 const resultPath = (sessionFile: string, turn: string, step: number, callId: string) =>
-  join(dirFor(sessionFile, turn, step), `${callId}${RESULT}`);
+  join(dirFor(sessionFile, turn, step), `${callKey(callId)}${RESULT}`);
 const dispatchPath = (sessionFile: string, turn: string, step: number, callId: string) =>
-  join(dirFor(sessionFile, turn, step), `${callId}${STARTED}`);
+  join(dirFor(sessionFile, turn, step), `${callKey(callId)}${STARTED}`);
 
 /** Exported for the checks, so they use the real layout instead of restating it. */
 export const stepDirFor = dirFor;
@@ -104,12 +111,16 @@ export async function readResult(
   step: number,
   callId: string,
 ): Promise<TurnToolCallOutcome | undefined> {
+  // Only a missing result is no result. Read as missing, an unreadable one would make the seal
+  // record unknown over a real result.
+  let kept: string;
   try {
-    const kept = await readFile(resultPath(sessionFile, turn, step, callId), "utf8");
-    return JSON.parse(kept) as TurnToolCallOutcome;
-  } catch {
-    return undefined;
+    kept = await readFile(resultPath(sessionFile, turn, step, callId), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
   }
+  return JSON.parse(kept) as TurnToolCallOutcome;
 }
 
 /** Drop the results kept for the given calls of one step. Their notes stay: see `sweep`. */
