@@ -5,6 +5,9 @@
   "description": "Temporal-backed durable executor for the Pi coding agent",
   "type": "module",
   "keywords": ["pi-package"],
+  "engines": {
+    "node": ">=20"
+  },
   "pi": {
     "extensions": ["./extensions"]
   },
