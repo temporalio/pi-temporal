@@ -1,15 +1,11 @@
-// One step of a turn, driven as a model call, one activity per tool call, and a seal. The
-// whole-step mode runs the same step inside a single activity; this one puts the workflow between
-// the model asking for a tool and the tool running, which is where a per-tool retry policy, a
-// per-tool timeout and a budget can live.
+// One step of a turn, driven as a model call, one activity per tool call, and a seal. This puts
+// the workflow between the model asking for a tool and the tool running, so per-tool retry,
+// timeout and budget can apply.
 //
-// The seal is the only writer of the step's results, though not of the transcript: the model call
-// writes the assistant message. Two calls settling at once would each parent their entry off the
-// leaf they saw and branch the session tree, so a call reports its result and the seal records them
-// together, in the order the model asked.
+// The seal is the only writer of tool results. Concurrent writers would branch the session tree,
+// so calls report results and the seal records them together, in the model's order.
 //
-// Sandbox-safe: no SDK imports and no Node builtins, so the workflow bundle can hold it. What it
-// needs from the SDK is injected.
+// Sandbox-safe: no SDK or Node imports. SDK pieces are injected.
 
 import type {
   DeferredToolCall,
@@ -32,32 +28,23 @@ export interface SteppedActivities {
 export interface SteppedStepDeps {
   readonly activities: SteppedActivities;
   readonly isCancellation: (err: unknown) => boolean;
-  // The same two activities, addressed to the queue one worker polls on its own. A step's tools
-  // write the directory the model call's worker is standing in, so keeping them there is what lets
-  // them run at once: they see each other through the filesystem rather than through the tree
-  // store. Offered only the queue that worker reported.
+  // The same activities on the model-call worker's own queue. Tools write that host's project
+  // directory, so they run there and can run concurrently.
   readonly pinnedTo?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
   // Migration requires evidence that no attempt started on the pinned queue.
   readonly isUnclaimed?: (err: unknown) => boolean;
-  // Whether this run was started after a step stopped moving off a host whose attempt began.
-  // Which activities a step schedules is what a workflow writes down, so changing that rule
-  // changes histories that already exist: a run recorded under the old one scheduled a shared
-  // dispatch where this code seals, and replaying it against this code is a nondeterminism error.
-  // A run that predates the change answers false here and keeps the behaviour it recorded.
+  // Patch gate. True when a pinned call that failed after it started must not migrate. Older
+  // histories keep the old schedule so replay stays deterministic.
   readonly refusesStartedFailures?: () => boolean;
-  // Whether this run was started after a lost host stopped ending the turn. Same reason as above:
-  // a step that hands the turn back schedules a model call where the old one failed the run, so
-  // only a run recorded under the new rule may take it.
+  // Patch gate. True for runs started after a lost host stopped ending the turn.
   readonly resumesAfterLostHost?: () => boolean;
-  // Run the seal even though the turn was cancelled. Calls that finished have real results kept
-  // for them, and abandoning the step tells the model they may have taken effect instead.
+  // Run the seal even when the turn was cancelled, so finished calls keep their real results.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
-  // Whether the turn has spent what it was allowed. Asked between the calls of a batch that runs
-  // one at a time, so a bound stops the rest of a step rather than only the next one. A call that
-  // has started is never stopped: its result is what the transcript needs.
+  // Checked between sequential calls. A started call is never stopped, since the transcript needs
+  // its result.
   readonly outOfBudget?: () => boolean;
-  // The workflow's logger, so what a step could not settle is said where an operator reads about
-  // the turn. History records an activity that succeeded; only the dispatch knows what it decided.
+  // The workflow logger. History shows an activity succeeded, but only the dispatch knows what it
+  // decided.
   readonly log?: (message: string, attributes: Record<string, unknown>) => void;
 }
 
@@ -78,9 +65,8 @@ export interface StepCalls {
 }
 
 /**
- * Run the calls of one step, and report what could not be settled. Shared by the worker-owned
- * path and the turn a live pi process holds, because how a step's calls are fanned out and how an
- * interrupt reaches them is the same question in both.
+ * Run the calls of one step and return the stop error, if any. Shared by the worker path and the
+ * live pi path.
  */
 export async function dispatchStepCalls(
   step: number,
@@ -88,8 +74,7 @@ export async function dispatchStepCalls(
   runToolCall: (call: DeferredToolCall) => Promise<ToolCallResult>,
   deps: Pick<SteppedStepDeps, "isCancellation" | "log" | "outOfBudget">,
 ): Promise<unknown> {
-  // Errors are carried rather than thrown, so one call that ran out of retries does not leave its
-  // siblings' promises rejecting with nobody to catch them.
+  // Errors are returned, not thrown, so no sibling promise rejects unobserved.
   const dispatch = async (call: DeferredToolCall): Promise<Dispatched> => {
     try {
       const { outcome } = await runToolCall(call);
@@ -102,9 +87,7 @@ export async function dispatchStepCalls(
   const dispatched: Dispatched[] = [];
   if (!model.ended) {
     if (model.sequential) {
-      // A tool of this step says the batch runs in order, and an interrupt stops the rest of it. So
-      // does running out of budget: the calls left are ones nothing has started, and a bound that
-      // waits for the whole batch is a bound the batch decides.
+      // An interrupt or an exhausted budget stops the rest of the batch. Nothing has started them.
       for (const call of model.calls) {
         const outcome = await dispatch(call);
         dispatched.push(outcome);
@@ -136,15 +119,13 @@ export async function dispatchStepCalls(
     });
   }
 
-  // Handed back rather than thrown, and undefined when nothing stopped. The step still has to be
-  // closed: the calls that finished before the stop have results and the seal records them.
+  // Returned, not thrown. The caller still seals so finished calls keep their results.
   return dispatched.find((d) => d.error !== undefined && deps.isCancellation(d.error))?.error;
 }
 
 type SteppedStep = (input: RunStepInput) => Promise<RunStepResult>;
 
-// What the step cost, which is the model call plus whatever the seal paid for on the way out. The
-// seal runs a compaction when the step needs one, and a compaction is a model call.
+// Step cost is the model call plus the seal, which may compact (another model call).
 const together = (model: Spend | undefined, sealed: Spend | undefined): Spend | undefined => {
   if (!model && !sealed) return undefined;
   const cost = (model?.cost ?? 0) + (sealed?.cost ?? 0);
@@ -158,26 +139,23 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     const model = await runModelCall(input);
     const withSpend = (result: RunStepResult): RunStepResult => {
       const spent = together(model.spent, result.spent);
-      // The later of the two totals, which is the seal's when it made one: it opened the session
-      // after the model call wrote to it.
+      // Prefer the seal's total. It read the session after the model call wrote to it.
       const total = result.total ?? model.total;
       return { ...result, ...(spent ? { spent } : {}), ...(total ? { total } : {}) };
     };
     if (model.settled) {
-      // A crashed step finalized from the transcript, or a retry landing after the turn's last
-      // step: nothing to dispatch and nothing to close.
+      // Already finalized from the transcript. Nothing to dispatch or seal.
       return withSpend(model.settled);
     }
 
-    // The worker that made the model call, when it offered a queue of its own. Everything else in
-    // this step is addressed there first: it is the host holding the directory the tools write.
+    // The model-call worker's own queue, the host holding the project directory.
     const pinned = model.queue && deps.pinnedTo ? deps.pinnedTo(model.queue) : undefined;
     let unclaimed = false;
     let unsafeFailure: unknown;
     let stopFailure: unknown;
     const pinnedAttempts: Promise<void>[] = [];
-    // What is left of a step whose worker is gone goes to the shared queue one at a time. There it
-    // can land on two hosts again, which is what the tree store cannot take.
+    // After falling back, the shared queue runs one at a time. Two hosts at once would branch the
+    // tree store.
     let shared: Promise<unknown> = Promise.resolve();
     const onShared = <T>(run: (on: SteppedActivities) => Promise<T>): Promise<T> => {
       const next = shared.then(async () => {
@@ -198,9 +176,8 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       );
       return next;
     };
-    // A timed-out body can keep writing. If the shared queue selects that host for another call,
-    // restoring its directory also advances the tip note that the stale body would publish under.
-    // Until workspaces are isolated, only a conclusively unstarted dispatch can move automatically.
+    // A timed-out body can keep writing. Only a dispatch that provably never started may move to
+    // the shared queue, until workspaces are isolated.
     const viaPinned = async <T>(
       run: (on: Pick<SteppedActivities, "runToolCall" | "sealStep">) => Promise<T>,
     ): Promise<T> => {
@@ -209,8 +186,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       if (!pinned) return run(deps.activities);
       if (unclaimed) return onShared(run);
       const attempt = run(pinned);
-      // Recorded whether it settles or fails: what the barrier waits for is that it is over, not
-      // that it worked.
+      // The barrier waits for it to be over, not to succeed.
       pinnedAttempts.push(attempt.then(() => undefined, () => undefined));
       try {
         return await attempt;
@@ -248,8 +224,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       deps,
     );
 
-    // Every call of the step is sealed, including the ones no dispatch answered for. A step that
-    // leaves one open leaves a transcript the next model call cannot be made from.
+    // Seal every call, answered or not. An open call makes the transcript invalid for the model.
     const seal = (interrupted: boolean, lost = false): Promise<RunStepResult> => {
       const sealed: SealStepInput = {
         sessionId: input.sessionId,
@@ -267,11 +242,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     };
 
     const recover = async (failure: unknown): Promise<RunStepResult> => {
-      // Nobody asked for this to stop, so the host that was running it is the one thing the rest of
-      // the session has to be protected from. The seal says so where every host reads it.
+      // Not a user stop, so the host is lost. The seal records that where every host reads it.
       const lost = !deps.isCancellation(failure);
-      // Completed results would be swept by the next prompt unless they reach the transcript.
-      // The original failure still decides the turn's outcome if this recovery cannot finish.
+      // Seal so completed results reach the transcript before the next prompt sweeps them. If
+      // this fails, the original failure still decides the outcome.
       const sealed = await deps.nonCancellable(() => seal(true, lost)).catch((err: unknown) => {
         deps.log?.("could not record results before ending the step", {
           step: input.step,
@@ -279,18 +253,13 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         });
         return undefined;
       });
-      // The step is written down and the host it was on can no longer publish for it, so what that
-      // host still has inside cannot reach the session. There is nothing left for the turn to be
-      // protected from by ending it, and a turn that ends here is one a worker dying mid-tool costs
-      // the user. It goes on with the next step, which the model makes from a transcript saying
-      // which calls have an outcome nobody can vouch for.
+      // Sealed and fenced off from the lost host, so the turn can continue. The model sees which
+      // calls have unknown outcomes.
       if (sealed && lost && (deps.resumesAfterLostHost?.() ?? false)) {
         deps.log?.("the step lost its host; recorded what it had and carrying the turn on", {
           step: input.step,
         });
-        // Not the seal's own answer: a step closed this way did not finish, and the turn asks the
-        // model what to do about it. A transcript that is already complete settles on the next
-        // model call, which is where a turn that had nothing left to do ends.
+        // Always not done. If the transcript is already complete, the next model call settles it.
         return withSpend({ done: false, retryAttempt: sealed.retryAttempt, finalText: "" });
       }
       throw failure;

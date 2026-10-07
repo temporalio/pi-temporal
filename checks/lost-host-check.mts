@@ -1,29 +1,7 @@
-// The contract a step that lost its host is held to, end to end.
-//
-// It has two clauses, and they are the same two on both hosts of this project. The mechanisms
-// differ because the substrates do: this one names the closed step in the shared directory beside
-// the session file, and OpenCode's reuses the owner token that already fences its event log. A
-// change to either belongs in both places, and the other one is
-// `packages/temporal/test/lost-host.test.ts` in the OpenCode fork.
-//
-//   1. The seal that closes a step away from its host publishes nothing. Between the dispatch
-//      failing and the closure being written there is a window where nothing fences the old host,
-//      and the only thing that makes it harmless is that nobody else publishes during it.
-//   2. Once the session has closed that step, what that host publishes for it is refused.
-//
-// A worker dying with a tool in flight costs that step, and it used to cost the whole turn with it.
-// What made ending the turn the only safe answer was the tool: Temporal stops waiting for it, the
-// process behind it keeps writing, and when it finishes it publishes against the tip it read, which
-// reverts whatever ran in its place. The tip rule cannot catch that one, because the stale writer
-// is standing exactly where it was told to stand.
-//
-// With both clauses in place the turn has nothing left to be protected from by ending, and it
-// carries on with the next step. Take `closeStep` out of the seal and clause 2 fails: the abandoned
-// tool publishes first and the work that replaced it is refused and set aside.
-//
-// The clause the two hosts do not share: this one sets the refused host's work aside under
-// `salvage/`, where OpenCode leaves it on that host's disk and logs. Both keep it; neither
-// publishes it.
+// Checks that a step whose pinned host timed out can be closed without ending the turn. Leaves the
+// tool body running after the timeout, then asserts the closing seal publishes nothing and the
+// abandoned tool's later capture is refused and kept under `salvage/`. The next step on another
+// host then moves the project as usual.
 //
 // No server and no model key. Usage: npx tsx checks/lost-host-check.mts
 
@@ -53,8 +31,7 @@ try {
   await mkdir(b);
   await writeFile(join(a, "seed.txt"), "seed\n");
   await worktree.capture(a, sessionFile, { seed: true });
-  // The other host has served this session too, so both start on the tip. A host that never has is
-  // `worktree-check`'s case, and it makes no difference to what this one is about.
+  // Both hosts start on the tip.
   await worktree.ensure(b, sessionFile);
 
   const activities = makeActivities({ projectDir: a, shipTree: true }, {
@@ -81,8 +58,7 @@ try {
     },
     pinnedTo: () => ({
       runToolCall: async () => {
-        // The host says a call is inside its own execution, and then Temporal gives up on the
-        // attempt without stopping the body. Everything the body still has to do is left here.
+        // Temporal gives up on the attempt but the body keeps going. Its remaining work runs later.
         await worktree.beginWrite(a, writer);
         finishAbandoned = async () => {
           await writeFile(join(a, "from-the-abandoned-tool.txt"), "written after the step ended\n");
@@ -114,20 +90,15 @@ try {
   assert.equal(result.done, false, "the turn goes on rather than ending with the worker");
   console.log("PASS a step that lost its host hands the turn back instead of failing it");
 
-  // Clause 1. That seal is standing in a directory that never ran the step's tools, and the host
-  // that did may still be inside one, so it writes the step down and touches nothing else.
+  // The old host may still be writing, so the closing seal must not publish.
   assert.equal(await bundles(), shipped, "the seal that closed the step published nothing");
   console.log("PASS and the seal that closed it published nothing");
 
-  // The abandoned tool finishes now, before anything else has moved the tip. This is the ordering
-  // the tip rule cannot answer: the host is still standing on the tree it read, so its capture is
-  // clean and it takes the project back to whatever it was doing.
-  // Clause 2.
+  // The abandoned tool finishes before the tip moves, so only the closed-step fence can refuse it.
   const refused = await finishAbandoned!();
   assert.match(String(refused), /closed without this host/);
   console.log("PASS the host it lost cannot publish for that step afterwards");
 
-  // And the next step, on a host that is not refused, moves the project as usual.
   await worktree.ensure(b, sessionFile);
   await writeFile(join(b, "from-host-b.txt"), "work that replaced it\n");
   await worktree.capture(b, sessionFile, { fence: { turn, step: 2 } });
@@ -139,8 +110,7 @@ try {
     false,
     "what the abandoned tool wrote is kept on its own host, not published as the project",
   );
-  // Refused is not the same as thrown away. What the tool did is the only record of what it did,
-  // so restoring that host puts it where somebody can get it back.
+  // Refused work is kept, not dropped.
   assert.equal(
     (await readdir(join(`${sessionFile}.tree`, "salvage")).catch(() => [])).length,
     1,

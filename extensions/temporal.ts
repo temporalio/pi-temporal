@@ -1,18 +1,8 @@
-// Puts the session's turns under Temporal, and adds a way to send a task off to a worker.
-//
-// Every turn is durable, with nothing to type and nothing to launch: the first turn registers an
-// executor and starts a worker in this process, so each turn becomes a workflow, and a turn a
-// crash cut in half is finished when the session is opened again. PI_TEMPORAL_DURABLE_TURNS=0
-// turns that off.
-//
-// /background is the other half, and a different thing: it gives a task its own session that a
-// worker owns, so it carries on after pi exits. That is offloading, not durability, which is why
-// it is a command rather than the default.
-//
-// The worker drives the fork's step primitives, which only the fork build has, so this needs pi to
-// be the fork. The Temporal side does not, which is why /background still works on stock pi
-// against a worker running elsewhere. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet worker owns
-// the queue.
+// The pi extension. Each turn runs as a workflow on an in-process worker, so a turn cut by a crash
+// finishes when the session reopens (PI_TEMPORAL_DURABLE_TURNS=0 turns this off).
+// `/background` hands a task to a worker-owned session that keeps going after pi exits.
+// The embedded worker needs the pi fork build. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet
+// worker owns the queue.
 
 import type {
   ExtensionAPI,
@@ -64,10 +54,8 @@ type Env = Config & {
   readonly modelHint?: string;
 };
 
-// Read here rather than importing src/config.ts: that one is the worker's, and an extension has
-// no business inheriting the worker's defaults for the project directory.
-// One reader for everything both halves share, so the extension and the worker cannot disagree
-// about which profile is in force or where the sessions live.
+// Shared settings come from `fromEnv`, so the extension and the worker agree on profile and
+// session directory. The rest are extension-only.
 const env = (): Env => ({
   ...fromEnv(),
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
@@ -84,8 +72,7 @@ interface Task {
 
 export default function (pi: ExtensionAPI) {
   const cfg = env();
-  // Started on first use, not in the factory: an invocation that never runs a task should not
-  // open a connection.
+  // Connect lazily, so a pi that never runs a task opens no connection.
   let connecting: Promise<{ client: Client; connection: Connection }> | undefined;
   let embedding: Promise<SessionWorker> | undefined;
   const watching = new Map<string, Task>();
@@ -93,8 +80,7 @@ export default function (pi: ExtensionAPI) {
   // The turn executor is handed a turn, not a context, so it borrows the session's for messages.
   let uiCtx: ExtensionContext | undefined;
   let warnedNoTemporal = false;
-  // What the embedded worker would be refused for if it were the standalone one. It hosts the same
-  // activities, so it is held to the same rules rather than quietly running where they fail.
+  // The embedded worker hosts the same activities, so it gets the standalone worker's checks.
   const workerProblems = cfg.embeddedWorker ? preflight(cfg) : [];
   let polling = false;
 
@@ -103,8 +89,7 @@ export default function (pi: ExtensionAPI) {
     return connecting;
   };
 
-  // The worker takes a second to build its workflow bundle, so start it with the first task
-  // rather than at startup, and let it keep polling for the rest of the session.
+  // Building the workflow bundle takes a second, so start the worker on the first task.
   const startWorker = (ctx: ExtensionContext) => {
     embedding ??= (async () => {
       const worker = await createSessionWorker({
@@ -159,9 +144,7 @@ export default function (pi: ExtensionAPI) {
           handle.query<TurnState, []>(QUERIES.turnState),
         );
       } catch (err) {
-        // A session that is closed or gone retired, and its answer is in the session file, so
-        // stop watching rather than reporting a failure. Anything else, a deadline included, is
-        // a worker that did not answer this time, and the next tick asks again.
+        // Closed or gone means retired, so stop watching. Anything else is retried next tick.
         if (err instanceof QueryRejectedError || err instanceof WorkflowNotFoundError) {
           watching.delete(id);
         }
@@ -172,8 +155,7 @@ export default function (pi: ExtensionAPI) {
       watching.delete(id);
       const { outcome, finalText } = state.finished;
       if (outcome === "answered") {
-        // nextTurn, so the answer is context for whatever the user asks next and nothing is
-        // interrupted to deliver it.
+        // Delivered as context for the next turn, so nothing is interrupted.
         await pi.sendMessage(
           {
             customType: "pi-temporal",
@@ -202,14 +184,13 @@ export default function (pi: ExtensionAPI) {
     showStatus(ctx);
     watcher ??= setInterval(() => {
       poll(ctx).catch(() => {
-        // A server that went away is not worth interrupting the user for; the next tick retries.
+        // Don't bother the user. The next tick retries.
       });
     }, POLL_MS);
     watcher.unref?.();
   };
 
-  // Every turn of this session, wrapped in a workflow. The turn still runs here, so the queue is
-  // this process alone: no other worker could find the session it belongs to.
+  // Each turn is wrapped in a workflow but runs here, so the queue is private to this process.
   const turnQueue = `${cfg.taskQueue}-local-${randomUUID().slice(0, 8)}`;
   const liveTurns: LiveTurns = new Map();
   let turnWorker: Promise<SessionWorker> | undefined;
@@ -225,7 +206,7 @@ export default function (pi: ExtensionAPI) {
         activities: makeLocalTurnActivities(liveTurns),
       });
       worker.run().catch(() => {
-        // Reported by the turn that fails; a dead worker means turns run locally from here on.
+        // The failing turn reports it. Later turns fall back to running locally.
       });
       return worker;
     })();
@@ -248,11 +229,10 @@ export default function (pi: ExtensionAPI) {
     };
     liveTurns.set(turnId, {
       run: () => ranHere(() => turn.run()),
-      // The same turn, a step at a time. Wrapped the same way, because a turn that got as far as
-      // its model call is one the fallback below must not run a second time.
+      // Also marks `ran`, so the fallback below never reruns a turn that reached its model call.
       steps: {
         record: () => ranHere(() => turn.steps.record()),
-        // Not wrapped: asking whether the user stopped is not running the turn.
+        // Not wrapped. Checking for an interrupt doesn't run the turn.
         interrupted: () => turn.steps.interrupted(),
         modelCall: () => ranHere(() => turn.steps.modelCall()),
         runToolCall: (id) => ranHere(() => turn.steps.runToolCall(id)),
@@ -269,18 +249,17 @@ export default function (pi: ExtensionAPI) {
         args: [input],
       });
     } catch (err) {
-      // If the turn itself failed, that is pi's error to report, not ours to retry.
+      // The turn itself failed. That's pi's error to report, not ours to retry.
       if (ran) {
-        // The turn is over for this process, so its workflow must not go on driving steps of it.
+        // Stop the workflow from driving more steps of a turn that's over here.
         await connect()
           .then(({ client }) => client.workflow.getHandle(turnWorkflow).terminate("turn failed"))
           .catch(() => {});
         throw err;
       }
-      // Durability is not worth losing a turn over. Temporal being unreachable means no record of
-      // this turn, so run it the way pi would have, and say so rather than failing the turn.
+      // Temporal is unreachable. Run the turn as plain pi would, and warn, not fail.
       await turn.run();
-      // Once. A session with no Temporal to reach would otherwise say it on every turn.
+      // Warn once per session, not on every turn.
       if (!warnedNoTemporal) {
         warnedNoTemporal = true;
         const where = `turns are not durable, Temporal is unreachable at ${cfg.address}`;
@@ -303,8 +282,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("usage: /background <task>", "warning");
         return;
       }
-      // Refused here rather than by the worker on its first activity, where the task would fail
-      // with nobody watching it the way this command does.
+      // Refuse here, where the user sees it, not later in the worker.
       const problems = [...new Set([...clientProblems(cfg), ...workerProblems])];
       if (problems.length > 0) {
         ctx.ui.notify(`not sending the task: ${problems.join("; ")}`, "error");
@@ -326,13 +304,10 @@ export default function (pi: ExtensionAPI) {
 
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);
-        // The project goes with the task, from the directory you asked from. Nothing on the worker
-        // side may establish it: a tool call and a model call both land on whichever worker is
-        // free, so an activity that adopts its own directory puts the project wherever Temporal
-        // happened to send the first unit of work.
+        // Ship the project from this directory. Workers never seed it, since the first activity
+        // could land on any of them.
         if (cfg.shipTree) {
-          // The same brake `start --project` has. A pi opened in a home directory would ship
-          // every dotfile in it, `~/.ssh` and `~/.aws` included, because nothing there is ignored.
+          // Same guard as `start --project`. A home directory would ship `~/.ssh` and `~/.aws`.
           const refusal = await worktree.projectRefusal(ctx.cwd);
           if (refusal) {
             ctx.ui.notify(
@@ -414,8 +389,7 @@ export default function (pi: ExtensionAPI) {
     if (embedding) {
       const worker = await embedding;
       embedding = undefined;
-      // A task in flight is not lost: the workflow keeps it, and the next worker to poll the
-      // queue picks the step up, which may be the one this pi starts next time.
+      // In-flight tasks aren't lost. The next worker to poll the queue picks them up.
       await worker.stop();
     }
     if (connecting) {

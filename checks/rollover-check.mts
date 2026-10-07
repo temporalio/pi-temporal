@@ -1,11 +1,8 @@
-// Checks that a long-lived session rolls over instead of growing its history until the server
-// terminates it, and that the rollover is invisible: a prompt queued against the old run is
-// answered by the new one.
+// Checks that a long session continues-as-new and that no queued prompt is lost across it. Forces
+// rollover with a small `maxHistory` (production uses `continueAsNewSuggested`) and asserts every
+// accepted prompt is answered exactly once.
 //
-// The rollover is driven by `maxHistory` here. In production it is the server's own
-// `continueAsNewSuggested`, which no check can reach without writing tens of thousands of events.
-//
-// Needs a Temporal server; no model key. Usage: tsx checks/rollover-check.mts
+// Needs a Temporal server, no model key. Usage: tsx checks/rollover-check.mts
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -28,14 +25,12 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
   if (!ok) failures.push(what);
 };
 
-// Every prompt this run was asked to answer, in order, so the check can tell whether the work
-// queued against the old run survived the handover.
 const answered: string[] = [];
 
 async function main() {
   const taskQueue = `pi-rollover-${randomUUID().slice(0, 8)}`;
   const sessionId = `rollover-${randomUUID().slice(0, 8)}`;
-  // Small enough that a couple of turns crosses it. One turn is a handful of events.
+  // A couple of turns cross this.
   const options: SessionTurnOptions = { idleTimeout: "10 seconds", maxHistory: 24 };
 
   const nativeConnection = await NativeConnection.connect({ address: cfg.address });
@@ -69,8 +64,6 @@ async function main() {
     await send("one");
     const first = (await handle().describe()).runId;
 
-    // Enough turns to cross the bound. Each one adds its own events, so the run that started this
-    // is not the run that finishes it.
     for (const text of ["two", "three", "four", "five", "six"]) {
       await send(text);
       await sleep(400);
@@ -84,9 +77,8 @@ async function main() {
     }
     check("a session rolls over instead of growing without bound", rolled !== "", { first });
 
-    // The point of carrying the queue, and the assertion that has to be about every prompt rather
-    // than about one sent after the rollover was already visible. Whatever is in the queue when the
-    // rollover fires is exactly what a dropped queue loses, and a client was told it was accepted.
+    // Assert on every prompt, not just one sent after the rollover. Prompts queued when it fires
+    // are the ones a dropped queue would lose.
     await send("after");
     const wanted = ["one", "two", "three", "four", "five", "six", "after"];
     for (let waited = 0; waited < 30_000; waited += 200) {

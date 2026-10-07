@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# End to end with no typing: start a worker, submit one turn, wait for the answer, report.
-# Needs a Temporal server (scripts/temporal-dev.sh) and a model key. Exits non-zero on failure,
-# so it works as a check rather than something to read.
-#
-# This drives the standalone worker on purpose. The worker inside pi cannot be tested headlessly:
-# print mode exits as soon as the command returns, and the worker goes with it.
+# End-to-end smoke test: start a worker, submit one turn, wait for the answer. Exits non-zero on
+# failure. Needs a Temporal server (scripts/temporal-dev.sh) and a model key.
+# Uses the standalone worker, since pi's print mode exits and takes the embedded worker with it.
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -18,8 +15,8 @@ export PI_MODEL="${PI_MODEL:-gpt-4o-mini}"
 export PI_PROJECT_DIR="${PI_PROJECT_DIR:-$(mktemp -d)}"
 
 if [ -z "${OPENAI_API_KEY:-}" ]; then
-  key_file="${OPENAI_API_KEY_FILE:-$HOME/.config/ai363/llm.key}"
-  [ -f "$key_file" ] || {
+  key_file="${OPENAI_API_KEY_FILE:-}"
+  [ -n "$key_file" ] && [ -f "$key_file" ] || {
     echo "set OPENAI_API_KEY, or OPENAI_API_KEY_FILE to a file holding one" >&2
     exit 1
   }
@@ -35,8 +32,7 @@ file="$sessions_dir/$session.jsonl"
 word="SMOKE$$"
 log="$(mktemp)"
 
-# Node directly and in a process group of its own: killing an npx wrapper leaves the node process
-# under it polling the queue, and a group kill reaches whatever the worker started too.
+# Plain node in its own process group. Killing an npx wrapper would leave node polling the queue.
 set -m
 node --import tsx src/worker.ts > "$log" 2>&1 &
 worker=$!

@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
-# The handover across two machines rather than two processes.
-#
-# On one host, "another worker" is another process reading the same disk, and a check that kills one
-# and starts the other proves less than it looks like. Here each worker is a container: its own
-# filesystem, its own hostname, and no way to reach the other except through Temporal and the shared
-# session directory. The evidence is Temporal's own: the activity restarts as attempt 2 under a
-# different worker identity, and the identity is the container's hostname.
+# Handover between two containers that share only Temporal and /sessions. Kills worker A mid-tool
+# and checks in Temporal's history that the activity retried on worker B's hostname.
 #
 # Usage: OPENAI_API_KEY=... docker/cross-host-check.sh
 #
-# Not covered: /sessions is a local volume, so the O_EXCL caveats in session-lock.ts (NFSv3) are
-# still untested. This shows separate hosts, not a separate filesystem implementation.
+# /sessions is a local volume here. For NFS, see docker/tree-check.sh with NFS=1.
 
 set -uo pipefail
 
@@ -49,8 +43,7 @@ sid=$($COMPOSE run --rm -T client start "$task" \
 [ -n "$sid" ] && ok "a client container started the session ($sid)" \
   || { bad "client could not start a session"; exit 1; }
 
-# --- kill worker A while the tool is genuinely in flight. Waiting on the transcript rather than on
-# a clock, because a fixed sleep is how the kill ends up landing after the turn already finished.
+# --- kill worker A while the tool is in flight. Poll the transcript, since a fixed sleep can miss.
 inflight=""
 for _ in $(seq 1 60); do
   if $COMPOSE exec -T worker-a sh -c \
@@ -86,9 +79,8 @@ case "$watched" in
   *) bad "the tool that may have run was reported unknown" "$(printf '%s' "$watched" | tail -2)" ;;
 esac
 
-# Counted on the shared volume rather than in the transcript. A second execution records no second
-# result (the retry throws it away), so the transcript cannot tell "did not run again" from "ran
-# again and we dropped it". The side effect can. This is the `git push` case.
+# Count the side effect, not transcript entries. A rerun's result is discarded, so only the
+# shared file shows whether the tool ran twice.
 ran=$($COMPOSE exec -T worker-b sh -c 'wc -l < /sessions/ran.txt 2>/dev/null || echo 0' \
   2>/dev/null | tr -d '\r ')
 [ "${ran:-0}" = "1" ] && ok "the tool really ran once, not once per host" \
@@ -120,8 +112,7 @@ retried=${rest%%|*}
 [ "$retried" = "1" ] && ok "the step came back as a retry on the second host" \
   || bad "the step came back as a retry on the second host" "$summary"
 
-# --- a turn that begins with no client at all. `start` needs something to run it; a schedule does
-# not, so the session is created by the workflow rather than by whoever asked for it.
+# --- a turn started by a schedule, with no client running.
 $COMPOSE run --rm -T client schedule \
   "Use the bash tool to run: echo SCHEDULED-RUN. Then report it." --every=30s --id=check-nightly \
   >/dev/null 2>&1
@@ -138,8 +129,7 @@ done
   || bad "a schedule started a session with no client running"
 
 if [ -n "$scheduled" ]; then
-  # The id has to come back through the same door a client-started one does, or the only sessions
-  # anyone can see are the ones a client started.
+  # A scheduled session must show up in `running` like a client-started one.
   sid="${scheduled#pi-session-}"
   listed=$($COMPOSE run --rm -T client running 2>/dev/null | tr -d '\r')
   case "$listed" in
@@ -147,8 +137,7 @@ if [ -n "$scheduled" ]; then
     *) bad "the scheduled session is listed like any other" "$listed" ;;
   esac
   followed=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
-  # The tool's own result line. `watch` prints the prompt back verbatim, and the prompt contains
-  # the sentinel, so matching it anywhere passes whether or not anything ran.
+  # Match the tool result line. The prompt also contains the sentinel and `watch` echoes it.
   case "$followed" in
     *"tool result: SCHEDULED-RUN"*) ok "its turn ran, with nothing but the schedule to start it" ;;
     *) bad "its turn ran" "$(printf '%s' "$followed" | tail -2)" ;;

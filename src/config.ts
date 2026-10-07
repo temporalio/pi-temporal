@@ -1,14 +1,7 @@
-// Temporal + Pi wiring, read from env. Nothing here is read at module load by the workflow
-// (workflow code must stay deterministic); the client and worker read it.
-//
-// Two deployments, not a dozen knobs. `PI_TEMPORAL_PROFILE` picks one and the settings that go
-// with it follow, because they are not independent: a fleet whose session directory is not shared,
-// or whose project files do not travel, answers with the wrong files rather than failing.
-//
-// What a profile cannot do is check the fleet. `preflight` reads this process's own configuration
-// and refuses what one process can be refused for, before it accepts work rather than after, and
-// `pi-temporal doctor` prints what this process resolved. That the storage is really shared, that
-// placement is what you think, and that the other hosts agree are the operator's to verify.
+// Configuration from env, read by the client and worker. Workflow code must never import this.
+// `PI_TEMPORAL_PROFILE` (`local` or `fleet`) sets defaults that go together. A misconfigured fleet
+// serves the wrong files instead of failing, so `preflight` refuses what one process can detect.
+// Whether storage is really shared across hosts is for the operator to verify.
 
 import { readFileSync } from "node:fs";
 import type { TurnBudget } from "./protocol.js";
@@ -20,31 +13,26 @@ export interface Config {
   readonly address: string;
   readonly namespace: string;
   readonly taskQueue: string;
-  // Directory where each session's JSONL log lives. Shared storage in a fleet: it is the record,
-  // and a worker that cannot reach it cannot serve the session at all.
+  // Where each session's JSONL log lives. Must be shared storage in a fleet.
   readonly sessionDir: string;
   readonly idleTimeout: string;
   // One activity per model call, per tool call, and a seal, instead of one for the whole step.
   readonly stepped: boolean;
-  // Ship the project's files with the session, so a worker on another machine finds the work the
-  // last one did. On a laptop the tools already run in the directory you meant, and shipping it
-  // there is disk spent on a problem that host does not have.
+  // Ship the project's files with the session, so a worker on another host sees the last one's
+  // work. Not needed on a single machine.
   readonly shipTree: boolean;
-  // How a server that is not the dev server is reached. An API key is what Temporal Cloud takes; a
-  // certificate pair is what a self-hosted cluster with mTLS takes. Both are read from files rather
-  // than carried as values, so what `describe` prints is the path and never the secret.
+  // API key for Temporal Cloud, or a certificate pair for mTLS. Never printed by `describe`.
   readonly apiKey?: string;
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
   // How long one tool call may run in stepped mode. Unset keeps the workflow's default.
   readonly toolTimeoutMinutes?: number;
-  // What a turn and a session may spend before the workflow stops driving them. Unset is no bound.
+  // Spend limits for a turn and a session. Unset means no limit.
   readonly budget?: TurnBudget;
 }
 
 const read = (path: string | undefined) => (path ? readFileSync(path, "utf8") : undefined);
 
-// Set explicitly by an operator, as opposed to a default this file invented. The difference decides
-// whether a fleet is configured or only looks configured.
+// Set explicitly by the operator, not defaulted here. `preflight` needs the difference.
 const given = (name: string) => process.env[name] !== undefined && process.env[name] !== "";
 
 const onOff = (name: string, fallback: boolean) =>
@@ -62,13 +50,11 @@ export function fromEnv(): Config {
     taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
     sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
     idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
-    // The unit of work a fleet wants is the smaller one: a worker dying takes one tool call with it
-    // rather than a whole step, and a tool call is where the retry policy and the approval belong.
+    // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
     toolTimeoutMinutes: minutesFromEnv("PI_TEMPORAL_TOOL_TIMEOUT_MINUTES"),
     budget: budgetFromEnv(),
-    // In a fleet the files have to travel or a worker runs the tools against a directory that is
-    // not the project and tells the model those files are it.
+    // In a fleet the files must travel, or tools run against the wrong directory.
     shipTree: onOff("PI_TEMPORAL_SHIP_TREE", fleet),
     apiKey: process.env.PI_TEMPORAL_API_KEY ?? read(process.env.PI_TEMPORAL_API_KEY_FILE),
     tls:
@@ -138,27 +124,18 @@ export function preflight(cfg: Config): string[] {
   return problems;
 }
 
-// The writer markers and the closed-step fence exist only on the stepped path: a whole step never
-// says which calls are inside their own execution, so a timed-out attempt's tool can keep writing a
-// directory a later restore brings back to the tip, and the next capture ships what it wrote with
-// nothing to refuse it.
+// Only the stepped path fences off a timed-out tool that keeps writing. With whole steps, its late
+// writes could be captured and shipped.
 export const SHIP_TREE_NEEDS_STEPS =
   "PI_TEMPORAL_SHIP_TREE=1 needs PI_TEMPORAL_STEPPED=1: only the stepped path keeps the " +
   "writer markers and dispatch claims that fence a tool its activity stopped waiting for";
 
-/**
- * What a client can be refused for from its own environment. `stepped` rides the session's input
- * from whoever starts it, so a client that would start a whole-step session for shipping workers
- * finds out here rather than on the first activity.
- */
+/** Client-side checks. `stepped` comes from whoever starts the session, so check it here. */
 export function clientProblems(cfg: Config): string[] {
   return cfg.shipTree && !cfg.stepped ? [SHIP_TREE_NEEDS_STEPS] : [];
 }
 
-/**
- * The model provider's key, from the environment or from a file, the way the scripts take it. Each
- * provider reads its own variables, so a worker for one never sends the other's key.
- */
+/** The model provider's key, from `<PROVIDER>_API_KEY` or `<PROVIDER>_API_KEY_FILE`. */
 export function modelApiKey(
   provider = process.env.PI_TEMPORAL_PROVIDER ?? "openai",
 ): string | undefined {
@@ -205,15 +182,14 @@ function wholeFromEnv(name: string, unit: string): number | undefined {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return undefined;
   const value = Number(raw);
-  // A typo here would otherwise become a bound nobody asked for, or none at all.
+  // Reject typos instead of silently setting the wrong bound.
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error(`${name} must be a whole number of ${unit}, got ${JSON.stringify(raw)}`);
   }
   return value;
 }
 
-// Read where a session starts and carried in its options, because the workflow may not read the
-// environment. Each bound is separate, and none is set unless an operator sets it.
+// Read where a session starts and passed in its options, since workflows can't read env.
 function budgetFromEnv(): TurnBudget | undefined {
   const budget: TurnBudget = {
     tokens: wholeFromEnv("PI_TEMPORAL_BUDGET_TOKENS", "tokens"),

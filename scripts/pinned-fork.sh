@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Sourced, not run. Defines `pinned_fork`, which refuses to go on unless `.fork/pi` is the commit
-# fork.pin names with nothing changed in it. Run from the repository root.
-#
-# The fork the image is built from, at the commit this driver pins. The image is rebuilt every run,
-# so it always carries whatever `.fork/pi` holds, and what that holds is whatever `setup-fork.sh`
-# last put there. A checkout left on an older commit builds an image that passes for current.
+# Sourced, not run, from the repository root. `pinned_fork` exits unless `.fork/pi` is a clean
+# checkout of the commit in fork.pin. Images are built from `.fork/pi`, so a stale checkout would
+# build a stale image that looks current.
 pinned_fork() {
   # shellcheck disable=SC1091
   . ./fork.pin

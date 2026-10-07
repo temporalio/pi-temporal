@@ -1,15 +1,8 @@
-// A writer that stopped is not a writer that stopped writing. Worker A is frozen (SIGSTOP) inside
-// a model call while it holds the session lock. Its heartbeat stops, Temporal gives the attempt to
-// worker B, and B reclaims the lock once A's claim has aged out and finishes the turn. Then A is
-// let go, and the append its model call ends with arrives after all of B's work. The session's
-// write guard has to refuse that append, the file has to stay exactly as B left it, and B's
-// answer has to stand.
+// Checks that the session write guard fences off a writer that lost its lock. SIGSTOPs worker A
+// inside a model call, lets worker B reclaim the lock and finish the turn, then SIGCONTs A.
+// Asserts A's late append is refused and the file stays exactly as B left it.
 //
-// The real activities over a real `AgentSession` with a scripted model (`faux-worker.mts`), each
-// worker in a process of its own so one can be stopped without the other.
-//
-// Needs a Temporal server (TEMPORAL_ADDRESS, default 127.0.0.1:7233) and no model key. It waits
-// out the activity heartbeat and the lock's stale window, so it takes a minute or two.
+// Uses `faux-worker.mts` processes. Needs a Temporal server, no model key, and a minute or two.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -81,7 +74,6 @@ async function main() {
       signalArgs: [{ promptId: `${queue}-prompt`, text: `run the probe ${SCENARIO.pauseModel}` }],
     });
 
-    // Frozen inside the model call, with the lock held and the prompt already written.
     await until(
       "worker A to enter its model call",
       () => existsSync(files(dir).modelPausePoint),
@@ -113,7 +105,7 @@ async function main() {
     );
     const leftByB = readFileSync(file, "utf8");
 
-    // Let A go. Its call finishes and its stream ends in an append, minutes after its lease.
+    // A's model call now ends in an append, long after its lease.
     a.kill("SIGCONT");
     await until(
       "worker A's late write to be refused",

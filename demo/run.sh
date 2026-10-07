@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# The chaos demo, in one command: one task, three workers in Docker, and a loop that kills a worker
-# every so often until the task is done. The task does not restart when its worker dies. Temporal
-# hands the step that was running to another worker, the project's files travel with the session,
-# and the turn finishes on whichever workers are left.
+# The chaos demo: one task, three Docker workers, and a loop that kills workers until the task is
+# done. Temporal hands each interrupted step to another worker, and the project travels with the
+# session, so the turn finishes without restarting.
 #
 # Usage: demo/run.sh   (with ANTHROPIC_API_KEY or ANTHROPIC_API_KEY_FILE set; see demo/README.md)
 
@@ -53,7 +52,7 @@ if [ -z "${!key_var:-}" ]; then
   key_file="${!file_var:-}"
   [ -n "$key_file" ] && [ -f "$key_file" ] \
     || die "set $key_var, or $file_var to a file holding one: the workers need a model key"
-  # Read into the environment and passed to containers by name, so it is never on a command line.
+  # Passed to containers by name, so the key never appears on a command line.
   export "$key_var"="$(tr -d '[:space:]' < "$key_file")"
 fi
 [ -n "${!key_var}" ] || die "$key_var is empty"
@@ -104,8 +103,7 @@ done
 docker exec "$name-temporal" temporal operator cluster health --address 127.0.0.1:7233 \
   >/dev/null 2>&1 || die "the Temporal server never became healthy"
 
-# The settings a fleet runs with: the smaller unit of work, the project travelling with the
-# session, and one session directory every worker reaches.
+# Fleet settings, with one shared session directory.
 common_env=(
   -e "TEMPORAL_ADDRESS=$name-temporal:7233"
   -e PI_TEMPORAL_PROFILE=fleet
@@ -122,10 +120,8 @@ start_worker() {
     -v "$sessions:/sessions" "${common_env[@]}" "$image" >/dev/null
 }
 
-# A killed worker comes back as a new container under the same name and hostname, a replacement
-# host, which is what a crash that takes the machine looks like. With DEMO_RESTART_MODE=start it is
-# the same container started again, as a restart policy would: the same pid, the same filesystem,
-# and whatever the killed process left in it, including the marker of the call it was inside.
+# By default a killed worker returns as a new container with the same name and hostname. With
+# DEMO_RESTART_MODE=start the same container restarts, keeping its pid, filesystem and markers.
 bring_back() {
   if [ "$restart_mode" = start ]; then
     docker start "$name-worker-$1" >/dev/null
@@ -141,8 +137,7 @@ for i in $(seq 1 "$workers"); do
   start_worker "$i" || die "worker-$i did not start"
 done
 
-# A client with its own copy of the project, which is what it sends. It reaches the session only
-# through Temporal and the shared directory, the way any client would.
+# A client with its own copy of the project, which it sends with the task.
 client() {
   docker run --rm --network "$net" -v "$sessions:/sessions" \
     -v "$PWD/$logs/project:/project" "${common_env[@]}" \
@@ -151,7 +146,7 @@ client() {
 
 # --- the task ----------------------------------------------------------------------------------
 
-# Several steps, three of them slow, so a kill lands in the middle of work rather than between it.
+# Three slow steps, so kills land mid-work.
 task="Work in the current directory. Use the bash tool, one command per step, in this order. \
 1) Write a Node.js program primes.js that prints the first 25 prime numbers, one per line. \
 2) Run: sleep 30 && node primes.js > primes.txt \
@@ -165,7 +160,6 @@ client start "$task" --session="$session" --project=/project > "$logs/start.log"
   || die "the task was not accepted; see $logs/start.log"
 started_at="$(date +%s)"
 
-# What the session is doing, as the CLI follows it.
 client watch "$session" > "$logs/watch.log" 2>&1 &
 background+=("$!")
 tail -n +1 -F "$logs/watch.log" 2>/dev/null | sed -u 's/^/          | /' &
@@ -178,8 +172,7 @@ history_json() {
     --address 127.0.0.1:7233 -w "pi-session-$session" -o json 2>/dev/null
 }
 
-# Which worker ran each activity attempt, read off the workflow's history: the identity Temporal
-# records for a started attempt is the worker's pid and hostname.
+# Which worker ran each activity attempt, from history. The identity is `pid@hostname`.
 attempts() {
   history_json | python3 -c '
 import json, sys
@@ -205,14 +198,14 @@ if mode == "hosts":
 elif mode == "done":
     print(sum(1 for e in events if e.get("activityTaskCompletedEventAttributes")))
 elif mode == "lost":
-    # An attempt whose worker died ends in a timeout, and the turn goes on without it.
+    # An attempt whose worker died ends in a timeout.
     keys = ("activityTaskTimedOutEventAttributes", "activityTaskFailedEventAttributes")
     print(sum(1 for e in events if any(e.get(k) for k in keys)))
 ' "$1"
 }
 
-# What is running right now: the pending activities, with the attempt each is on and the worker
-# that last picked it up. History only records an attempt once it ends, so it lags behind this.
+# Pending activities with their attempt and last worker. History lags, since it records an
+# attempt only once it ends.
 running() {
   docker exec "$name-temporal" temporal workflow describe \
     --address 127.0.0.1:7233 -w "pi-session-$session" -o json 2>/dev/null | python3 -c '
@@ -261,14 +254,12 @@ chaos() {
   local done_at_kill=-1
   while :; do
     sleep $((kill_min + RANDOM % (kill_max - kill_min + 1)))
-    # Not again until something has finished since the last kill. Recovering a step takes a
-    # heartbeat timeout and the session lock's stale window, and a loop that kills faster than
-    # that only ever shows a turn that cannot move.
+    # Wait for progress since the last kill. Recovery takes a heartbeat timeout plus the lock's
+    # stale window, so faster kills would stall the turn.
     local done_now
     done_now="$(attempts done)"
     [ "${done_now:-0}" -gt "$done_at_kill" ] || continue
-    # Mostly the worker running the latest attempt, so the kill lands on work in progress and the
-    # handover is there to see. Sometimes any worker, the way a host dies without asking.
+    # Usually kill the worker running the current attempt, sometimes a random one.
     local victim
     victim="$(running host)"
     victim="${victim#worker-}"
@@ -327,8 +318,7 @@ if [ -n "$answer" ]; then
   printf '%s\n' "$answer" | sed 's/^/  /'
 fi
 
-# The file is on whichever workers restored the session's latest tree. The last one to run a step
-# has it, and a restarted container keeps its directory.
+# result.txt is on any worker that restored the latest tree.
 for i in $(seq 1 "$workers"); do
   if docker exec "$name-worker-$i" test -f /project/result.txt 2>/dev/null; then
     echo "result.txt, as worker-$i holds it:"

@@ -1,7 +1,5 @@
-// The standalone worker: hosts the piSession workflow and the runStep activity. Run one or many;
-// they pull the same task queue, so any worker can drive any session from the shared session
-// directory. The pi extension runs the same worker inside pi (see src/session-worker.ts); this
-// one is for a fleet, or for keeping tasks moving with no pi open.
+// The standalone worker process. Run one or many on the same task queue, and any of them can drive
+// any session from the shared session directory. The pi extension runs the same worker in-process.
 
 import { connectionOptions, describe, fromEnv, modelApiKey, notes, preflight } from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
@@ -12,10 +10,8 @@ async function main() {
   const projectDir = process.env.PI_PROJECT_DIR ?? process.cwd();
 
   for (const note of notes(cfg)) console.log(`  note: ${note}`);
-  // Said here rather than in `preflight`, because it is about this worker's own filesystem and not
-  // about its configuration. A directory that cannot be moved out of the way is one a tool call
-  // that never comes back takes out of service until somebody clears it by hand; one that can be
-  // moved costs nothing and strands nothing.
+  // A project directory that can't be moved aside stays blocked after a lost tool call until it's
+  // cleared by hand. This is about the local filesystem, so it's not in `preflight`.
   if (cfg.shipTree) {
     const stuck = await worktree.cannotMoveAside(projectDir);
     if (stuck) {
@@ -27,10 +23,8 @@ async function main() {
     }
   }
   const problems = preflight(cfg);
-  // The worker's own check rather than `preflight`'s: `PI_PROJECT_DIR` is read here, and a client
-  // has no use for it. The fallback is this process's working directory, which is a different
-  // directory on every worker, so with the tree on it is either refused on every restore (it holds
-  // files no session shipped) or quietly adopted as a managed project directory.
+  // Not in `preflight` because only the worker reads `PI_PROJECT_DIR`. The cwd fallback differs per
+  // worker, so a fleet would restore trees into unrelated directories.
   if (cfg.profile === "fleet" && !process.env.PI_PROJECT_DIR) {
     problems.push(
       "the fleet profile needs an explicit PI_PROJECT_DIR: the fallback is this worker's own " +
@@ -38,13 +32,10 @@ async function main() {
     );
   }
   for (const problem of problems) console.error(`configuration: ${problem}`);
-  // A worker that starts anyway is one that accepts work it cannot do, and the failure lands on
-  // whoever prompted it rather than on whoever deployed it.
+  // Fail at deploy time, not on the first prompt.
   if (problems.length > 0) process.exit(1);
 
-  // Directories this host held for sessions that have since finished. The lazy path frees one when
-  // another session wants that same directory, which is enough to keep serving and not enough to
-  // keep tidy.
+  // Hand back directories held for finished sessions. Otherwise they're only freed lazily.
   if (cfg.shipTree) {
     const freed = await worktree.sweep().catch(() => 0);
     if (freed > 0) console.log(`  handed back ${freed} directories held for finished sessions`);

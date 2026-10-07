@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One command from a fresh clone to a working checkout: dependencies, the pinned Pi fork, and a
-# typecheck to prove the two agree. Safe to run again after a pull; the fork is only refetched
-# when fork.pin moves.
+# Installs dependencies and the pinned Pi fork, then typechecks. Safe to re-run. The fork is
+# refetched only when fork.pin changes.
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 

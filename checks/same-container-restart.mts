@@ -1,19 +1,14 @@
-// One half of docker/restart-check.sh, run as a container's main process, so it is pid 1 on every
-// boot of that container. Not a check on its own, which is why it is not named like one: the
-// question it answers only exists when the same container is started again.
-//
-// First boot: establish a project, say a tool call is inside it, and stay there until killed.
-// Second boot: ask for the directory the way a later step would. The marker names pid 1, which is
-// running again, on the same boot, in the same groups, with the same environment, and it is this
-// process. The directory has to come back rather than stay refused.
+// Container entrypoint for `docker/restart-check.sh`, so it runs as pid 1 on every boot. Checks
+// that a writer marker left by pid 1 before a kill does not refuse the project after a restart.
+// First boot marks a tool call and hangs. Second boot runs `ensure` and asserts it gets the
+// directory back without moving it aside.
 
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as worktree from "../src/worktree.js";
 
-// The project is a volume, as in a fleet, so it cannot be moved aside: a directory left refused
-// stays refused, which is the failure this exists to catch.
+// The project is a volume, so it cannot be moved aside. A refused directory stays refused.
 const work = "/work";
 const project = "/project";
 const sessionFile = join(work, "sessions", "restart.jsonl");
@@ -26,7 +21,6 @@ async function firstBoot() {
   await worktree.beginWrite(project, { turn: "turn-1", step: 1, callId: "in-flight" });
   await writeFile(phase, `marked by pid ${process.pid}\n`);
   console.log(`MARKED pid ${process.pid}`);
-  // Inside the tool call, until the container is killed.
   setInterval(() => {}, 1_000);
 }
 

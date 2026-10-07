@@ -1,13 +1,8 @@
-// Proves the claim a worker-owned session is supposed to make: it belongs to the deployment, not to
-// the process that started it and not to the worker that happened to pick it up.
+// Checks that a session outlives both its client and its worker. A client starts a task and
+// exits, worker A is SIGKILLed with a tool in flight, and worker B finishes the turn. Asserts the
+// turn is answered, the tool is reported unknown and never rerun by the harness.
 //
-//   1. a client hands over a task and exits, holding nothing
-//   2. worker A starts the turn, then A is killed with a tool still running
-//   3. worker B, which never saw this session, finishes it
-//   4. `running` and `watch` work from a process that is only ever a client, across the handover
-//
-// Needs a Temporal dev server, the fork build, and a model key. It is evidence rather than a unit
-// test: none of this shows up inside one process.
+// Needs a Temporal dev server and a model key.
 //
 // Usage: OPENAI_API_KEY=... npx tsx checks/detached-check.mts
 
@@ -17,7 +12,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Beside this file rather than the working directory, so the check runs from anywhere.
 const source = (path: string) => fileURLToPath(new URL(`../src/${path}`, import.meta.url));
 
 const failures: string[] = [];
@@ -31,10 +25,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const kids: ChildProcess[] = [];
 
-// A worker as ONE process. Going through `npx` gives npx -> tsx -> node, where only the last one
-// polls, so the handle points at a wrapper and killing it orphans the poller: the turn carries on
-// and a check that means to prove a handover proves nothing instead. `node --import tsx` is the
-// same worker with nothing in front of it.
+// One process, not `npx` -> `tsx` -> node. Killing a wrapper would orphan the poller.
 function worker(env: NodeJS.ProcessEnv) {
   const child = spawn(process.execPath, ["--import", "tsx", source("worker.ts")], {
     env: { ...process.env, ...env },
@@ -54,10 +45,7 @@ function killGroup(child: ChildProcess) {
   }
 }
 
-// Every process in the worker's chain, because `npx` spawns `tsx` spawns node and only the last one
-// polls. A narrower pattern matches the two wrappers and misses the poller, so killing what it
-// returns orphans the very process the kill was for. Run without a shell, because a shell wrapper's
-// own command line contains the pattern and would count itself.
+// Every process whose command line names the worker. Run without a shell, which would match too.
 async function workerPids(): Promise<number[]> {
   const found = await run("pgrep", ["-f", "worker\\.ts"], {});
   return found.out
@@ -75,9 +63,7 @@ const alive = (pid: number) => {
   }
 };
 
-// Kill a worker and wait for the OS to agree it is gone. Anything less and the next step races a
-// process that is still holding the turn, which is the difference between proving a handover and
-// proving nothing.
+// Kill a worker and wait until the OS agrees it is gone, so nothing of it can finish the turn.
 async function killWorker(child: ChildProcess, pids: number[]) {
   killGroup(child);
   for (const pid of pids) {
@@ -94,10 +80,7 @@ async function killWorker(child: ChildProcess, pids: number[]) {
   return false;
 }
 
-// Bounded, because the interesting failure of a follower is that it never returns, and a check that
-// hangs reports nothing at all.
-// The CLI as one process, for the same reason the worker is: a timeout that kills `npx` leaves the
-// node process underneath it running and holding the pipes, so the bound never takes effect.
+// The CLI as one process too, so a timeout kill actually ends it.
 const cli = (args: string[]) => ({
   cmd: process.execPath,
   args: ["--import", "tsx", source("cli.ts"), ...args],
@@ -127,15 +110,8 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs?
 async function main() {
   if (!process.env.OPENAI_API_KEY) throw new Error("set OPENAI_API_KEY");
   const sessions = await mkdtemp(join(tmpdir(), "pi-l3-"));
-  // A side effect we can count. A second execution records no second result, because the retry
-  // throws it away, so the transcript cannot tell "did not run again" from "ran again and the
-  // result was dropped". This can. It is the `git push` case in one line.
-  //
-  // The write comes before the sleep, not after it. With the sleep first, the kill below takes the
-  // whole process group and the tool never reaches the write, so the file is empty however the
-  // handover goes and the count proves nothing. This way the effect has already happened when the
-  // worker dies, which is the case worth asserting: the tool ran, nothing recorded it, and the
-  // takeover must not run it again.
+  // Counts tool executions, which the transcript cannot. The write comes before the sleep, so the
+  // effect has happened when the worker dies and the takeover must not repeat it.
   const ranFile = join(sessions, "ran.txt");
   const env = {
     TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7241",
@@ -165,19 +141,15 @@ async function main() {
   );
   const sessionId = started.out.trim().split("\n")[0];
   check("start returned a session id", /^task-/.test(sessionId), started.out + started.err);
-  // The point of a detached start: the client is gone long before the turn is.
   check("start did not wait for the turn", Date.now() - began < 20_000, `${Date.now() - began}ms`);
 
-  // Wait for the tool to actually be in flight, rather than for a duration. A fixed sleep plus a
-  // command that takes its own time is how the kill ends up landing after the turn already
-  // finished, and then the handover this is meant to prove never happens.
+  // Wait for the tool to be in flight, not for a fixed time, or the kill may land after the turn.
   const sessionLog = join(sessions, `${sessionId}.jsonl`);
   let toolInFlight = false;
   for (let i = 0; i < 60 && !toolInFlight; i++) {
     const log = await readFile(sessionLog, "utf8").catch(() => "");
     const dispatched = log.includes('"toolCall"') && !log.includes('"toolResult"');
-    // And the effect has landed. Killing between the dispatch and the write leaves nothing to
-    // count, and the assertion at the end would then pass for the wrong reason.
+    // Also wait for the effect, or the final count would pass for the wrong reason.
     const effected = (await readFile(ranFile, "utf8").catch(() => "")).includes("HANDOVER");
     toolInFlight = dispatched && effected;
     if (!toolInFlight) await sleep(1_000);
@@ -187,11 +159,7 @@ async function main() {
   // --- 2. kill the worker that is holding the turn
   const killedAt = Date.now();
   const died = await killWorker(workerA, workerA.pid ? [workerA.pid] : []);
-  // Asked of the OS by pattern, not only of the pid we hold: the whole point of the next step is
-  // that nothing of worker A is left that could finish this turn itself.
-  //
-  // Waited for rather than sampled. A process that has been signalled is listed until it is reaped,
-  // and a single reading catches one on its way out and calls it a survivor.
+  // Poll by pattern until reaped. A killed process stays listed until then.
   let left = await workerPids();
   for (let i = 0; i < 40 && left.some((pid) => !idle.includes(pid)); i++) {
     await sleep(250);
@@ -203,8 +171,7 @@ async function main() {
   // --- 3. a worker that never saw this session picks the step up
   worker(env);
 
-  // Listing is not on the critical path, so it goes after the kill where its own latency cannot
-  // push the kill past the end of the turn.
+  // After the kill, so its latency cannot push the kill past the end of the turn.
   const listed = await run(cli(["running"]).cmd, cli(["running"]).args, env, 90_000);
   check("running lists it", listed.out.includes(sessionId), listed.out + listed.err);
 
@@ -216,11 +183,8 @@ async function main() {
     300_000,
   );
   check("watch returned rather than hanging", !watched.timedOut, watched.out.slice(-200));
-  // The step that lost its host is closed, and the turn goes on from there. What is not moved is
-  // the step: the attempt started, so nothing can say the tool stopped, and a sixth review
-  // reproduced what moving the rest of a started batch costs (`migration-rejoin-check.mts` is that
-  // reproduction). The next step is a fresh model call on whatever worker is free, made from a
-  // transcript that says which call has an outcome nobody can vouch for.
+  // The lost step is closed, not migrated (see `migration-rejoin-check.mts`). The next step is a
+  // fresh model call on any free worker.
   check(
     "the turn is answered rather than dying with the worker",
     /answered/.test(watched.err),
@@ -242,9 +206,7 @@ async function main() {
     })
     .filter((e): e is NonNullable<typeof e> => e !== undefined);
 
-  // The step still closes, on a worker that never ran it. That is the recovery seal: it records
-  // what the step had and does not touch the project, so the results of a call that finished are
-  // not thrown away with the host that ran it.
+  // The recovery seal closes the step on a worker that never ran it, keeping finished results.
   const sealedAfterKill = entries.some(
     (e) => e.message?.role === "toolResult" && Date.parse(e.timestamp ?? "") > killedAt,
   );
@@ -258,20 +220,14 @@ async function main() {
   const results = entries
     .filter((e) => e.message?.role === "toolResult")
     .map((e) => text(e.message?.content));
-  // Every block the model asked for that would append to the file, whichever step asked for it. A
-  // turn that carries on can ask again, and that is the model's call to make on an outcome it was
-  // told nobody can vouch for. What it must never be is the harness running one twice.
+  // Every tool call that appends to the file. The model may ask again after an unknown outcome.
   const asked = entries
     .filter((e) => e.message?.role === "assistant" && Array.isArray(e.message.content))
     .flatMap((e) => e.message!.content as { type?: string }[])
     .filter((b) => b?.type === "toolCall" && text(b).includes("HANDOVER"));
-  // The dispatch died between starting the tool and recording its result, which is exactly the case
-  // a coding agent must not guess at: `sleep 45 && echo` is harmless, but `git push` is not.
   check("a tool that may have run is reported unknown", /unknown/i.test(results[0] ?? ""), results);
   const ran = (await readFile(ranFile, "utf8").catch(() => "")).split("\n").filter(Boolean);
-  // The file counts executions. One line per time the model asked, and never one per worker: the
-  // dispatch that was interrupted is reported, not retried, which is the whole thing this level
-  // promises. A second line means the model asked again after being told the first was unknown.
+  // One line per model request, never one per worker. The harness must not retry the dispatch.
   check("the tool ran once for each time the model asked", ran.length === asked.length, {
     ran,
     asked: asked.length,

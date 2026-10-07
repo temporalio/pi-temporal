@@ -1,3 +1,7 @@
+// Checks `piSession` startup and pinned dispatch against a live Temporal server. Interrupts during
+// adoption and asserts no model call runs. Fails a pinned tool attempt and asserts it is neither
+// retried nor moved to the shared queue.
+
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";

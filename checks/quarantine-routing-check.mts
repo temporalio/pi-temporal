@@ -1,13 +1,8 @@
-// A refused directory must cost that directory, not the session. The refusal stands for as long as
-// the host cannot show the writer is over, and here it cannot: the marker names a live process.
-// What must not follow is a session that cannot run anywhere.
+// Checks that a refused directory costs only that host, not the session. Two worker processes
+// share a queue, and one has a live writer marker so its directory is refused. Asserts the work
+// runs only on the other host and the turn is answered.
 //
-// Two workers on one queue, each standing in its own project directory, and in their own processes
-// because that is what two hosts are. One of them is refused. What is asserted is that the work
-// lands on the other one, never on the refused one, and that the turn is answered rather than
-// stranded with the directory.
-//
-// Needs a Temporal server; no model key. Usage: npx tsx checks/quarantine-routing-check.mts
+// Needs a Temporal server, no model key. Usage: npx tsx checks/quarantine-routing-check.mts
 
 import { appendFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -43,22 +38,18 @@ async function main() {
 
   const hosts = { refused: join(root, "host-refused"), free: join(root, "host-free") };
   await mkdir(hosts.refused, { recursive: true });
-  // The second host is an empty directory, which is what a worker that has never served this
-  // session has. A directory holding files the session never shipped is somebody's checkout, and
-  // the store refuses that on purpose.
+  // Empty, like a fresh worker. A non-empty unknown directory would be refused as a checkout.
   await mkdir(hosts.free, { recursive: true });
   await run("git", ["init", "-q", hosts.refused]);
   await writeFile(join(hosts.refused, "README.md"), "one\n");
   await worktree.capture(hosts.refused, sessionFile, { seed: true });
 
-  // A tool call from an earlier turn that never came back, on the first host only.
+  // An earlier tool call that never returned, on the refused host only.
   await worktree.beginWrite(hosts.refused, { turn: "earlier", step: 1, callId: "never-returned" });
 
   const ranOn: string[] = [];
-  // Enough of a session for the real activity: recording a prompt has to leave it in the messages,
-  // because that is what the activity reads to decide whether this turn has started. One transcript
-  // per process, standing in for the session file each activity reopens, so the seal finds what
-  // the model call on the same host wrote.
+  // A minimal session for the real activity. The prompt must land in `messages`, since the activity
+  // reads that to tell if the turn started. One transcript per process stands in for the file.
   const fakeSession = `() => {
     const messages = (globalThis.__fakeTranscript ??= []);
     return {
@@ -83,14 +74,12 @@ async function main() {
   const native = await NativeConnection.connect({ address });
   const client = new Client({ connection, namespace: "default" });
 
-  // This process is the refused host, and it carries the workflows.
+  // This process is the refused host and also runs the workflows.
   const refused = await Worker.create({
     connection: native,
     namespace: "default",
     taskQueue: queue,
-    // Off, or this worker hands every activity it schedules straight back to itself and the other
-    // host never gets a look. A fleet has that on and more than one candidate; here it would only
-    // hide what is being measured.
+    // Eager dispatch would hand every activity back to this worker and hide the routing.
     maxEagerActivityReservationsPerWorkflowTask: 0,
     workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
     activities: makeActivities(
@@ -105,9 +94,8 @@ async function main() {
     ),
   });
 
-  // The other host is another process, polling the same queue for activities only.
-  // Beside this file, not in the temporary root: Node resolves a module's imports from where the
-  // file is, so a worker written into /tmp cannot find the SDK.
+  // The free host, an activity-only worker in a child process. Written beside this file, since a
+  // module in /tmp cannot resolve the SDK.
   const helper = fileURLToPath(new URL("./.free-host-worker.tmp.mts", import.meta.url));
   await writeFile(
     helper,
@@ -150,15 +138,14 @@ async function main() {
     const handle = await client.workflow.start("piSession", {
       workflowId: `${queue}-session`,
       taskQueue: queue,
-      // Stepped, because a worker that ships the tree refuses a whole-step session outright.
+      // A worker that ships the tree refuses whole-step sessions.
       args: ["routing", sessionFile, {
         idleTimeout: "100 milliseconds",
         stepped: true,
         initialPrompt: { promptId: "routing", text: "run" },
       } as never],
     });
-    // Long enough for the refusal, its backoff, and a redispatch. What is being watched is where
-    // the work goes and whether the turn gets its answer, not how fast either happens.
+    // Long enough for the refusal, its backoff, and a redispatch.
     const started = Date.now();
     const deadline = started + 120_000;
     let finished: TurnState["finished"];
@@ -172,14 +159,10 @@ async function main() {
     console.log(`the turn settled after ${Math.round((Date.now() - started) / 1000)}s`);
     await handle.terminate().catch(() => undefined);
 
-    // The refusal is an ordinary failure, so Temporal schedules the work again and any worker can
-    // take it. A permanent one would have ended the turn with the directory.
+    // The refusal is retryable, so any other worker can take the work.
     check("the work reaches a host that is not refused", ranOn.includes("free"), ranOn);
     check("and never runs on the refused one", !ranOn.includes("refused"), ranOn);
-    // And the turn is answered, rather than merely dispatched somewhere. What this fixture cannot
-    // say is what the answer was made of: its session is in memory, so nothing an activity records
-    // survives it. A turn finishing on a worker that never saw the session, against a real
-    // transcript, is `detached-check.mts`.
+    // The session here is in memory. `detached-check.mts` covers a real transcript.
     check("and the turn is answered", finished?.outcome === "answered", finished);
     check("by the host that took the work", finished?.finalText === "answered", finished);
   } finally {

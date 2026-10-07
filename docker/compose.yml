@@ -1,24 +1,18 @@
-# Two workers that share nothing but the cluster and the session directory, plus a client that is
-# only ever a client. On one host "another worker" is another process reading the same disk, which
-# proves less than it looks like: here each worker has its own filesystem, its own hostname, and no
-# way to reach the other except through Temporal and /sessions.
+# Two workers that share only the cluster and /sessions, plus a client. Each has its own
+# filesystem and hostname.
 #
 #   docker compose -f docker/compose.yml up -d temporal worker-a
 #   docker compose -f docker/compose.yml run --rm client start "..."
 #
-# /sessions is a local volume here, which answers the exclusive-create and atomic-rename questions
-# by construction. `NFS=1` puts it on a real NFSv4 server instead (docker/compose.nfs.yml), which is
-# the shape that tests them rather than assuming them.
+# /sessions is a local volume. `NFS=1` puts it on a real NFSv4 server (docker/compose.nfs.yml).
 
 name: pi-temporal-l3
 
 services:
-  # The dev server, not auto-setup: this needs no external database, and nothing here outlives the
-  # run. --ip 0.0.0.0 because the other containers reach it by service name.
+  # The dev server. `--ip 0.0.0.0` so other containers reach it by service name.
   temporal:
     image: temporalio/admin-tools:1.29
-    # The image's own entrypoint is `sleep infinity`, so a command alone becomes arguments to sleep
-    # and the server never runs.
+    # The image's entrypoint is `sleep infinity`, so override it.
     entrypoint: ["temporal"]
     command: ["server", "start-dev", "--ip", "0.0.0.0", "--log-level", "warn"]
     ports:
@@ -40,8 +34,7 @@ services:
       - PI_TEMPORAL_TASK_QUEUE=${PI_TEMPORAL_TASK_QUEUE:-pi-session}
       - PI_TEMPORAL_STEPPED=1
       - PI_TEMPORAL_SHIP_TREE=${PI_TEMPORAL_SHIP_TREE:-0}
-      # Where the tools run. Each worker gets its own, so a project only reaches a second host by
-      # travelling with the session.
+      # Not shared. A project reaches another worker only with the session.
       - PI_PROJECT_DIR=/project
       - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY}
     volumes:
@@ -50,15 +43,12 @@ services:
   worker-b:
     <<: *worker
 
-  # No worker inside it. It reaches the session through Temporal and the shared directory, which is
-  # the whole claim: a client needs an endpoint and an id, never a particular host.
+  # No worker. Reaches sessions through Temporal and /sessions only.
   client:
     <<: *worker
     entrypoint: ["node", "--import", "tsx", "src/cli.ts"]
     command: ["running"]
-    # Its own project, because with the tree on the client is what sends it. A client that has no
-    # project has nothing to send, and it used to send an empty tree that then became the project
-    # on every worker.
+    # Its own project, since with the tree on the client is what sends it.
     volumes:
       - sessions:/sessions
       - clientproject:/project

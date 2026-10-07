@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Every check that needs neither a model key nor Docker, one after another, against the server at
-# TEMPORAL_ADDRESS (default 127.0.0.1:7233). Exits non-zero if any fails, and prints the tail of
-# each failure's output. This is what CI runs, so a lock, claim or tree regression cannot merge
-# green just because nothing ran it.
-#
-# Needs `npm ci && npm run setup-fork` first, and a Temporal server (scripts/temporal-dev.sh).
+# Runs every check that needs no model key and no Docker, against TEMPORAL_ADDRESS (default
+# 127.0.0.1:7233). CI runs this. Prints the tail of each failure and exits non-zero if any fail.
+# Needs `npm ci && npm run setup-fork` and a Temporal server (scripts/temporal-dev.sh).
 
 set -uo pipefail
 

@@ -1,8 +1,8 @@
-// Checks the workflow that wraps a turn of a live pi session, with the turn itself faked: the
-// whole-turn mode hands the turn over once, and the stepped mode records the turn once and then
-// drives a model call, its calls and a seal per step.
+// Checks the local-turn workflow over a faked live pi turn. Asserts whole-turn mode runs it once,
+// stepped mode records the prompt once then runs model call, tools, seal per step, and a stop at
+// any point ends the turn without rerunning or re-recording anything.
 //
-// Needs a Temporal server; no model key and no pi session. Usage: tsx checks/local-turn-check.mts
+// Needs a Temporal server, no model key and no pi session. Usage: tsx checks/local-turn-check.mts
 
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -29,9 +29,8 @@ const check = (what: string, ok: boolean, detail: unknown) => {
 };
 
 /**
- * A turn that asks for two tools per step and answers on the last one. Two matters: the calls all
- * reach the one live agent this process holds, which admits a single unit of work at a time, so a
- * second call arriving while the first runs is refused.
+ * A turn that asks for two tools per step and answers on the last one. Two, because the live agent
+ * admits one unit of work at a time and the calls must not overlap.
  */
 function fakeTurn(options: { interruptAfter?: number; stopInFirstTool?: boolean } = {}) {
   const seen: string[] = [];
@@ -69,14 +68,14 @@ function fakeTurn(options: { interruptAfter?: number; stopInFirstTool?: boolean 
       },
       runToolCall: async (toolCallId) => {
         seen.push(`tool:${toolCallId}`);
-        // The user stops pi while this tool runs: the abort reaches it and it throws.
+        // The user stops pi while this tool runs, so it throws.
         if (options.stopInFirstTool && !stoppedInTool) {
           stoppedInTool = true;
           throw new Error("aborted");
         }
         inFlight++;
         if (inFlight > 1) overlapped = true;
-        // Long enough that a second call dispatched at the same time would be seen here.
+        // Long enough to see a concurrent second call.
         await new Promise((resolve) => setTimeout(resolve, 30));
         inFlight--;
         return unknownToolCallOutcome({ id: toolCallId, name: "probe" });
@@ -128,12 +127,10 @@ async function main() {
     return { seen, postRuns, didOverlap };
   };
 
-  // The whole turn is handed over once, and pi runs it the way it always did.
   const whole = await drive(false);
   const handed = JSON.stringify(whole.seen) === '["run"]';
   check("whole-turn: the turn is handed over once", handed, whole.seen);
 
-  // The stepped mode records the turn once, then one model call, its calls and a seal per step.
   const stepped = await drive(true);
   const expected = [
     "record",
@@ -156,19 +153,16 @@ async function main() {
     stepped.seen,
   );
   check("stepped: the turn was not also run whole", !stepped.seen.includes("run"), stepped.seen);
-  // The live agent admits one unit of work at a time. A second call arriving while the first runs
-  // is refused, and the step reports a tool that never ran as an unknown outcome.
+  // An overlapping call would be refused and reported as an unknown outcome.
   check("stepped: the calls of a step do not overlap", !stepped.didOverlap(), stepped.seen);
 
-  // An abort reaches the unit that is running and nothing else, so the loop has to stop asking.
+  // An abort reaches only the running unit, so the loop itself must stop.
   const stopped = await drive(true, { interruptAfter: 1 });
   check("stepped: an interrupt stops the loop", !stopped.seen.includes("model:2"), stopped.seen);
   const resealed = stopped.seen.includes("seal:2:0");
   check("stepped: an interrupted turn is not sealed again", !resealed, stopped.seen);
 
-  // A stop that lands inside a tool call. The call fails because of the stop, and that has to end
-  // the step as a stop: its sibling does not run, the step is sealed without the post-run pass,
-  // and the turn ends there rather than asking the model again.
+  // A stop inside a tool call ends the step as a stop, sealed without the post-run pass.
   const midTool = await drive(true, { stopInFirstTool: true });
   check(
     "stepped: a stop inside a tool call does not run its sibling",
@@ -187,16 +181,13 @@ async function main() {
     midTool.seen,
   );
 
-  // A stop between the executor being handed the turn and the first model call still has to leave
-  // the prompt somewhere. Dropped, the user's text is gone with no error to show for it.
+  // A stop before the first model call must still record the prompt, or the user's text is lost.
   const early = await drive(true, { interruptAfter: 0 });
   const kept = early.seen[0] === "record";
   check("stepped: a stop before the first call still records the prompt", kept, early.seen);
   check("stepped: and asks the model nothing", !early.seen.includes("model:1"), early.seen);
 
-  // Straight at the activities, because a retry of one is not something the workflow script can
-  // ask for. An interrupted model call whose answer never reached Temporal comes back, and what
-  // it must not do is record the turn's prompt a second time.
+  // Calls the activity twice directly to stand in for a retry. The prompt must be recorded once.
   {
     const turnId = randomUUID();
     const { turn, seen } = fakeTurn({ interruptAfter: 0 });
@@ -212,8 +203,7 @@ async function main() {
     check("a retried model call does not record the prompt twice", records === 1, seen);
   }
 
-  // A tool that throws once the user has stopped the turn must not be started again by a retry,
-  // because nothing kept says it ran.
+  // A tool that throws on a stopped turn must be non-retryable, since nothing records that it ran.
   {
     const turnId = randomUUID();
     const { turn } = fakeTurn({ interruptAfter: 0 });

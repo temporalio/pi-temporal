@@ -1,6 +1,6 @@
-// Checks the files a step keeps about its calls before it is sealed. These are the durability
-// primitives the whole "a call that already started is not silently repeated" claim rests on, and
-// they need no Temporal server and no model key.
+// Checks the `pending` dispatch notes and kept results that stop a started call from running
+// twice. Asserts claims are exclusive, scoped by turn and step, survive sweeps that drop results,
+// and that concurrent writers or odd prompt ids cannot corrupt them. No server needed.
 //
 // Usage: npx tsx checks/pending-check.mts
 
@@ -22,13 +22,11 @@ async function main() {
   const dir = await mkdtemp(join(tmpdir(), "pi-pending-"));
   const file = join(dir, "session.jsonl");
 
-  // The turn a call belongs to, which is the prompt's id. Two of them, because what a step keeps
-  // is scoped by both, and a turn numbers its steps from one again.
+  // Turn ids (prompt ids). Each turn numbers its steps from one.
   const t1 = "prompt-one";
   const t2 = "prompt-two";
 
-  // Nothing kept yet: a fresh dispatch has to look fresh, or a first attempt reports its own
-  // tool as an unknown outcome and never runs it.
+  // A fresh call must look fresh, or the first attempt reports it as unknown and never runs it.
   check(
     "an untouched call has no note",
     (await pending.wasDispatched(file, t1, 1, "c1")) === false,
@@ -41,7 +39,6 @@ async function main() {
   check("a first dispatch is admitted", (await pending.noteDispatch(file, t1, 1, "c1")) === true);
   check("a dispatch leaves a note", (await pending.wasDispatched(file, t1, 1, "c1")) === true);
   check("the note is not a result", (await pending.readResult(file, t1, 1, "c1")) === undefined);
-  // The claim is exclusive, and it is what a second attempt of the same call is refused by.
   check("a second dispatch is refused", (await pending.noteDispatch(file, t1, 1, "c1")) === false);
 
   await pending.keepResult(file, t1, 1, "c1", outcome("c1"));
@@ -49,14 +46,13 @@ async function main() {
   check("a kept result round-trips", kept?.message.toolCallId === "c1", kept);
   check("a kept result keeps its terminate flag", kept?.terminate === false, kept);
 
-  // A writer that died leaves scratch behind. It must never read as a result.
+  // Scratch from a dead writer must never read as a result.
   const step1 = pending.stepDirFor(file, t1, 1);
   await writeFile(join(step1, "c2.json.abandoned.writing"), "{ not json", "utf8");
   check("scratch is not a result", (await pending.readResult(file, t1, 1, "c2")) === undefined);
 
-  // Two writers for one call is a real case: an attempt whose startToClose expired is still
-  // running while its retry writes. One scratch path between them publishes a document that is
-  // neither, and the seal then reads a tool that succeeded as an unknown outcome.
+  // An attempt past its startToClose can still be writing while its retry writes. A shared
+  // scratch path would publish a torn result that the seal reads as unknown.
   const big = (id: string, size: number) => {
     const kept = outcome(id);
     const content = [{ type: "text" as const, text: "x".repeat(size) }];
@@ -78,8 +74,7 @@ async function main() {
   const whole = wrote && overlapped?.message.toolCallId === "c3";
   check("two writers for one call publish a whole result", whole, overlapped);
 
-  // A step keeps its own results so a retry of its seal can read them again; only earlier steps
-  // are swept. The scoping is what stops a reused call id finding a previous step's result.
+  // Only earlier steps are swept, so a seal retry can reread this step's results.
   await pending.noteDispatch(file, t1, 1, "c2");
   await pending.keepResult(file, t1, 1, "c2", outcome("c2"));
   await pending.noteDispatch(file, t1, 2, "c1");
@@ -89,9 +84,7 @@ async function main() {
     "an earlier step's results are forgotten",
     (await pending.readResult(file, t1, 1, "c1")) === undefined,
   );
-  // And its notes are not. A note is what says the call was admitted, and an attempt that stalled
-  // before taking its claim comes back after the results are gone: without the note its call looks
-  // fresh and it runs the tool again. `stale-dispatch-check.mts` drives that interleaving.
+  // Notes must outlive results, or a stalled attempt reruns the tool (`stale-dispatch-check.mts`).
   check("its admission stays", (await pending.wasDispatched(file, t1, 1, "c1")) === true);
   const reused = (await pending.readResult(file, t1, 2, "c1"))?.message.toolCallId === "c1";
   check("the same id in this step is its own", reused);
@@ -107,8 +100,7 @@ async function main() {
   );
   check("and leaves what admitted it", (await pending.wasDispatched(file, t1, 2, "c1")) === true);
 
-  // The next turn drops every result, its own and the turns before it, and keeps every note. The
-  // results are recorded by then; the notes are what a stalled attempt is still measured against.
+  // A new turn drops every result and keeps every note.
   await pending.sweepResults(file);
   check(
     "a new turn drops the results",
@@ -116,9 +108,7 @@ async function main() {
   );
   check("and keeps the admissions", (await pending.wasDispatched(file, t1, 1, "c1")) === true);
 
-  // The turn is half the scope, and it has to be: a turn numbers its steps from one again, so
-  // without it the new turn's step 1 would read the last turn's step 1 as its own and report a
-  // tool that never ran as already dispatched.
+  // Without the turn in the scope, this step 1 would see the last turn's step 1 as dispatched.
   check(
     "a new turn's step 1 is its own",
     (await pending.wasDispatched(file, t2, 1, "c1")) === false,
@@ -129,8 +119,7 @@ async function main() {
     (await pending.wasDispatched(file, t1, 1, "c1")) === true,
   );
 
-  // A prompt id comes from whoever submitted it, so it is not necessarily a name a filesystem
-  // takes. It must not reach the path, and two of them must not land on one directory.
+  // Prompt ids come from clients. They must not escape the path or collide on one directory.
   const escaping = "../../etc";
   await pending.noteDispatch(file, escaping, 1, "c1");
   check(
@@ -146,7 +135,6 @@ async function main() {
     (await pending.wasDispatched(file, "../../var", 1, "c1")) === false,
   );
 
-  // A session that never dispatched anything has no directory, and sweeping it must not throw.
   await pending.sweep(join(dir, "never-used.jsonl"), t1, 1);
   await pending.sweepResults(join(dir, "never-used.jsonl"));
   check("sweeping a session with no calls is quiet", true);

@@ -1,12 +1,9 @@
-// A turn of a live pi session, wrapped in a workflow. The turn itself runs in the pi process that
-// owns the session, which the activities reach through a task queue only that process polls. So
-// what this buys is a record of every turn and a retry policy around it, not portability: moving a
-// turn would mean handing that session's ownership to another process, which this does not do.
+// A turn of a live pi session, wrapped in a workflow. The turn runs in the pi process that owns
+// the session, reached through a queue only that process polls. This adds a record and a retry
+// policy, not portability.
 //
-// Stepped mode splits the turn the same way the worker-owned path does, into a model call, one
-// activity per tool call, and a seal. It buys the same per-tool bounds and the same legible
-// history. Reopening the session starts a new workflow from the transcript, so results the seal
-// never recorded are gone with the old process.
+// Stepped mode splits the turn into a model call, one activity per tool call, and a seal. Results
+// the seal never recorded are lost with the process.
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
@@ -36,8 +33,7 @@ interface LocalActivities {
   runLocalSeal(input: LocalSealInput): Promise<{ done: boolean }>;
 }
 
-// A call the user stopped from inside pi. Nothing cancelled the workflow, so only the failure's
-// type says it was a stop, and a stop has to end the step the way a cancellation does.
+// A stop from inside pi does not cancel the workflow. Only the failure type marks it.
 const userStopped = (err: unknown) =>
   err instanceof ActivityFailure &&
   err.cause instanceof ApplicationFailure &&
@@ -46,11 +42,11 @@ const userStopped = (err: unknown) =>
 export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
   const options = {
     taskQueue: input.taskQueue,
-    // A turn is the whole agent run, so give it room; the heartbeat is the liveness bound.
+    // A whole agent run. The heartbeat is the liveness bound.
     startToCloseTimeout: "1 hour",
     heartbeatTimeout: "30 seconds",
-    // If the pi process is gone, nothing polls its queue and no retry can find the turn. Fail
-    // rather than retry forever: the next pi to open the session resumes the turn as a new one.
+    // If the pi process is gone, nothing polls its queue. Fail fast. The next pi to open the
+    // session resumes the turn.
     scheduleToStartTimeout: "1 minute",
     retry: { maximumAttempts: 3 },
   } as const;
@@ -63,7 +59,7 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
 
   const { runLocalModelCall } = proxyActivities<LocalActivities>(options);
   const { runLocalToolCall } = proxyActivities<LocalActivities>(options);
-  // The seal also runs a provider retry and a compaction, so it keeps the turn-sized backstop.
+  // The seal can run a provider retry and a compaction, so it keeps the turn-sized timeout.
   const { runLocalSeal } = proxyActivities<LocalActivities>(options);
 
   for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
@@ -72,10 +68,8 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
 
     const stopped = await dispatchStepCalls(
       step,
-      // One at a time whatever the batch says. These calls all reach the one live agent this
-      // process holds, and it admits a single unit of work at a time, so a second call that
-      // arrived while the first was running would be refused and reported as an unknown outcome
-      // for a tool that never ran. The worker half opens a session per activity and does overlap.
+      // Always sequential. The live agent admits one unit of work at a time and would refuse a
+      // concurrent call, reporting an unknown outcome for a tool that never ran.
       { ...model, sequential: true },
       (call) => runLocalToolCall({ turnId: input.turnId, step, call }),
       {
@@ -86,13 +80,11 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
     const seal = (interrupted: boolean) =>
       runLocalSeal({ turnId: input.turnId, step, calls: model.calls, interrupted });
     if (stopped) {
-      // Close the step before letting the stop through, so the calls that finished keep their
-      // results instead of reaching the model as unknown outcomes. The stop is what the caller
-      // hears about, so a seal that fails on the way out does not replace it.
+      // Seal first so finished calls keep their results. A seal failure must not replace the stop.
       await CancellationScope.nonCancellable(() => seal(true)).catch((err: unknown) => {
         log.warn("could not close a stopped step", { step, error: String(err) });
       });
-      // A stop from inside pi ends the turn the way one between calls does: closed, not failed.
+      // A user stop closes the turn, it doesn't fail it.
       if (userStopped(stopped)) return;
       throw stopped;
     }

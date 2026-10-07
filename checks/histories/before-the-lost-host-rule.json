@@ -281,7 +281,7 @@
         "failure": {
           "message": "the pinned attempt failed after starting",
           "source": "TypeScriptSDK",
-          "stackTrace": "Error: the pinned attempt failed after starting\n    at runToolCall (/Users/dashti/repos/pi-temporal/replay-check.mts:82:15)",
+          "stackTrace": "Error: the pinned attempt failed after starting\n    at runToolCall (/repo/replay-check.mts:82:15)",
           "applicationFailureInfo": {
             "type": "Error"
           }

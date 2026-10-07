@@ -1,17 +1,10 @@
-// What a step knows about its tool calls before it is sealed: which ones a dispatch has started,
-// and what the ones that finished produced. It lives beside the session file rather than in it,
-// because a half-finished step has no place in the transcript the model reads, and because two
-// calls settling at once would each parent their entry off the leaf they saw and branch the
-// session tree. Keeping the results in separate files is what lets the seal append them in the
-// order the model asked for.
+// Per-step tool call state before the seal: which calls a dispatch started, and what finished ones
+// produced. Kept beside the session file, one file per call, so concurrent calls don't branch the
+// session tree and the seal can append results in the model's order.
 //
-// A dispatch claim outlives the result it produced, and the turn it was written in, because the
-// attempt it guards against is one that stalled: it comes back after the answer is recorded and
-// after the cleanup that follows, and nothing else on disk can then tell its call from one nothing
-// has run yet.
-//
-// What a claim answers is whether to admit a second dispatch under that identity. It says nothing
-// about what the first one did, and nothing about whether it is still running.
+// Dispatch claims outlive their results and their turn. A stalled attempt can come back after the
+// seal and cleanup, and the claim is the only thing that stops it running the tool again. A claim
+// says nothing about what the first dispatch did or whether it is still running.
 
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -21,13 +14,10 @@ import type { TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
 const RESULT = ".json";
 const STARTED = ".started";
 
-// Scoped by turn and step, because a call id is only unique within the message that asked for it
-// and a turn numbers its steps from one again. Either scope alone would let a later call find an
-// earlier one's files: without the step, within a turn; without the turn, across turns.
+// Scoped by turn and step. Call ids are unique only per message, and steps restart at one per turn.
 const rootFor = (sessionFile: string) => `${sessionFile}.pending`;
-// The turn's id comes from whoever submitted the prompt, so it is not necessarily a name a
-// filesystem takes. Anything but a plain one is used by its digest rather than rewritten, because
-// rewriting maps two ids to one directory and that is the collision this scope exists to stop.
+// Turn ids come from the submitter. Unsafe names are hashed, not rewritten, so two ids never share
+// a directory.
 const keyFor = (turn: string) =>
   /^[A-Za-z0-9._-]{1,64}$/.test(turn) && turn !== "." && turn !== ".."
     ? turn
@@ -40,11 +30,7 @@ const resultPath = (sessionFile: string, turn: string, step: number, callId: str
 const dispatchPath = (sessionFile: string, turn: string, step: number, callId: string) =>
   join(dirFor(sessionFile, turn, step), `${callId}${STARTED}`);
 
-/**
- * Where one step of one turn keeps what it knows. Exported for the checks: a check that restates
- * the layout reports a change to it as a broken fixture rather than as a failed assertion, and the
- * scope is the thing under test.
- */
+/** Exported for the checks, so they use the real layout instead of restating it. */
 export const stepDirFor = dirFor;
 
 /** Record that a dispatch is about to run the tool, before it can have any effect. */
@@ -68,8 +54,8 @@ export async function noteDispatch(
 }
 
 /**
- * Whether a dispatch had already started this call. A second dispatch that finds this must not
- * run the tool again: the first one can have pushed, written or deleted before it died.
+ * Whether a dispatch already started this call. If so, do not run the tool again. The first one
+ * may have had side effects before it died.
  */
 export async function wasDispatched(
   sessionFile: string,
@@ -87,12 +73,8 @@ export async function wasDispatched(
 }
 
 /**
- * Keep what a call produced until the step records it. Written whole and then renamed, so a crash
- * part way through leaves no half-file for the seal to read as a result.
- *
- * The dispatch note is what creates the step's directory and it is not removed, so the directory
- * is normally there. A keep that finds none belongs to a session somebody deleted underneath it,
- * and recreating the tree for it would leave files nothing ever reads.
+ * Keep a call's result until the seal records it. Written then renamed, so a crash leaves no
+ * half-file. A missing step directory means the session was deleted, so the result is dropped.
  */
 export async function keepResult(
   sessionFile: string,
@@ -102,8 +84,7 @@ export async function keepResult(
   outcome: TurnToolCallOutcome,
 ): Promise<void> {
   const target = resultPath(sessionFile, turn, step, callId);
-  // Unique per writer. An attempt whose startToClose expired is still running while its retry
-  // writes, and one scratch path between them publishes a document that is neither.
+  // Unique per writer. A timed-out attempt may still be writing while its retry writes too.
   const scratch = `${target}.${randomUUID()}.writing`;
   try {
     await writeFile(scratch, JSON.stringify(outcome), "utf8");
@@ -111,7 +92,7 @@ export async function keepResult(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   } finally {
-    // Whatever went wrong above is what the caller needs to see, not what went wrong tidying up.
+    // Don't let a cleanup error hide the real one.
     await rm(scratch, { force: true }).catch(() => {});
   }
 }
@@ -159,7 +140,7 @@ export async function sweepResults(sessionFile: string): Promise<void> {
   }
 }
 
-// Everything in a step's directory except what says a call was admitted.
+// Everything in a step's directory except the dispatch notes.
 async function dropResults(dir: string): Promise<void> {
   for (const entry of await readdir(dir).catch(() => [] as string[])) {
     if (entry.endsWith(STARTED)) continue;
@@ -168,10 +149,9 @@ async function dropResults(dir: string): Promise<void> {
 }
 
 /**
- * Drop what earlier steps kept. A step keeps its own results until the step after it, because a
- * seal that dropped them as it recorded them would leave a retry of that seal with nothing to
- * read, and a batch with no results reads as one that wants another step even when a tool asked
- * the turn to stop.
+ * Drop what earlier steps kept. A step keeps its results until the next step, so a retried seal
+ * still has them. Without them, a batch reads as wanting another step even when a tool asked the
+ * turn to stop.
  */
 export async function sweep(sessionFile: string, turn: string, before: number): Promise<void> {
   let steps: string[];
@@ -183,11 +163,8 @@ export async function sweep(sessionFile: string, turn: string, before: number): 
   for (const name of steps) {
     const step = Number(name);
     if (!Number.isInteger(step) || step >= before) continue;
-    // The results go; the dispatch notes stay. A note is what says the call was admitted, and
-    // admission has to outlive the result it produced: an attempt that stalled before taking its
-    // claim comes back long after the seal wrote the answer, and a swept directory made its call
-    // look fresh, so it ran the tool a second time. An empty file per call is what keeping it
-    // costs, and the turn scope is what stops one being read as a later call's.
+    // Results go, dispatch notes stay. A stalled attempt can return after the seal, and without
+    // its note the call looks fresh and the tool runs twice.
     await dropResults(join(turnDir(sessionFile, turn), name));
   }
 }

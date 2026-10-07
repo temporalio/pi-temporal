@@ -1,3 +1,7 @@
+// Checks that a timed-out pinned attempt cannot publish over work shipped by another host. The
+// old attempt keeps running after its timeout. Asserts the step is not migrated and gets one
+// recovery seal instead.
+
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
