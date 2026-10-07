@@ -97,6 +97,50 @@ async function failedRenewal() {
   console.log("PASS failed renewal cannot extend write permission");
 }
 
+// A renewal is decided when it starts but takes effect when storage answers. One that answers
+// past the window can't extend the lease, because a contender may have taken over meanwhile.
+async function lateRenewal() {
+  const file = join(root, "late.jsonl");
+  await withSessionLock(file, async (owned, ownedNow) => {
+    const stalled = barrier();
+    const resume = barrier();
+    let done = false;
+    let stalling = true;
+    fs.utimes = async (...args) => {
+      if (stalling && String(args[0]).startsWith(`${file}.lock/`)) {
+        stalling = false;
+        stalled.release();
+        await resume.promise;
+        const result = await originalUtimes(...args);
+        done = true;
+        return result;
+      }
+      return originalUtimes(...args);
+    };
+    syncBuiltinESMExports();
+    // Inside the window, so the refresh starts a renewal stamped 40s after the claim.
+    Date.now = () => originalNow() + 40_000;
+    try {
+      await Promise.race([stalled.promise, sleep(15_000)]);
+      assert.equal(stalling, false, "renewal must reach the stalled storage call");
+      // Past the window from the claim while the renewal is stalled.
+      Date.now = () => originalNow() + 55_000;
+      resume.release();
+      const deadline = originalNow() + 5_000;
+      while (!done && originalNow() < deadline) await sleep(20);
+      await sleep(50);
+      assert.equal(ownedNow(), false, "a renewal that lands late cannot extend the lease");
+      assert.equal(await owned(), false, "a renewal that lands late cannot confirm ownership");
+    } finally {
+      resume.release();
+      fs.utimes = originalUtimes;
+      syncBuiltinESMExports();
+      Date.now = originalNow;
+    }
+  });
+  console.log("PASS a late renewal cannot extend the lease");
+}
+
 async function observedLoss() {
   const file = join(root, "loss.jsonl");
   await withSessionLock(file, async (owned, ownedNow) => {
@@ -153,6 +197,7 @@ try {
   const checks = {
     releasedEpochRace,
     failedRenewal,
+    lateRenewal,
     observedLoss,
     expiredStaysLost,
     unreadableClaim,
