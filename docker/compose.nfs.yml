@@ -1,0 +1,51 @@
+# Puts /sessions on a real NFSv4 server, to test that exclusive create and atomic rename hold
+# there (NFSv3 doesn't, see `session-lock.ts`).
+#
+#   NFS=1 docker/tree-check.sh
+#
+# The Docker daemon mounts the export, so workers need no privileges. Only the server does.
+
+name: pi-temporal-l3
+
+services:
+  nfs:
+    image: erichough/nfs-server:latest
+    privileged: true
+    environment:
+      - NFS_EXPORT_0=/exports *(rw,no_subtree_check,no_root_squash,fsid=0)
+    volumes:
+      - nfsdata:/exports
+    ports:
+      # Published on a fixed port, since the daemon mounts it and can't resolve service names.
+      - "12049:2049"
+    healthcheck:
+      test: ["CMD-SHELL", "rpcinfo -T tcp 127.0.0.1 100003 4 >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  worker-a:
+    depends_on:
+      nfs:
+        condition: service_healthy
+
+  worker-b:
+    depends_on:
+      nfs:
+        condition: service_healthy
+
+  client:
+    depends_on:
+      nfs:
+        condition: service_healthy
+
+volumes:
+  nfsdata:
+  sessions:
+    driver: local
+    driver_opts:
+      type: nfs
+      # `soft` so a dead server fails the check instead of hanging it. `nolock` because the session
+      # lock uses exclusive create and rename, not advisory locks.
+      o: "addr=127.0.0.1,nfsvers=4,port=12049,nolock,soft"
+      device: ":/"
