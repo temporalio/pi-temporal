@@ -1,0 +1,55 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            fork.pin
+      - run: npm ci
+      # After `npm ci`, which removes the fork link.
+      - run: scripts/setup-fork.sh
+      - run: npm run typecheck
+  # Runs the real activities and workflows against a dev server. The lock, claim and tree rules
+  # are only tested here.
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            fork.pin
+      - run: npm ci
+      - run: scripts/setup-fork.sh
+      - name: Install the Temporal CLI
+        run: |
+          curl -sSf https://temporal.download/cli.sh | sh
+          echo "$HOME/.temporalio/bin" >> "$GITHUB_PATH"
+      - name: Start a dev server
+        run: |
+          temporal server start-dev --headless --log-level warn > "$RUNNER_TEMP/temporal.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            temporal operator cluster health --address 127.0.0.1:7233 >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/temporal.log"
+          exit 1
+      - run: npm run checks
+      # Restarting a worker's own container needs Docker.
+      - run: docker/restart-check.sh

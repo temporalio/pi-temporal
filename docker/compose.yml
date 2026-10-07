@@ -1,0 +1,58 @@
+# Two workers that share only the cluster and /sessions, plus a client. Each has its own
+# filesystem and hostname.
+#
+#   docker compose -f docker/compose.yml up -d temporal worker-a
+#   docker compose -f docker/compose.yml run --rm client start "..."
+#
+# /sessions is a local volume. `NFS=1` puts it on a real NFSv4 server (docker/compose.nfs.yml).
+
+name: pi-temporal-l3
+
+services:
+  # The dev server. `--ip 0.0.0.0` so other containers reach it by service name.
+  temporal:
+    image: temporalio/admin-tools:1.29
+    # The image's entrypoint is `sleep infinity`, so override it.
+    entrypoint: ["temporal"]
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--log-level", "warn"]
+    ports:
+      - "7242:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  worker-a: &worker
+    image: pi-temporal:l3
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - PI_SESSION_DIR=/sessions
+      - PI_TEMPORAL_TASK_QUEUE=${PI_TEMPORAL_TASK_QUEUE:-pi-session}
+      - PI_TEMPORAL_STEPPED=1
+      - PI_TEMPORAL_SHIP_TREE=${PI_TEMPORAL_SHIP_TREE:-0}
+      # Not shared. A project reaches another worker only with the session.
+      - PI_PROJECT_DIR=/project
+      - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY}
+    volumes:
+      - sessions:/sessions
+
+  worker-b:
+    <<: *worker
+
+  # No worker. Reaches sessions through Temporal and /sessions only.
+  client:
+    <<: *worker
+    entrypoint: ["node", "--import", "tsx", "src/cli.ts"]
+    command: ["running"]
+    # Its own project, since with the tree on the client is what sends it.
+    volumes:
+      - sessions:/sessions
+      - clientproject:/project
+
+volumes:
+  sessions:
+  clientproject:
