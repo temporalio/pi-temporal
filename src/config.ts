@@ -4,6 +4,7 @@
 // Whether storage is really shared across hosts is for the operator to verify.
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import type { TurnBudget } from "./protocol.js";
 
 export type Profile = "local" | "fleet";
@@ -35,11 +36,26 @@ const read = (path: string | undefined) => (path ? readFileSync(path, "utf8") : 
 // Set explicitly by the operator, not defaulted here. `preflight` needs the difference.
 const given = (name: string) => process.env[name] !== undefined && process.env[name] !== "";
 
-const onOff = (name: string, fallback: boolean) =>
-  given(name) ? process.env[name] === "1" : fallback;
+// A typo must not quietly turn a switch off, so anything unrecognized is refused.
+function onOff(name: string, fallback: boolean): boolean {
+  if (!given(name)) return fallback;
+  const value = process.env[name]!.trim().toLowerCase();
+  if (["1", "true", "on", "yes"].includes(value)) return true;
+  if (["0", "false", "off", "no"].includes(value)) return false;
+  throw new Error(
+    `${name} must be 1/true/on/yes or 0/false/off/no, got ${JSON.stringify(process.env[name])}`,
+  );
+}
+
+function profileFromEnv(): Profile {
+  const raw = process.env.PI_TEMPORAL_PROFILE;
+  if (raw === undefined || raw === "" || raw === "local") return "local";
+  if (raw === "fleet") return "fleet";
+  throw new Error(`PI_TEMPORAL_PROFILE must be local or fleet, got ${JSON.stringify(raw)}`);
+}
 
 export function fromEnv(): Config {
-  const profile: Profile = process.env.PI_TEMPORAL_PROFILE === "fleet" ? "fleet" : "local";
+  const profile = profileFromEnv();
   const fleet = profile === "fleet";
   const cert = process.env.PI_TEMPORAL_TLS_CERT;
   const key = process.env.PI_TEMPORAL_TLS_KEY;
@@ -48,7 +64,7 @@ export function fromEnv(): Config {
     address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
     namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
     taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
-    sessionDir: process.env.PI_SESSION_DIR ?? `${process.env.HOME}/.pi-temporal/sessions`,
+    sessionDir: process.env.PI_SESSION_DIR ?? `${homedir()}/.pi-temporal/sessions`,
     idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
     // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
@@ -56,7 +72,7 @@ export function fromEnv(): Config {
     budget: budgetFromEnv(),
     // In a fleet the files must travel, or tools run against the wrong directory.
     shipTree: onOff("PI_TEMPORAL_SHIP_TREE", fleet),
-    apiKey: process.env.PI_TEMPORAL_API_KEY ?? read(process.env.PI_TEMPORAL_API_KEY_FILE),
+    apiKey: process.env.PI_TEMPORAL_API_KEY ?? read(process.env.PI_TEMPORAL_API_KEY_FILE)?.trim(),
     tls:
       cert && key
         ? {
@@ -135,11 +151,15 @@ export function clientProblems(cfg: Config): string[] {
   return cfg.shipTree && !cfg.stepped ? [SHIP_TREE_NEEDS_STEPS] : [];
 }
 
-/** The model provider's key, from `<PROVIDER>_API_KEY` or `<PROVIDER>_API_KEY_FILE`. */
+/**
+ * The model provider's key, from `<PROVIDER>_API_KEY` or `<PROVIDER>_API_KEY_FILE`. Only `openai`
+ * and `anthropic` are known, so any other provider gets no key rather than one of theirs.
+ */
 export function modelApiKey(
   provider = process.env.PI_TEMPORAL_PROVIDER ?? "openai",
 ): string | undefined {
-  const prefix = provider === "anthropic" ? "ANTHROPIC" : "OPENAI";
+  if (provider !== "openai" && provider !== "anthropic") return undefined;
+  const prefix = provider.toUpperCase();
   return process.env[`${prefix}_API_KEY`] ?? read(process.env[`${prefix}_API_KEY_FILE`])?.trim();
 }
 

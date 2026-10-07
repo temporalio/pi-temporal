@@ -112,6 +112,10 @@ export async function withSessionLock<T>(
           // recreate an epoch that was already superseded. So the claim counts only if it's
           // still the newest after the cleanup.
           if ((await claims(dir)).at(-1)?.epoch === epoch) {
+            // The create stamps the server's clock. Stamp ours, so a client whose clock runs ahead
+            // doesn't look stale to contenders until its first refresh.
+            const stamp = new Date(confirmedAt);
+            await utimes(path, stamp, stamp);
             mine = { epoch, name, confirmedAt };
             break;
           }
@@ -191,7 +195,14 @@ export async function withSessionLock<T>(
         () => false,
       );
       // Readers can still see our token when storage refuses renewal. That isn't a new lease.
-      if (renewed && !lost) lastConfirmed = confirmedAt;
+      if (!renewed || lost) return;
+      // A renewal that lands past the window is too late, since a contender may already hold the
+      // next epoch.
+      if (expired()) {
+        markLost();
+        return;
+      }
+      lastConfirmed = confirmedAt;
     })().finally(() => {
       refreshing = undefined;
     });

@@ -54,7 +54,8 @@ export interface RunStepInput extends PromptInput {
   readonly sessionId: string;
   // Absolute path to the Pi session JSONL, the durable log. Shared storage across workers.
   readonly sessionFile: string;
-  // For the Temporal UI and logs only. The transcript decides what runs next.
+  // Keys the step's dispatch claims, kept results, and closure. The transcript still decides what
+  // runs next.
   readonly step: number;
 }
 
@@ -167,18 +168,17 @@ export interface SealStepInput {
   readonly overflowRecoveryAttempted?: boolean;
   // The turn was stopped. Record results only, with no provider retry or compaction.
   readonly interrupted?: boolean;
-  // Closed without the host that ran it. A tool there may still be running, so this is recorded
-  // where every host reads it, and that host's later output is kept rather than published.
+  // Closed without the host that ran it, for the logs. With tree shipping on, any interrupted seal
+  // closes the step to its host, since a tool there may still be running.
   readonly lost?: boolean;
-  // In the model's order. A call with no result is settled as unknown, because providers reject a
-  // transcript with an unanswered call.
+  // In the model's order. Every call gets a result, because providers reject a transcript with an
+  // unanswered call. One with no kept result is unknown, or not run if the seal claims it first.
   readonly calls: readonly DeferredToolCall[];
 }
 
 /**
- * What a turn may spend. Enforced between steps, never inside one, because stopping mid-step
- * leaves a tool call the transcript cannot represent. The model cannot be trusted to keep it, so
- * the workflow enforces it.
+ * What a turn may spend. The workflow enforces it, since the model can't be trusted to. Most bounds
+ * stop the turn between units of work. `hardSeconds` stops it at once.
  */
 export interface TurnBudget {
   // Wall clock for the turn in seconds, on the workflow clock so replay agrees. A number, not a

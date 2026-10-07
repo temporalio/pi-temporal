@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Handover between two containers that share only Temporal and /sessions. Kills worker A mid-tool
-# and checks in Temporal's history that the activity retried on worker B's hostname.
+# and checks that the lost step is closed and the turn goes on from worker B's hostname.
 #
 # Usage: OPENAI_API_KEY=... docker/cross-host-check.sh
 #
@@ -16,7 +16,8 @@ fails=0
 ok()  { printf 'PASS %s\n' "$1"; }
 bad() { printf 'FAIL %s   (%s)\n' "$1" "${2:-}"; fails=$((fails + 1)); }
 
-cleanup() { $COMPOSE down -v >/dev/null 2>&1; }
+history="$(mktemp)"
+cleanup() { $COMPOSE down -v >/dev/null 2>&1; rm -f "$history"; }
 trap cleanup EXIT
 
 [ -n "${OPENAI_API_KEY:-}" ] || { echo "set OPENAI_API_KEY"; exit 1; }
@@ -36,19 +37,22 @@ hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
   || { bad "worker A came up"; exit 1; }
 
 # --- a client that is only ever a client hands over a task and exits
-task="Run this exact command with the bash tool: sleep 45 && echo CROSS-HOST "
-task+=">> /sessions/ran.txt. Then report it."
+# The write comes before the sleep, so the effect has happened when worker A dies.
+task="Run this exact command with the bash tool: echo CROSS-HOST >> /sessions/ran.txt "
+task+="&& sleep 45. Then report it."
 sid=$($COMPOSE run --rm -T client start "$task" \
   2>/dev/null | tr -d '\r' | head -1)
 [ -n "$sid" ] && ok "a client container started the session ($sid)" \
   || { bad "client could not start a session"; exit 1; }
 
 # --- kill worker A while the tool is in flight. Poll the transcript, since a fixed sleep can miss.
+# Also wait for the effect, or the final count would pass for the wrong reason.
 inflight=""
 for _ in $(seq 1 60); do
   if $COMPOSE exec -T worker-a sh -c \
       "grep -q toolCall /sessions/$sid.jsonl 2>/dev/null \
-        && ! grep -q toolResult /sessions/$sid.jsonl"; then
+        && ! grep -q toolResult /sessions/$sid.jsonl \
+        && grep -q CROSS-HOST /sessions/ran.txt 2>/dev/null"; then
     inflight=yes
     break
   fi
@@ -68,7 +72,7 @@ hostB=$($COMPOSE exec -T worker-b hostname 2>/dev/null | tr -d '\r')
   || bad "worker B is a different host" "A=$hostA B=$hostB"
 
 # --- follow it from a third container, and let it tell us when the turn ended
-watched=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
+watched=$($COMPOSE run --rm -T client watch --timeout=600 "$sid" 2>&1 | tr -d '\r')
 case "$watched" in
   *answered*) ok "a client container followed the turn to its end" ;;
   *) bad "a client container followed the turn to its end" "$(printf '%s' "$watched" | tail -2)" ;;
@@ -80,20 +84,40 @@ case "$watched" in
 esac
 
 # Count the side effect, not transcript entries. A rerun's result is discarded, so only the
-# shared file shows whether the tool ran twice.
+# shared file shows whether the tool ran twice. The model may ask again after an unknown outcome,
+# so compare against how often it asked, not against one.
 ran=$($COMPOSE exec -T worker-b sh -c 'wc -l < /sessions/ran.txt 2>/dev/null || echo 0' \
   2>/dev/null | tr -d '\r ')
-[ "${ran:-0}" = "1" ] && ok "the tool really ran once, not once per host" \
-  || bad "the tool really ran once" "$ran lines"
+asked=$($COMPOSE exec -T worker-b cat "/sessions/$sid.jsonl" 2>/dev/null | python3 -c '
+import json, sys
+asked = 0
+for line in sys.stdin:
+    try:
+        message = json.loads(line).get("message") or {}
+    except ValueError:
+        continue
+    if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
+        continue
+    asked += sum(
+        1 for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "toolCall"
+        and "CROSS-HOST" in json.dumps(block)
+    )
+print(asked)
+')
+[ "${ran:-0}" -ge 1 ] && [ "${ran:-0}" = "${asked:-x}" ] \
+  && ok "the tool ran once for each time the model asked, not once per host" \
+  || bad "the tool ran once for each time the model asked" "$ran lines, $asked asks"
 
-# --- the part only Temporal can answer: two hosts ran this, and the second one retried
+# --- the part only Temporal can answer: both hosts ran activities of this turn. The lost step is
+# closed, not retried, so the second host runs the steps after it.
 $COMPOSE exec -T temporal sh -c \
   "temporal workflow show --address 127.0.0.1:7233 -w pi-session-$sid -o json" \
-  2>/dev/null > /tmp/pi-l3-history.json
-summary=$(python3 - "$hostA" "$hostB" <<'PY'
+  2>/dev/null > "$history"
+summary=$(python3 - "$hostA" "$hostB" "$history" <<'PY'
 import json, sys
-hostA, hostB = sys.argv[1], sys.argv[2]
-events = json.load(open('/tmp/pi-l3-history.json'))
+hostA, hostB, path = sys.argv[1], sys.argv[2], sys.argv[3]
+events = json.load(open(path))
 events = events.get("events") or events.get("history", {}).get("events", [])
 runs = []
 for e in events:
@@ -101,16 +125,15 @@ for e in events:
     if a:
         runs.append((a.get("identity", ""), a.get("attempt")))
 hosts = {identity.split("@")[-1] for identity, _ in runs}
-retried = any(attempt and attempt > 1 for _, attempt in runs)
-print(f"{len(hosts)}|{int(retried)}|{sorted(hosts)}")
+print(f"{len(hosts)}|{int(hostB in hosts)}|{sorted(hosts)}")
 PY
 )
 count=${summary%%|*}
 rest=${summary#*|}
-retried=${rest%%|*}
+onB=${rest%%|*}
 [ "$count" = "2" ] && ok "two hosts ran this turn" || bad "two hosts ran this turn" "$summary"
-[ "$retried" = "1" ] && ok "the step came back as a retry on the second host" \
-  || bad "the step came back as a retry on the second host" "$summary"
+[ "$onB" = "1" ] && ok "the turn went on from the second host" \
+  || bad "the turn went on from the second host" "$summary"
 
 # --- a turn started by a schedule, with no client running.
 $COMPOSE run --rm -T client schedule \
@@ -136,7 +159,7 @@ if [ -n "$scheduled" ]; then
     *"$sid"*) ok "the scheduled session is listed like any other" ;;
     *) bad "the scheduled session is listed like any other" "$listed" ;;
   esac
-  followed=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
+  followed=$($COMPOSE run --rm -T client watch --timeout=600 "$sid" 2>&1 | tr -d '\r')
   # Match the tool result line. The prompt also contains the sentinel and `watch` echoes it.
   case "$followed" in
     *"tool result: SCHEDULED-RUN"*) ok "its turn ran, with nothing but the schedule to start it" ;;

@@ -248,6 +248,23 @@ async function leftoverScratch() {
   await worktree.sweep();
 }
 
+// A late capture that is refused must leave the retirement in place, or no sweep frees the host.
+async function refusedAfterRetirement() {
+  const file = session("refused-late");
+  await seed("refused-late-seed", file, "first\n");
+  asHost("refused-late-worker");
+  const dir = project("refused-late-worker");
+  await worktree.ensure(dir, file);
+  asHost("refused-late-seed");
+  await fs.writeFile(join(project("refused-late-seed"), "note.txt"), "second\n");
+  await worktree.capture(project("refused-late-seed"), file);
+  await worktree.retire(project("refused-late-seed"), file);
+  asHost("refused-late-worker");
+  await assert.rejects(worktree.capture(dir, file), /the session is at/);
+  assert.equal(await worktree.sweep(), 1, "a refused capture must not revive the session");
+  assert.deepEqual(await fs.readdir(dir), []);
+}
+
 const checks = {
   staleSweep,
   behindRetirement,
@@ -259,6 +276,7 @@ const checks = {
   unreadableTreeState,
   leftoverScratch,
   legacyClosure,
+  refusedAfterRetirement,
 };
 try {
   const selected = process.argv[2] as keyof typeof checks | undefined;

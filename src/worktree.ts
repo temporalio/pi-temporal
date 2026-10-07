@@ -140,25 +140,40 @@ async function writeJson(path: string, value: unknown) {
   await rename(scratch, path);
 }
 
-const git = (projectDir: string, args: string[]) =>
-  execFileAsync("git", ["--git-dir", gitDir(projectDir), ...args], {
-    cwd: projectDir,
-    maxBuffer: 64 * 1024 * 1024,
-    env: {
-      ...process.env,
-      GIT_WORK_TREE: projectDir,
-      // Fixed identity, so a capture doesn't depend on who runs it.
-      GIT_AUTHOR_NAME: "pi-temporal",
-      GIT_AUTHOR_EMAIL: "pi-temporal@localhost",
-      GIT_COMMITTER_NAME: "pi-temporal",
-      GIT_COMMITTER_EMAIL: "pi-temporal@localhost",
+// No inherited `GIT_*` and no system or user config, so two hosts make the same tree from the
+// same files whatever the worker's environment says.
+const gitEnv = () => ({
+  ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))),
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+});
+
+const git = (projectDir: string, args: string[], input?: string) => {
+  const run = execFileAsync(
+    "git",
+    ["--git-dir", gitDir(projectDir), "-c", "core.autocrlf=false", ...args],
+    {
+      cwd: projectDir,
+      maxBuffer: 64 * 1024 * 1024,
+      env: {
+        ...gitEnv(),
+        GIT_WORK_TREE: projectDir,
+        // Fixed identity, so a capture doesn't depend on who runs it.
+        GIT_AUTHOR_NAME: "pi-temporal",
+        GIT_AUTHOR_EMAIL: "pi-temporal@localhost",
+        GIT_COMMITTER_NAME: "pi-temporal",
+        GIT_COMMITTER_EMAIL: "pi-temporal@localhost",
+      },
     },
-  });
+  );
+  run.child.stdin?.end(input);
+  return run;
+};
 
 // Re-initializing is a no-op, so this is safe before every capture and restore.
 async function ensureShadow(projectDir: string) {
   await mkdir(gitDir(projectDir), { recursive: true });
-  await execFileAsync("git", ["init", "--bare", "-q", gitDir(projectDir)]);
+  await execFileAsync("git", ["init", "--bare", "-q", gitDir(projectDir)], { env: gitEnv() });
 }
 
 // Missing counts as empty. Unreadable counts as not empty, so we never write over it.
@@ -524,8 +539,8 @@ export interface Fence {
 // Steps closed without their host, in the shared directory because that host can't be reached.
 // Its stale tool would otherwise publish against a tip that still looks live and revert newer work.
 // One marker per closed step, named by a hash of turn and step. Closing and checking stay
-// constant time however many closures a long session collects. `closed.json` is the older shape,
-// still read so a step closed before it changed stays closed.
+// constant time however many closures a long session collects. `closed.json` is also read, for
+// sessions whose closures are kept as one list there.
 const legacyClosedPath = (sessionFile: string) => join(shareDir(sessionFile), "closed.json");
 const closedDir = (sessionFile: string) => join(shareDir(sessionFile), "closed");
 const closedMarker = (sessionFile: string, fence: Fence) => {
@@ -628,21 +643,29 @@ export async function clearWriters(projectDir: string): Promise<number> {
 // What the directory holds now, as a tree id. Callers hold the tree lock.
 async function treeHere(projectDir: string) {
   await ensureShadow(projectDir);
+  // `add -A` keeps what the index already tracks, so a file ignored after it was captured would
+  // keep shipping. Drop those entries first.
+  const ignored = (await git(projectDir, ["ls-files", "-ci", "--exclude-standard", "-z"])).stdout;
+  if (ignored !== "") {
+    await git(projectDir, ["update-index", "--force-remove", "-z", "--stdin"], ignored);
+  }
   await git(projectDir, ["add", "-A"]);
   return (await git(projectDir, ["write-tree"])).stdout.trim();
 }
 
 // Unbundles what this host has not taken in, in order, since each names the previous as a
-// prerequisite. Errors from already-present commits are ignored.
+// prerequisite. git accepts a bundle whose commits are already here, so any failure is real.
 async function ingest(projectDir: string, sessionFile: string, from = 0) {
   await ensureShadow(projectDir);
-  const names = (await readdir(shareDir(sessionFile)).catch(() => []))
+  const names = (await listDir(shareDir(sessionFile)))
     .filter((name) => name.endsWith(".bundle"))
     .filter((name) => Number.parseInt(name, 10) > from)
     .sort();
   for (const name of names) {
     await git(projectDir, ["bundle", "unbundle", join(shareDir(sessionFile), name)]).catch(
-      () => undefined,
+      (err: Error) => {
+        throw new Error(`could not unbundle ${name} for ${sessionFile}: ${err.message}`);
+      },
     );
   }
 }
@@ -709,8 +732,15 @@ async function publish(
   await stillHeld("renaming its bundle into place");
   await rename(scratch, join(dir, bundleName(seq)));
 
-  await stillHeld("naming the tip");
-  await writeJson(tipPath(sessionFile), { tree, commit, seq } satisfies Tip);
+  // Scratch first and the check right before the rename, so a lease lost meanwhile has only the
+  // rename left to race.
+  const tipScratch = `${tipPath(sessionFile)}.${scratchToken()}.writing`;
+  await writeFile(tipScratch, JSON.stringify({ tree, commit, seq } satisfies Tip), "utf8");
+  await stillHeld("naming the tip").catch(async (err: unknown) => {
+    await rm(tipScratch, { force: true });
+    throw err;
+  });
+  await rename(tipScratch, tipPath(sessionFile));
   await rm(forgottenPath(sessionFile), { force: true });
   // Only after the tip names the new bundle, or a crash leaves the session unrestorable.
   if (restart) await dropBundlesBefore(dir, seq);
@@ -828,7 +858,6 @@ export async function capture(
           `without this host, and what it produced is kept rather than published`,
       );
     }
-    await revive(sessionFile);
     const tip = await readJson<Tip>(tipPath(sessionFile));
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
 
@@ -845,6 +874,8 @@ export async function capture(
           `and the session is at ${tip.tree.slice(0, 8)}`,
       );
     }
+    // After the refusals, so a capture that is refused leaves a retired session retired.
+    await revive(sessionFile);
 
     const tree = await treeHere(projectDir);
     if (tip?.tree === tree) return;
@@ -876,7 +907,6 @@ export async function ensure(
           `Absolute paths can still reach its replacement.`,
       );
     });
-    await revive(sessionFile);
     // Read inside the lock, or a concurrent capture could move the tip under us.
     const tip = await readJson<Tip>(tipPath(sessionFile));
 
@@ -893,16 +923,16 @@ export async function ensure(
     }
 
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
+    // New to this session. Only an empty directory is ours to fill.
+    if (!held && !(await isEmptyDir(projectDir))) {
+      throw new WrongTree(`not restoring ${projectDir}: it holds files this session never shipped`);
+    }
+    // After the refusals, so a restore that is refused leaves a retired session retired. Before the
+    // early return, since a host already on the tip is still serving the session.
+    await revive(sessionFile);
     if (held?.tree === tip.tree) return;
 
-    if (!held) {
-      // New to this session. Only an empty directory is ours to fill.
-      if (!(await isEmptyDir(projectDir))) {
-        throw new WrongTree(
-          `not restoring ${projectDir}: it holds files this session never shipped`,
-        );
-      }
-    } else {
+    if (held) {
       // Behind the tip with unshipped edits (a worker died before shipping). Publishing them would
       // revert the tip on every host, so set them aside and move to the tip.
       const here = await treeHere(projectDir);
@@ -949,9 +979,12 @@ export async function release(projectDir: string, sessionFile: string): Promise<
  * read the marker and release theirs later.
  */
 export async function retire(projectDir: string, sessionFile: string): Promise<boolean> {
-  if (await established(sessionFile)) {
-    await writeJson(retiredPath(sessionFile), { at: new Date().toISOString() });
-  }
+  // Under the shared lock, so it can't interleave with a capture or restore deciding to revive.
+  await withSessionLock(sharedLockPath(sessionFile), async () => {
+    if (await established(sessionFile)) {
+      await writeJson(retiredPath(sessionFile), { at: new Date().toISOString() });
+    }
+  });
   return await release(projectDir, sessionFile);
 }
 
@@ -1003,7 +1036,9 @@ export async function sweep(): Promise<number> {
       const path = join(treesRoot(), dir, name);
       // A cleanup pass. A note it can't read keeps its directory, and the others still go.
       const note = await readJson<Held>(path).catch(() => undefined);
-      if (!note?.session || !note.directory || !(await isRetired(note.session))) continue;
+      if (!note?.session || !note.directory) continue;
+      // An unreadable marker skips this note, not the whole pass.
+      if (!(await isRetired(note.session).catch(() => false))) continue;
       const done = await withTreeLocks(note.directory, note.session, async () => {
         const current = await readJson<Held>(path);
         if (

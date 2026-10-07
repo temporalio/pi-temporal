@@ -37,6 +37,12 @@ esac
 say() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { say "$*" >&2; exit 1; }
 
+case "$kill_min$kill_max" in
+  *[!0-9]*) die "DEMO_KILL_MIN and DEMO_KILL_MAX are whole seconds" ;;
+esac
+[ "$kill_min" -le "$kill_max" ] \
+  || die "DEMO_KILL_MIN ($kill_min) is more than DEMO_KILL_MAX ($kill_max)"
+
 # --- preflight ---------------------------------------------------------------------------------
 
 command -v docker >/dev/null || die "docker is not on PATH"
@@ -162,7 +168,8 @@ started_at="$(date +%s)"
 
 client watch "$session" > "$logs/watch.log" 2>&1 &
 background+=("$!")
-tail -n +1 -F "$logs/watch.log" 2>/dev/null | sed -u 's/^/          | /' &
+# `$!` is tail's pid. Killing tail ends sed too, since sed then reads end of input.
+tail -n +1 -F "$logs/watch.log" 2>/dev/null > >(sed -u 's/^/          | /') &
 background+=("$!")
 
 # --- progress ----------------------------------------------------------------------------------

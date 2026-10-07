@@ -88,6 +88,20 @@ try {
   await assert.rejects(cannotOpen.runToolCall(input), (err: unknown) => !beforeClaim(err));
   console.log("PASS a call an earlier attempt claimed does not");
 
+  // A host refusing the project comes before the claim, so it also lets the pinned step move.
+  const refusing = makeActivities({ projectDir: root }, {
+    openSession: async () => {
+      throw ApplicationFailure.create({ message: "refused", type: "WorktreeQuarantined" });
+    },
+  });
+  const quarantined = { ...input, sessionFile: join(root, "quarantined.jsonl") };
+  await assert.rejects(
+    refusing.runToolCall(quarantined),
+    (err: unknown) =>
+      beforeClaim(err) && (err as ApplicationFailure).details?.[0] === "WorktreeQuarantined",
+  );
+  console.log("PASS a refusal before any claim says it failed before the claim");
+
   const unreadable = join(root, "unreadable.jsonl");
   await mkdir(join(pending.stepDirFor(unreadable, "prompt", 1), "call.started"), {
     recursive: true,

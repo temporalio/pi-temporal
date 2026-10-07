@@ -1,6 +1,6 @@
 // Checks that a step stopped or failed during tools or seal keeps its finished tool results. The
-// recovery seal writes them without touching the project. It closes the step to its host unless
-// the failure was a stop.
+// recovery seal writes them without touching the project. It closes the step to its host, whether
+// the host was lost or the turn was stopped.
 
 import assert from "node:assert/strict";
 import {
@@ -119,7 +119,7 @@ for (const { failure, atSeal } of [
     );
     await assert.rejects(stat(join(root, "host")), { code: "ENOENT" });
     console.log("PASS the recovery seal does not restore or capture the project");
-    // A step that lost its host is closed to it. After a stop, the tools' work is still theirs.
+    // Closed either way. A stopped tool may still run on its host and must not publish later.
     const markers = await readdir(`${file}.tree/closed`).catch(() => [] as string[]);
     const closed = await Promise.all(
       markers.map(async (name) =>
@@ -128,11 +128,11 @@ for (const { failure, atSeal } of [
     );
     assert.deepEqual(
       closed.map((entry: { turn: string; step: number }) => `${entry.turn}/${entry.step}`),
-      failure instanceof Cancelled ? [] : ["prompt/1"],
+      ["prompt/1"],
     );
     console.log(
       failure instanceof Cancelled
-        ? "PASS a stop leaves the step open to the host that was running it"
+        ? "PASS a stopped step is closed to the host that was running it"
         : "PASS a step that lost its host is closed to it",
     );
   } finally {

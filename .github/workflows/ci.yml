@@ -37,9 +37,18 @@ jobs:
             fork.pin
       - run: npm ci
       - run: scripts/setup-fork.sh
+      # A pinned release, checked against its published SHA-256, not an unpinned install script.
       - name: Install the Temporal CLI
+        env:
+          VERSION: "1.9.1"
+          SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
         run: |
-          curl -sSf https://temporal.download/cli.sh | sh
+          tarball="temporal_cli_${VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/temporalio/cli/releases/download/v${VERSION}/${tarball}"
+          echo "$SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$HOME/.temporalio/bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$HOME/.temporalio/bin" temporal
           echo "$HOME/.temporalio/bin" >> "$GITHUB_PATH"
       - name: Start a dev server
         run: |

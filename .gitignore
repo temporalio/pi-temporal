@@ -6,7 +6,7 @@ dist/
 sessions/
 .fork/
 # quarantine-routing-check writes this beside itself and removes it, unless it is killed first.
-checks/.free-host-worker.tmp.mts
+checks/.free-host-worker*.tmp.mts
 
 # Each demo run keeps its logs and its copy of the project here.
 demo/logs/
