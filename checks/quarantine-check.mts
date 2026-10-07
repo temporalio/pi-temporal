@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -296,7 +296,16 @@ async function main() {
   // A start time from another pid namespace says nothing about this pid.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...reusedNote, pidStartedAt: "elsewhere", pidNs: "pid:[elsewhere]" });
-  check("one from another pid namespace keeps a live pid refused", !(await usable()));
+  check("one from another pid namespace that is still touched stays refused", !(await usable()));
+  // Its writer stops touching it, as after a container restart. Stop ours by hand first.
+  const dir = (await writersHere())!;
+  const [name] = await readdir(dir);
+  const left = await readFile(join(dir, name), "utf8");
+  await worktree.endWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await writeFile(join(dir, name), left);
+  const old = new Date(Date.now() - 5 * 60_000);
+  await utimes(join(dir, name), old, old);
+  check("one from another pid namespace that went quiet is cleared", await usable());
   await worktree.clearWriters(project);
   await ended(holder);
 

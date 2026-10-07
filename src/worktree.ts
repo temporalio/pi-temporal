@@ -23,6 +23,7 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -239,8 +240,16 @@ export interface WriterNote extends Writer {
   readonly pidStartedAt?: string;
   // Containers can share a hostname but not pids, so a start time is only comparable in one ns.
   readonly pidNs?: string;
+  // How often a live writer touches its marker. The only sign of life a reader in another pid
+  // namespace can see, e.g. after a container restart.
+  readonly refreshMs?: number;
   readonly started: string;
 }
+
+const REFRESH_MS = 10_000;
+// Missed refreshes before a marker from another pid namespace counts as left behind.
+const QUIET_AFTER = 4;
+const refreshing = new Map<string, NodeJS.Timeout>();
 
 // In the environment so a tool's children inherit it and a scan can find them later. Fresh per
 // process, and set at load before anything is spawned.
@@ -443,7 +452,8 @@ async function samePids(note: WriterNote): Promise<boolean> {
 /** Mark a tool call as about to write this directory. `endWrite` clears it. */
 export async function beginWrite(projectDir: string, writer: Writer): Promise<void> {
   await mkdir(writersDir(projectDir), { recursive: true });
-  await writeJson(writerPath(projectDir, writer), {
+  const path = writerPath(projectDir, writer);
+  await writeJson(path, {
     ...writer,
     host: hostname(),
     pid: process.pid,
@@ -453,12 +463,19 @@ export async function beginWrite(projectDir: string, writer: Writer): Promise<vo
     bootAt: bootAt(),
     ...((await startedAt()) === undefined ? {} : { pidStartedAt: await startedAt() }),
     ...((await pidNs()) === undefined ? {} : { pidNs: await pidNs() }),
+    refreshMs: REFRESH_MS,
     started: new Date().toISOString(),
   } satisfies WriterNote);
+  clearInterval(refreshing.get(path));
+  const touch = () => void utimes(path, new Date(), new Date()).catch(() => {});
+  refreshing.set(path, setInterval(touch, REFRESH_MS).unref());
 }
 
 export async function endWrite(projectDir: string, writer: Writer): Promise<void> {
-  await rm(writerPath(projectDir, writer), { force: true });
+  const path = writerPath(projectDir, writer);
+  clearInterval(refreshing.get(path));
+  refreshing.delete(path);
+  await rm(path, { force: true });
 }
 
 /**
@@ -471,6 +488,8 @@ export function insideBecause(
   live: LiveHere | undefined,
   // Start time of whatever holds the pid now, when comparable with the marker's.
   pidStartedNow?: string,
+  // Set only when the writer was in another pid namespace: how long since its marker was touched.
+  quietMs?: number,
 ): string | undefined {
   // Two hosts sharing one data directory can't see each other's processes.
   if (note.host !== hostname()) return `it was written on ${note.host}, and this is ${hostname()}`;
@@ -483,7 +502,15 @@ export function insideBecause(
     note.pidStartedAt !== undefined &&
     pidStartedNow !== undefined &&
     pidStartedNow !== note.pidStartedAt;
-  if (running(note.pid) && !reused) return `pid ${note.pid} is still running`;
+  if (quietMs !== undefined && note.refreshMs !== undefined) {
+    // Its pid names nothing here, so ask whether its writer still touches the marker.
+    if (quietMs < note.refreshMs * QUIET_AFTER) {
+      const ago = Math.round(quietMs / 1000);
+      return `it ran in another pid namespace and touched its marker ${ago}s ago`;
+    }
+  } else if (running(note.pid) && !reused) {
+    return `pid ${note.pid} is still running`;
+  }
   // The writer is gone. Ask about what its children carry and where they stand, not about pids.
   if (live === undefined) return "this host could not be asked what is running on it";
   // Catches daemonized children, which leave the group but keep the environment.
@@ -515,9 +542,12 @@ async function writersHere(projectDir: string): Promise<(WriterNote & { because:
     const path = join(writersDir(projectDir), name);
     const note = await readJson<WriterNote>(path);
     if (!note) continue;
-    const comparable = note.pidStartedAt !== undefined && (await samePids(note));
-    const startedNow = comparable ? await startTimeOf(note.pid) : undefined;
-    const because = insideBecause(note, live, startedNow);
+    const same = await samePids(note);
+    const startedNow =
+      same && note.pidStartedAt !== undefined ? await startTimeOf(note.pid) : undefined;
+    const touched = same ? undefined : await stat(path).then((s) => s.mtimeMs, () => undefined);
+    const quiet = touched === undefined ? undefined : Math.max(0, Date.now() - touched);
+    const because = insideBecause(note, live, startedNow, quiet);
     if (because !== undefined) found.push({ ...note, because });
     else await rm(path, { force: true });
   }

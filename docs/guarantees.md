@@ -114,6 +114,9 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
   records the call’s process. The host clears it only after checking the process and its process
   group, plus the cgroup on Linux. It also checks for processes with the exported name, working
   directory, or open files in the directory. A reused PID doesn’t count as the original process.
+  A live call touches its marker every 10 seconds. A marker from another PID namespace, e.g.
+  before a container restart, counts as live until it goes quiet for 40 seconds. Children that
+  outlive such a call are not seen from the new namespace.
   A directory the session built from empty can be moved aside and rebuilt. That separates writes
   through inherited working directories or open handles. A command that uses an absolute path
   can still reach the replacement directory. `release-tree` clears a directory by hand
