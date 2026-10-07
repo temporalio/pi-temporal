@@ -210,6 +210,28 @@ async function unreadableTreeState() {
   );
 }
 
+// A writer that died between its scratch write and the rename leaves an empty `.writing` file.
+async function leftoverScratch() {
+  const file = session("scratch");
+  await seed("scratch-seed", file, "scratch tree\n");
+  asHost("scratch-worker");
+  const dir = project("scratch-worker");
+  await worktree.ensure(dir, file);
+  const { createHash } = await import("node:crypto");
+  const host = join(
+    root, "scratch-worker", "data", "trees",
+    createHash("sha256").update(dir).digest("hex").slice(0, 16),
+  );
+  await fs.mkdir(join(host, "writers"), { recursive: true });
+  await fs.writeFile(join(host, "writers", "call.json.abc.writing"), "");
+  await fs.writeFile(join(host, "held-0000000000000000.json.abc.writing"), "");
+
+  await worktree.ensure(dir, file);
+  await worktree.capture(dir, file);
+  assert.equal(await worktree.clearWriters(dir), 0);
+  await worktree.sweep();
+}
+
 const checks = {
   staleSweep,
   behindRetirement,
@@ -219,6 +241,7 @@ const checks = {
   liveWriterRetirement,
   oldClosure,
   unreadableTreeState,
+  leftoverScratch,
 };
 try {
   const selected = process.argv[2] as keyof typeof checks | undefined;

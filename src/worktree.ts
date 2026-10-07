@@ -122,6 +122,17 @@ async function readJson<T>(path: string): Promise<T | undefined> {
 const scratchToken = () => randomBytes(6).toString("hex");
 
 // Through a scratch name, so a reader never sees half a document.
+// A writer that died between writing its scratch file and renaming it leaves the scratch behind.
+// Scans skip it, or a half-written file would wedge every directory scan.
+const isScratch = (name: string) => name.endsWith(".writing");
+
+// Missing is empty. Unreadable can't permit a new writer, so it throws.
+const listDir = (dir: string) =>
+  readdir(dir).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === "ENOENT") return [] as string[];
+    throw err;
+  });
+
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true });
   const scratch = `${path}.${scratchToken()}.writing`;
@@ -465,7 +476,7 @@ export function insideBecause(
 
 // Markers that can't be a live tool any more are deleted.
 async function writersHere(projectDir: string): Promise<(WriterNote & { because: string })[]> {
-  const names = await readdir(writersDir(projectDir)).catch(() => [] as string[]);
+  const names = (await listDir(writersDir(projectDir))).filter((name) => !isScratch(name));
   if (names.length === 0) return [];
   const live = await liveHere(projectDir);
   const found: (WriterNote & { readonly because: string })[] = [];
@@ -590,9 +601,10 @@ export async function cannotMoveAside(projectDir: string): Promise<string | unde
 
 /** Clear the refusal, for an operator who has stopped whatever was left running. */
 export async function clearWriters(projectDir: string): Promise<number> {
-  const stranded = await writersHere(projectDir);
+  // No parsing first. This is the way out for a marker nothing else can read.
+  const markers = (await listDir(writersDir(projectDir))).filter((name) => !isScratch(name));
   await rm(writersDir(projectDir), { recursive: true, force: true });
-  return stranded.length;
+  return markers.length;
 }
 
 // What the directory holds now, as a tree id. Callers hold the tree lock.
@@ -734,8 +746,8 @@ async function handBack(projectDir: string, held: Held) {
 // runs on one host, so the others clean up here. Called with the tree lock held.
 async function heldByOthers(projectDir: string, sessionFile: string) {
   const mine = heldName(sessionFile);
-  const names = (await readdir(hostDir(projectDir)).catch(() => [] as string[])).filter(
-    (name) => name.startsWith("held-") && name !== mine,
+  const names = (await listDir(hostDir(projectDir))).filter(
+    (name) => name.startsWith("held-") && !isScratch(name) && name !== mine,
   );
   let holdouts = 0;
   for (const name of names) {
@@ -834,7 +846,8 @@ export async function ensure(
 ): Promise<void> {
   await withTreeLocks(projectDir, sessionFile, async () => {
     // Before any restore, or a stray writer's next capture would look current. Moving the
-    // directory aside isolates the writer fully, so the readings need not be conclusive.
+    // directory aside keeps a writer's relative paths away from the new one. Absolute paths still
+    // reach it, so the move narrows the risk and doesn't close it.
     await refuseWhenStranded(projectDir, current).catch(async (err: unknown) => {
       if (!(err instanceof Quarantined)) throw err;
       const moved = await moveAside(projectDir, sessionFile, current);
@@ -966,11 +979,12 @@ export async function sweep(): Promise<number> {
   let freed = 0;
   for (const dir of await readdir(treesRoot()).catch(() => [] as string[])) {
     const names = (await readdir(join(treesRoot(), dir)).catch(() => [] as string[])).filter(
-      (name) => name.startsWith("held-"),
+      (name) => name.startsWith("held-") && !isScratch(name),
     );
     for (const name of names) {
       const path = join(treesRoot(), dir, name);
-      const note = await readJson<Held>(path);
+      // A cleanup pass. A note it can't read keeps its directory, and the others still go.
+      const note = await readJson<Held>(path).catch(() => undefined);
       if (!note?.session || !note.directory || !(await isRetired(note.session))) continue;
       const done = await withTreeLocks(note.directory, note.session, async () => {
         const current = await readJson<Held>(path);

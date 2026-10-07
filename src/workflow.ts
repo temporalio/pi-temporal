@@ -157,12 +157,10 @@ export async function piSession(
         },
         isCancellation,
         outOfBudget: () => outOfBudget(),
-        pinnedTo: (queue) => pinnedTo(
-          queue,
-          patched("pinned-tools-use-the-configured-timeout")
-            ? options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES
-            : DEFAULT_TOOL_TIMEOUT_MINUTES,
-        ),
+        // No patch gate. Replay doesn't compare activity timeouts, so a running session takes the
+        // configured timeout from its next pinned call on.
+        pinnedTo: (queue) =>
+          pinnedTo(queue, options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES),
         isUnclaimed,
         // False only when replaying older histories. See the dep.
         refusesStartedFailures: () => patched("pinned-started-failure-does-not-migrate"),

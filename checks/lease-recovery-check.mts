@@ -80,7 +80,9 @@ async function failedRenewal() {
     syncBuiltinESMExports();
     Date.now = () => originalNow() + 51_000;
     try {
-      await sleep(3_200);
+      // Wait for a refresh to reach the failure, not for one tick. A loaded machine runs late.
+      const deadline = originalNow() + 15_000;
+      while (attempts === 0 && originalNow() < deadline) await sleep(100);
       assert.ok(attempts > 0, "renewal must reach the injected storage failure");
       assert.equal(ownedNow(), false, "a readable token cannot extend a failed renewal");
     } finally {

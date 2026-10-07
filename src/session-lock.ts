@@ -2,8 +2,9 @@
 // rather than corrupt it. Two attempts of the same activity can overlap after a stalled heartbeat.
 //
 // A lease, not a fence. Callers must re-check ownership right before each write. The lock is a
-// directory of claims named by epoch. Taking over is an exclusive create of epoch N+1, so it is a
-// compare-and-set on the state the contender read.
+// directory of claims named by epoch. Taking over is an exclusive create of epoch N+1, and the
+// claim counts only while no newer epoch exists. A released claim stays on disk, expired, so
+// epochs only grow and a contender that paused can't reuse one.
 
 import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -39,8 +40,10 @@ async function claims(dir: string): Promise<Claim[]> {
   for (const name of names) {
     const epoch = Number.parseInt(name, 10);
     if (!Number.isFinite(epoch)) continue;
+    // Another client can delete a superseded claim between the listing and the stat. NFS reports
+    // that as a stale handle.
     const info = await stat(join(dir, name)).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") return undefined;
+      if (err.code === "ENOENT" || err.code === "ESTALE") return undefined;
       throw err;
     });
     if (info) found.push({ epoch, name, mtimeMs: info.mtimeMs });
@@ -76,29 +79,39 @@ export async function withSessionLock<T>(
     if (!contended) {
       const epoch = (owner?.epoch ?? 0) + 1;
       const name = claimName(epoch);
+      const path = join(dir, name);
       if (claimPauseMs > 0) await new Promise((resolve) => setTimeout(resolve, claimPauseMs));
+      const confirmedAt = Date.now();
+      let created = false;
       try {
-        const confirmedAt = Date.now();
-        await writeFile(join(dir, name), held(token), { encoding: "utf8", flag: "wx" });
-        const latest = (await claims(dir)).at(-1);
-        if (latest?.epoch !== epoch) {
-          await rm(join(dir, name), { force: true });
-          continue;
-        }
-        mine = { epoch, name, confirmedAt };
-        // Lower epochs are superseded. Their holders notice because something newer exists.
-        for (const stale of existing) {
-          if (stale.epoch < epoch) await rm(join(dir, stale.name), { force: true });
-        }
-        if ((await claims(dir)).at(-1)?.epoch !== epoch) {
-          await rm(join(dir, name), { force: true });
-          continue;
-        }
-        break;
+        await writeFile(path, held(token), { encoding: "utf8", flag: "wx" });
+        created = true;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         // Lost the race for this epoch, or the directory vanished. Look again.
         if (code !== "EEXIST" && code !== "ENOENT") throw err;
+      }
+      if (created) {
+        try {
+          // Lower epochs are superseded. Their holders notice because something newer exists.
+          for (const stale of existing) {
+            if (stale.epoch < epoch) await rm(join(dir, stale.name), { force: true });
+          }
+          // The create alone isn't a compare-and-set. A contender that paused before it can
+          // recreate an epoch that was already superseded. So the claim counts only if it's
+          // still the newest after the cleanup.
+          if ((await claims(dir)).at(-1)?.epoch === epoch) {
+            mine = { epoch, name, confirmedAt };
+            break;
+          }
+          await rm(path, { force: true });
+          continue;
+        } catch (err) {
+          // Nobody can tell whether this claim holds, so expire it. Otherwise every contender,
+          // the retry of this activity included, waits out the stale window.
+          await utimes(path, new Date(0), new Date(0)).catch(() => {});
+          throw err;
+        }
       }
     }
     if (Date.now() >= deadline) {
@@ -122,11 +135,10 @@ export async function withSessionLock<T>(
     }
   };
 
-  // Check the token too. An emptied directory restarts at epoch one.
-  const stillOurs = async (list: Claim[]) => {
-    const owner = list[list.length - 1];
-    if (!owner || owner.epoch !== mine.epoch) return false;
-    return (await holderOf(owner.name)) === token;
+  const markLost = () => {
+    lost = true;
+    clearInterval(refresh);
+    return false;
   };
 
   let refreshing: Promise<void> | undefined;
@@ -138,15 +150,13 @@ export async function withSessionLock<T>(
       if (!list || lost) return;
       const owner = list[list.length - 1];
       if (!owner || owner.epoch !== mine.epoch) {
-        lost = true;
-        clearInterval(refresh);
+        markLost();
         return;
       }
       const holder = await holderOf(owner.name);
       if (holder === undefined || lost) return;
       if (holder !== token) {
-        lost = true;
-        clearInterval(refresh);
+        markLost();
         return;
       }
       const now = new Date(confirmedAt);
@@ -163,12 +173,18 @@ export async function withSessionLock<T>(
   refresh.unref?.();
 
   // Reads storage instead of trusting the refresher, which can be up to `REFRESH_MS` stale.
+  // An unreadable read is no confirmation, but no loss either, the same as for the refresher. A
+  // newer epoch or another token is a loss, and a lock taken away does not come back.
   const owned = async () => {
+    if (lost) return false;
     const list = await claims(dir).catch(() => undefined);
     if (lost || list === undefined) return false;
-    const ours = await stillOurs(list);
-    if (!ours) lost = true;
-    return ours;
+    const owner = list[list.length - 1];
+    if (!owner || owner.epoch !== mine.epoch) return markLost();
+    const holder = await holderOf(owner.name);
+    if (holder === undefined) return false;
+    if (holder !== token) return markLost();
+    return !lost;
   };
 
   // For synchronous appends that cannot await shared storage.
@@ -182,10 +198,13 @@ export async function withSessionLock<T>(
     lost = true;
     await refreshing;
     // Epoch reuse would let a paused contender overtake a new holder. Keep one expired claim.
+    // Expiring it only makes the handoff faster, since it goes stale anyway. A failure here must
+    // not turn the body's result into a failed activity.
     if ((await holderOf(mine.name)) === token) {
       const released = new Date(0);
-      await utimes(join(dir, mine.name), released, released).catch((err: NodeJS.ErrnoException) => {
-        if (err.code !== "ENOENT") throw err;
+      const path = join(dir, mine.name);
+      await utimes(path, released, released).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== "ENOENT") console.warn(`could not expire ${path}: ${err.message}`);
       });
     }
   }

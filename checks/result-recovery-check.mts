@@ -81,13 +81,19 @@ async function duplicateResult() {
 }
 
 async function invalidCallIds() {
-  for (const id of ["../outside", "../../outside", "a/b", "a\\b", "a\0b", "", "x".repeat(201)]) {
-    await assert.rejects(pending.noteDispatch(input.sessionFile, "invalid", 1, id));
+  const ids = ["../outside", "../../outside", "a/b", "a\\b", "a\0b", "", "x".repeat(201), "~x"];
+  // Each one still gets a claim of its own, inside its step and nowhere else.
+  for (const id of ids) {
+    assert.equal(await pending.noteDispatch(input.sessionFile, "invalid", 1, id), true);
+    assert.equal(await pending.noteDispatch(input.sessionFile, "invalid", 1, id), false);
   }
-  const files = await fs.readdir(join(`${input.sessionFile}.pending`, "invalid", "1"));
-  assert.deepEqual(files, [], "invalid call IDs cannot write claims outside their step");
+  const step = join(`${input.sessionFile}.pending`, "invalid", "1");
+  const files = await fs.readdir(step);
+  assert.equal(files.length, ids.length, "each ID has its own claim in its step");
+  assert.ok(files.every((name) => name.startsWith("~")));
+  assert.deepEqual(await fs.readdir(join(`${input.sessionFile}.pending`, "invalid")), ["1"]);
   assert.equal(await pending.noteDispatch(input.sessionFile, "valid", 1, "call_123-abc"), true);
-  console.log("PASS invalid call IDs cannot change dispatch storage");
+  console.log("PASS invalid call IDs get a claim of their own inside their step");
 }
 
 try {
