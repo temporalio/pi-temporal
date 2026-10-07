@@ -12,16 +12,18 @@ port="${TEMPORAL_PORT:-7233}"
 export TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:$port}"
 export PI_TEMPORAL_PROVIDER="${PI_TEMPORAL_PROVIDER:-openai}"
 export PI_MODEL="${PI_MODEL:-gpt-4o-mini}"
-export PI_PROJECT_DIR="${PI_PROJECT_DIR:-$(mktemp -d)}"
 
-if [ -z "${OPENAI_API_KEY:-}" ]; then
-  key_file="${OPENAI_API_KEY_FILE:-}"
-  [ -n "$key_file" ] && [ -f "$key_file" ] || {
-    echo "set OPENAI_API_KEY, or OPENAI_API_KEY_FILE to a file holding one" >&2
-    exit 1
-  }
-  OPENAI_API_KEY="$(tr -d '[:space:]' < "$key_file")"
-  export OPENAI_API_KEY
+# Ours to delete only if we made it.
+made_project=""
+if [ -z "${PI_PROJECT_DIR:-}" ]; then
+  made_project="$(mktemp -d)"
+  export PI_PROJECT_DIR="$made_project"
+fi
+
+# The worker reads `OPENAI_API_KEY_FILE` itself, so the key isn't copied into this env.
+if [ -z "${OPENAI_API_KEY:-}" ] && ! [ -f "${OPENAI_API_KEY_FILE:-}" ]; then
+  echo "set OPENAI_API_KEY, or OPENAI_API_KEY_FILE to a file holding one" >&2
+  exit 1
 fi
 
 [ -d node_modules ] || { echo "run 'npm ci && npm run setup-fork' first" >&2; exit 1; }
@@ -40,18 +42,27 @@ set +m
 cleanup() {
   kill -- "-$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
+  rm -f "$log"
+  [ -z "$made_project" ] || rm -rf "$made_project"
 }
 trap cleanup EXIT
 
 echo "worker pid $worker, session $session, project $PI_PROJECT_DIR"
 node --import tsx scripts/submit.mts "$session" "Reply with the single word $word."
 
+# Match the assistant's answer, not the file, which holds the prompt with the same word.
+answered() {
+  local seen
+  [ -f "$file" ] && seen="$(node --import tsx scripts/inspect.mts "$file")" \
+    && grep -q "\"lastAssistant\":\"[^\"]*$word" <<< "$seen"
+}
+
 for _ in $(seq 1 60); do
   sleep 2
-  [ -f "$file" ] && grep -q "$word" "$file" && break
+  answered && break
 done
 
-if [ -f "$file" ] && node --import tsx scripts/inspect.mts "$file" | grep -q "$word"; then
+if answered; then
   echo "PASS  $(node --import tsx scripts/inspect.mts "$file")"
   exit 0
 fi

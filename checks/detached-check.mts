@@ -114,8 +114,10 @@ async function main() {
   // effect has happened when the worker dies and the takeover must not repeat it.
   const ranFile = join(sessions, "ran.txt");
   const env = {
-    TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7241",
+    TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
     PI_SESSION_DIR: sessions,
+    // The real model's tools run here, not in this checkout.
+    PI_PROJECT_DIR: await mkdtemp(join(tmpdir(), "pi-l3-project-")),
     PI_TEMPORAL_TASK_QUEUE: `pi-l3-${Date.now()}`,
     PI_TEMPORAL_STEPPED: "1",
   };

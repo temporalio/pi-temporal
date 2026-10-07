@@ -96,7 +96,10 @@ async function main() {
 
   // The free host, an activity-only worker in a child process. Written beside this file, since a
   // module in /tmp cannot resolve the SDK.
-  const helper = fileURLToPath(new URL("./.free-host-worker.tmp.mts", import.meta.url));
+  // Unique per run, so two runs from one checkout don't overwrite each other's helper.
+  const helper = fileURLToPath(
+    new URL(`./.free-host-worker-${process.pid}-${Date.now()}.tmp.mts`, import.meta.url),
+  );
   await writeFile(
     helper,
     `import { NativeConnection, Worker } from "@temporalio/worker";\n` +
@@ -114,13 +117,31 @@ async function main() {
       `    },\n` +
       `  }),\n` +
       `});\n` +
-      `await worker.run();\n`,
+      `const running = worker.run();\n` +
+      `console.log("FREE_HOST_READY");\n` +
+      `await running;\n`,
     "utf8",
   );
   const child = spawn(process.execPath, ["--import", "tsx", helper], {
     cwd: fileURLToPath(new URL(".", import.meta.url)),
     env: { ...process.env, PI_TEMPORAL_DATA: process.env.PI_TEMPORAL_DATA },
     stdio: ["ignore", "pipe", "pipe"],
+  });
+  // The child has to be polling before the turn starts, or the refused host answers unopposed.
+  let out = "";
+  const ready = new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), 60_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      out += chunk.toString();
+      if (out.includes("FREE_HOST_READY")) {
+        clearTimeout(timer);
+        resolve(true);
+      }
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
   });
   child.stdout.on("data", (chunk: Buffer) => {
     if (chunk.toString().includes("RAN_ON free")) ranOn.push("free");
@@ -131,10 +152,9 @@ async function main() {
     if (/Error|error:/.test(line)) console.error("[free host]", line.split("\n")[0].slice(0, 200));
   });
   const running = [refused.run()];
-  // The child has to be polling before the turn starts, or the refused host answers unopposed.
-  await new Promise((resolve) => setTimeout(resolve, 20_000));
 
   try {
+    if (!(await ready)) throw new Error("the free host never started polling");
     const handle = await client.workflow.start("piSession", {
       workflowId: `${queue}-session`,
       taskQueue: queue,
