@@ -217,24 +217,27 @@ export function makeActivities(
   // Optional, because the checks' fake sessions keep no record. A real session always has one.
   const managerOf = (session: AgentSession) =>
     (session as unknown as { sessionManager?: Record }).sessionManager;
-  const recordedSeconds = (session: AgentSession): number | undefined => {
+  // The session's time before `turn`, from the latest total another turn wrote. This turn's own
+  // entries are skipped, so a step that runs again can't count the turn twice.
+  const secondsBefore = (session: AgentSession, turn: string): number | undefined => {
     const branch = managerOf(session)?.getBranch() ?? [];
     for (let i = branch.length - 1; i >= 0; i--) {
       const entry = branch[i];
-      if (entry.type === "custom" && entry.customType === SESSION_SECONDS_ENTRY) {
-        const seconds = (entry.data as { seconds?: unknown } | undefined)?.seconds;
-        return typeof seconds === "number" ? seconds : undefined;
-      }
+      if (entry.type !== "custom" || entry.customType !== SESSION_SECONDS_ENTRY) continue;
+      const data = entry.data as { turn?: unknown; seconds?: unknown } | undefined;
+      if (data?.turn === turn) continue;
+      return typeof data?.seconds === "number" ? data.seconds : undefined;
     }
     return undefined;
   };
-  // Written by the step that ends a turn, under the session lease like any other append.
-  const recordSeconds = (session: AgentSession, seconds: number | undefined) => {
+  // Every step writes the total so far, so a turn that's stopped, runs out of budget, or fails
+  // still counts up to its last step. Under the session lease, like any other append.
+  const recordSeconds = (session: AgentSession, turn: string, seconds: number | undefined) => {
     if (seconds === undefined) return;
-    managerOf(session)?.appendCustomEntry(SESSION_SECONDS_ENTRY, { seconds });
+    managerOf(session)?.appendCustomEntry(SESSION_SECONDS_ENTRY, { turn, seconds });
   };
-  const withSeconds = (session: AgentSession) => {
-    const seconds = recordedSeconds(session);
+  const withSeconds = (session: AgentSession, turn: string) => {
+    const seconds = secondsBefore(session, turn);
     return seconds === undefined ? {} : { sessionSeconds: seconds };
   };
 
@@ -409,10 +412,10 @@ export function makeActivities(
           );
           const { done } = sealed;
           await session.waitForIdle();
-          // Read before the write, so the Workflow adds this turn's time once, not twice.
-          const secondsBefore = withSeconds(session);
-          if (done && input.sessionSeconds !== undefined) {
-            recordSeconds(session, input.sessionSeconds + (Date.now() - stepStartedAt) / 1000);
+          const secondsSoFar = withSeconds(session, input.promptId);
+          if (input.sessionSeconds !== undefined) {
+            const seconds = input.sessionSeconds + (Date.now() - stepStartedAt) / 1000;
+            recordSeconds(session, input.promptId, seconds);
           }
           const messages = session.state.messages as Msg[];
           const spent = spentSince(before, session);
@@ -426,7 +429,7 @@ export function makeActivities(
             finalText: done ? lastAssistantText(messages) : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
-            ...secondsBefore,
+            ...secondsSoFar,
           };
         } finally {
           session.dispose();
@@ -470,7 +473,7 @@ export function makeActivities(
             ...(opts.stepQueue === undefined ? {} : { queue: opts.stepQueue }),
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
-            ...withSeconds(session),
+            ...withSeconds(session, input.promptId),
           };
         } finally {
           session.dispose();
@@ -625,9 +628,8 @@ export function makeActivities(
           });
           const { done } = sealed;
           await session.waitForIdle();
-          // Read before the write, so the Workflow adds this turn's time once, not twice.
-          const secondsBefore = withSeconds(session);
-          if (done) recordSeconds(session, input.sessionSeconds);
+          const secondsSoFar = withSeconds(session, input.turn);
+          recordSeconds(session, input.turn, input.sessionSeconds);
           // Kept results stay until the next step sweeps them, so a retried seal can read them.
           const answer = lastAssistantText(session.state.messages as Msg[]);
           // Ship after the seal, so the tree matches the transcript.
@@ -647,7 +649,7 @@ export function makeActivities(
             finalText: done ? answer : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
-            ...secondsBefore,
+            ...secondsSoFar,
           };
         } finally {
           session.dispose();

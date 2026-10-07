@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { connect, interrupt, submitPrompt } from "./client.js";
+import { connect, interrupt, sessionExists, submitPrompt } from "./client.js";
 import {
   clientProblems,
   describe,
@@ -85,6 +85,7 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
   await refuseProject(projectDir);
   await worktree.capture(projectDir, file, { seed: true });
   say(`  sent the project from ${projectDir}`);
+  return { file, projectDir };
 }
 
 // The guard `/background` uses. From a home directory, `~/.ssh` and `~/.aws` would ship.
@@ -128,10 +129,25 @@ async function start(args: string[]) {
   refuseConflicts();
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
   const sessionId = flag("session") ?? `task-${randomUUID().slice(0, 8)}`;
-  // Seed before the prompt, or the first worker to run an activity would supply the project.
-  await seedProject(sessionId, flag("project"));
-  // Creates the session and delivers the prompt. Doesn't wait for the turn.
-  await submitPrompt(sessionId, text);
+  // Reachable first. Seeding claims the project directory, and a server that's down would leave
+  // that claim on a session that never starts, refusing every later one there.
+  const { client, connection } = await connect();
+  try {
+    // Seed before the prompt, or the first worker to run an activity would supply the project.
+    const seeded = await seedProject(sessionId, flag("project"));
+    // Creates the session and delivers the prompt. Doesn't wait for the turn.
+    await submitPrompt(sessionId, text).catch(async (err: unknown) => {
+      // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.
+      if (seeded && (await sessionExists(client, sessionId)) === false) {
+        await worktree.forget(seeded.file, seeded.projectDir);
+      } else {
+        say(`  it may have started: pi-temporal watch ${sessionId}`);
+      }
+      throw err;
+    });
+  } finally {
+    await connection.close();
+  }
   emit(sessionId);
   say(`  follow it with: pi-temporal watch ${sessionId}`);
 }

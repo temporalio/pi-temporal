@@ -72,6 +72,23 @@ try {
     `--project=${bare}`], tree);
   check("schedule refuses an unguarded directory", scheduledBare.code !== 0, scheduledBare);
 
+  // A server that's down must not leave the project claimed for a session that never started.
+  const unseeded = join(root, "unseeded");
+  await mkdir(unseeded);
+  await writeFile(join(unseeded, ".gitignore"), "");
+  await writeFile(join(unseeded, "seed.txt"), "seed\n");
+  const down = await cli(["start", "the task", `--project=${unseeded}`, `--session=${id}-down`], {
+    ...tree,
+    TEMPORAL_ADDRESS: "127.0.0.1:1",
+  });
+  const claims = (await readdir(join(root, "data", "trees")).catch(() => [] as string[])).length;
+  const shipped = await readdir(join(sessions, `${id}-down.jsonl.tree`)).catch(() => []);
+  check(
+    "start with the server down claims nothing",
+    down.code !== 0 && claims === 0 && shipped.length === 0,
+    { down, claims, shipped },
+  );
+
   const watched = await cli(["watch", `${id}-nobody`]);
   check(
     "watch on an unknown id says so and fails",

@@ -36,7 +36,7 @@ import type {
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 import * as worktree from "../src/worktree.js";
-import { openClient } from "../src/client.js";
+import { openClient, sessionExists } from "../src/client.js";
 import {
   clientProblems,
   type Config,
@@ -379,8 +379,12 @@ export default function (pi: ExtensionAPI) {
       };
 
       const sessionFile = sessionFileFor(cfg.sessionDir, task.sessionId);
+      let seeded = false;
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);
+        // Before the project is claimed. A server that's down would otherwise leave a claim on a
+        // session that never starts, and this directory would refuse every later task.
+        const { client } = await connect();
         // Ship the project from this directory. Workers never seed it, since the first activity
         // could land on any of them.
         if (cfg.shipTree) {
@@ -394,8 +398,8 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           await worktree.capture(ctx.cwd, sessionFile, { seed: true });
+          seeded = true;
         }
-        const { client } = await connect();
         await client.workflow.signalWithStart(WORKFLOW_TYPE, {
           taskQueue: cfg.taskQueue,
           workflowId: workflowId(task.sessionId),
@@ -405,10 +409,20 @@ export default function (pi: ExtensionAPI) {
         });
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
+        // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.
+        let mayRun = false;
+        if (seeded) {
+          const exists = await connect()
+            .then(({ client }) => sessionExists(client, task.sessionId))
+            .catch(() => undefined);
+          if (exists === false) await worktree.forget(sessionFile, ctx.cwd).catch(() => {});
+          else mayRun = true;
+        }
         ctx.ui.notify(
-          unreachable(err)
+          (unreachable(err)
             ? `could not reach Temporal at ${cfg.address}: ${why}`
-            : `could not start the background task: ${why}`,
+            : `could not start the background task: ${why}`) +
+            (mayRun ? `. It may have started as ${task.sessionId}.` : ""),
           "error",
         );
         return;

@@ -73,8 +73,8 @@ export interface RunStepInput extends PromptInput {
   readonly retryAttempt?: number;
   // Whether the turn spent its one compact-and-retry, kept by the workflow for the same reason.
   readonly overflowRecoveryAttempted?: boolean;
-  // The session's turn time when this step was scheduled. The step that ends the turn writes it
-  // to the session record, so a run woken after an idle exit still counts the earlier turns.
+  // The session's turn time when this step was scheduled. Each step writes its total to the
+  // session record, so a run woken after an idle exit still counts the earlier turns.
   readonly sessionSeconds?: number;
   readonly sessionId: string;
   // Absolute path to the Pi session JSONL, the durable log. Shared storage across workers.

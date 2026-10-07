@@ -100,16 +100,25 @@ const revive = (sessionFile: string) => rm(retiredPath(sessionFile), { force: tr
 const treeLockPath = (projectDir: string) => join(hostDir(projectDir), "tree");
 const sharedLockPath = (sessionFile: string) => join(shareDir(sessionFile), "writers");
 
-// Always in this order, to avoid deadlock. `owned` lets `capture` recheck the shared lease before
-// each write, since a stalled holder's lease can be reclaimed.
+// Always in this order, to avoid deadlock. A stalled holder can lose either lease, the directory's
+// or the session's tree store, so `owned` answers for both, and the body asks before each write.
 const withTreeLocks = <T>(
   projectDir: string,
   sessionFile: string,
   body: (owned: () => Promise<boolean>) => Promise<T>,
 ) =>
-  withSessionLock(treeLockPath(projectDir), () =>
-    withSessionLock(sharedLockPath(sessionFile), (owned) => body(owned)),
+  withSessionLock(treeLockPath(projectDir), (directoryOwned) =>
+    withSessionLock(sharedLockPath(sessionFile), (storeOwned) =>
+      body(async () => (await directoryOwned()) && (await storeOwned())),
+    ),
   );
+
+/** Throws once either tree lease is gone, so a stalled holder's late write can't land. */
+const stillHolding = async (owned: () => Promise<boolean>, what: string, where: string) => {
+  if (!(await owned())) {
+    throw new Error(`lost a tree lease before ${what}: another writer has ${where}`);
+  }
+};
 
 async function readJson<T>(path: string): Promise<T | undefined> {
   try {
@@ -883,6 +892,8 @@ export async function capture(
     // After the refusals, so a capture that is refused leaves a retired session retired.
     await revive(sessionFile);
 
+    // The shadow index is a local write too, so it waits for the leases as well.
+    await stillHolding(owned, "capturing", projectDir);
     const tree = await treeHere(projectDir);
     if (tip?.tree === tree) return;
     if (tip) await ingest(projectDir, sessionFile, held?.seq ?? 0);
@@ -899,7 +910,7 @@ export async function ensure(
   sessionFile: string,
   current?: Writer,
 ): Promise<void> {
-  await withTreeLocks(projectDir, sessionFile, async () => {
+  await withTreeLocks(projectDir, sessionFile, async (owned) => {
     // Before any restore, or a stray writer's next capture would look current. Moving the
     // directory aside keeps a writer's relative paths away from the new one. Absolute paths still
     // reach it, so the move narrows the risk and doesn't close it.
@@ -938,6 +949,8 @@ export async function ensure(
     await revive(sessionFile);
     if (held?.tree === tip.tree) return;
 
+    // The writes start here, and the lock may have been taken over while the reads above waited.
+    await stillHolding(owned, "restoring", projectDir);
     if (held) {
       // Behind the tip with unshipped edits (a worker died before shipping). Publishing them would
       // revert the tip on every host, so set them aside and move to the tip.
@@ -948,7 +961,8 @@ export async function ensure(
     await mkdir(projectDir, { recursive: true });
     await ingest(projectDir, sessionFile, held?.seq ?? 0);
 
-    // `-u --reset` also removes files the newer tree dropped.
+    // `-u --reset` also removes files the newer tree dropped. Last check before the files change.
+    await stillHolding(owned, "checking out the tip", projectDir);
     await git(projectDir, ["read-tree", "-u", "--reset", tip.tree]);
     // `!held` only gets here for an empty directory, so this host built it. Otherwise carry the
     // note's value as is, so an adopted checkout never becomes releasable.
