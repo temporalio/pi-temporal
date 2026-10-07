@@ -83,7 +83,8 @@ function fakeTurn(options: { interruptAfter?: number; stopInFirstTool?: boolean 
       sealStep: async (results, sealOptions) => {
         seen.push(`seal:${step}:${results.length}`);
         postRuns.push(sealOptions?.postRun);
-        return { done: step === STEPS_TO_ANSWER, retryAttempt: 0 };
+        const done = step === STEPS_TO_ANSWER;
+        return { done, retryAttempt: 0, overflowRecoveryAttempted: false };
       },
     },
   };

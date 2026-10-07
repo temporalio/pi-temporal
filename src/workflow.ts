@@ -239,6 +239,7 @@ export async function piSession(
     let error: string | undefined;
     // Kept here because the session is rebuilt per activity and compaction rewrites the transcript.
     let retryAttempt = 0;
+    let overflowRecoveryAttempted = false;
     // Turn-scoped so the `finally` counts spend even for failed or stopped turns.
     const startedAt = Date.now();
     let tokens = 0;
@@ -295,10 +296,12 @@ export async function piSession(
             sessionFile: file,
             step,
             retryAttempt,
+            overflowRecoveryAttempted,
             ...prompt,
           };
           const result = await runTurnStep(input);
           retryAttempt = result.retryAttempt;
+          overflowRecoveryAttempted = result.overflowRecoveryAttempted ?? false;
           tokens += result.spent?.tokens ?? 0;
           cost += result.spent?.cost ?? 0;
           recorded = result.total ?? recorded;
