@@ -152,9 +152,18 @@ export async function withSessionLock<T>(
     return false;
   };
 
+  // Past this, a contender may already have read the claim as stale and be taking the next
+  // epoch. A late renewal can't win that back, because the contender doesn't read again before it
+  // claims. So the lease is lost for good before storage is even asked.
+  const expired = () => Date.now() - lastConfirmed >= STALE_MS - MARGIN_MS;
+
   let refreshing: Promise<void> | undefined;
   const refresh = setInterval(() => {
     if (lost || refreshing) return;
+    if (expired()) {
+      markLost();
+      return;
+    }
     refreshing = (async () => {
       const confirmedAt = Date.now();
       const list = await claims(dir).catch(() => undefined);
@@ -167,6 +176,12 @@ export async function withSessionLock<T>(
       const holder = await holderOf(owner.name);
       if (holder === undefined || lost) return;
       if (holder !== token) {
+        markLost();
+        return;
+      }
+      // The reads take time too. A renewal that lands past the window would hand back a lease a
+      // contender may already be taking.
+      if (expired()) {
         markLost();
         return;
       }
@@ -188,6 +203,7 @@ export async function withSessionLock<T>(
   // newer epoch or another token is a loss, and a lock taken away does not come back.
   const owned = async () => {
     if (lost) return false;
+    if (expired()) return markLost();
     const list = await claims(dir).catch(() => undefined);
     if (lost || list === undefined) return false;
     const owner = list[list.length - 1];

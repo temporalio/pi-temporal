@@ -301,7 +301,9 @@ export async function piSession(
           };
           const result = await runTurnStep(input);
           retryAttempt = result.retryAttempt;
-          overflowRecoveryAttempted = result.overflowRecoveryAttempted ?? false;
+          // A result with nothing to say, such as one from an older worker, keeps what an earlier
+          // seal reported. Reset to false, it would hand the turn a second compact-and-retry.
+          overflowRecoveryAttempted = result.overflowRecoveryAttempted ?? overflowRecoveryAttempted;
           tokens += result.spent?.tokens ?? 0;
           cost += result.spent?.cost ?? 0;
           recorded = result.total ?? recorded;

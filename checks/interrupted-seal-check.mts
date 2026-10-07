@@ -114,13 +114,18 @@ for (const { failure, atSeal } of [
     // Nothing was restored or captured: no bundle, no tip, and no host directory at all.
     assert.deepEqual(
       (await readdir(`${file}.tree`).catch(() => []))
-        .filter((name) => name !== "closed.json" && name !== "writers.lock"),
+        .filter((name) => name !== "closed" && name !== "writers.lock"),
       [],
     );
     await assert.rejects(stat(join(root, "host")), { code: "ENOENT" });
     console.log("PASS the recovery seal does not restore or capture the project");
     // A step that lost its host is closed to it. After a stop, the tools' work is still theirs.
-    const closed = JSON.parse(await readFile(`${file}.tree/closed.json`, "utf8").catch(() => "[]"));
+    const markers = await readdir(`${file}.tree/closed`).catch(() => [] as string[]);
+    const closed = await Promise.all(
+      markers.map(async (name) =>
+        JSON.parse(await readFile(`${file}.tree/closed/${name}`, "utf8")),
+      ),
+    );
     assert.deepEqual(
       closed.map((entry: { turn: string; step: number }) => `${entry.turn}/${entry.step}`),
       failure instanceof Cancelled ? [] : ["prompt/1"],

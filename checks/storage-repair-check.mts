@@ -210,6 +210,22 @@ async function unreadableTreeState() {
   );
 }
 
+// A step closed before closures became one marker each is still closed.
+async function legacyClosure() {
+  const file = session("legacy-closure");
+  await seed("legacy-closure-seed", file, "original tree\n");
+  await fs.writeFile(
+    join(`${file}.tree`, "closed.json"),
+    JSON.stringify([{ turn: "prompt", step: 1, at: new Date().toISOString() }]),
+  );
+  const dir = project("legacy-closure-seed");
+  await fs.writeFile(join(dir, "late.txt"), "late effect\n");
+  await assert.rejects(
+    worktree.capture(dir, file, { fence: { turn: "prompt", step: 1 } }),
+    /was closed/,
+  );
+}
+
 // A writer that died between its scratch write and the rename leaves an empty `.writing` file.
 async function leftoverScratch() {
   const file = session("scratch");
@@ -242,6 +258,7 @@ const checks = {
   oldClosure,
   unreadableTreeState,
   leftoverScratch,
+  legacyClosure,
 };
 try {
   const selected = process.argv[2] as keyof typeof checks | undefined;

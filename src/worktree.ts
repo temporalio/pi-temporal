@@ -523,7 +523,15 @@ export interface Fence {
 
 // Steps closed without their host, in the shared directory because that host can't be reached.
 // Its stale tool would otherwise publish against a tip that still looks live and revert newer work.
-const closedPath = (sessionFile: string) => join(shareDir(sessionFile), "closed.json");
+// One marker per closed step, named by a hash of turn and step. Closing and checking stay
+// constant time however many closures a long session collects. `closed.json` is the older shape,
+// still read so a step closed before it changed stays closed.
+const legacyClosedPath = (sessionFile: string) => join(shareDir(sessionFile), "closed.json");
+const closedDir = (sessionFile: string) => join(shareDir(sessionFile), "closed");
+const closedMarker = (sessionFile: string, fence: Fence) => {
+  const key = createHash("sha256").update(`${fence.turn}\0${fence.step}`).digest("hex");
+  return join(closedDir(sessionFile), `${key.slice(0, 32)}.json`);
+};
 
 interface ClosedStep extends Fence {
   readonly at: string;
@@ -535,19 +543,29 @@ interface ClosedStep extends Fence {
  */
 export async function closeStep(sessionFile: string, fence: Fence): Promise<void> {
   await withSessionLock(sharedLockPath(sessionFile), async () => {
-    const closed = (await readJson<ClosedStep[]>(closedPath(sessionFile))) ?? [];
-    if (closed.some((c) => c.turn === fence.turn && c.step === fence.step)) return;
-    const now = [...closed, { ...fence, at: new Date().toISOString() }];
+    if (await isClosed(sessionFile, fence)) return;
     // A timed-out attempt has no lifetime bound, so its closure must survive later turns.
-    await writeJson(closedPath(sessionFile), now);
+    await mkdir(closedDir(sessionFile), { recursive: true });
+    const closed: ClosedStep = { ...fence, at: new Date().toISOString() };
+    await writeJson(closedMarker(sessionFile, fence), closed);
   });
 }
 
-// Called with the shared lock held, so it can't race `closeStep`.
-const isClosed = async (sessionFile: string, fence: Fence) =>
-  ((await readJson<ClosedStep[]>(closedPath(sessionFile))) ?? []).some(
+// Called with the shared lock held, so it can't race `closeStep`. Only a missing marker is
+// absence. A marker that can't be read refuses the capture, as unreadable tree state does.
+async function isClosed(sessionFile: string, fence: Fence): Promise<boolean> {
+  const found = await stat(closedMarker(sessionFile, fence)).then(
+    () => true,
+    (err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return false;
+      throw err;
+    },
+  );
+  if (found) return true;
+  return ((await readJson<ClosedStep[]>(legacyClosedPath(sessionFile))) ?? []).some(
     (c) => c.turn === fence.turn && c.step === fence.step,
   );
+}
 
 /**
  * Relative paths stay on a renamed directory, but absolute paths aren't fenced. An adopted

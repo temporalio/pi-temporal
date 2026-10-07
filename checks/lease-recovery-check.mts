@@ -78,12 +78,15 @@ async function failedRenewal() {
       return originalUtimes(...args);
     };
     syncBuiltinESMExports();
-    Date.now = () => originalNow() + 51_000;
+    // Inside the window, so the refresh tries to renew and storage refuses it.
+    Date.now = () => originalNow() + 45_000;
     try {
       // Wait for a refresh to reach the failure, not for one tick. A loaded machine runs late.
       const deadline = originalNow() + 15_000;
       while (attempts === 0 && originalNow() < deadline) await sleep(100);
       assert.ok(attempts > 0, "renewal must reach the injected storage failure");
+      // Past the window measured from the last renewal that landed. A failed one doesn't count.
+      Date.now = () => originalNow() + 51_000;
       assert.equal(ownedNow(), false, "a readable token cannot extend a failed renewal");
     } finally {
       fs.utimes = originalUtimes;
@@ -104,6 +107,23 @@ async function observedLoss() {
     assert.equal(await owned(), false, "ownership cannot return after a confirmed loss");
   });
   console.log("PASS confirmed ownership loss stays lost");
+}
+
+// A holder that went unconfirmed past its window may already be overtaken. Storage still showing
+// its claim doesn't give the lease back.
+async function expiredStaysLost() {
+  const file = join(root, "expired.jsonl");
+  await withSessionLock(file, async (owned, ownedNow) => {
+    Date.now = () => originalNow() + 51_000;
+    try {
+      assert.equal(await owned(), false, "an expired holder cannot confirm ownership");
+    } finally {
+      Date.now = originalNow;
+    }
+    assert.equal(await owned(), false, "expiry is permanent even though the claim is still ours");
+    assert.equal(ownedNow(), false);
+  });
+  console.log("PASS an expired lease stays lost");
 }
 
 async function unreadableClaim() {
@@ -130,7 +150,13 @@ async function unreadableClaim() {
 }
 
 try {
-  const checks = { releasedEpochRace, failedRenewal, observedLoss, unreadableClaim };
+  const checks = {
+    releasedEpochRace,
+    failedRenewal,
+    observedLoss,
+    expiredStaysLost,
+    unreadableClaim,
+  };
   const selected = process.argv[2];
   for (const [name, check] of Object.entries(checks)) {
     if (!selected || selected === name) await check();
