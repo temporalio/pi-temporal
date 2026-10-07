@@ -207,6 +207,37 @@ export function makeActivities(
     });
   };
 
+  // The session's turn time lives in its record, like its token count, so a run woken after an
+  // idle exit still counts the turns before it. The Workflow's own count only spans one run.
+  const SESSION_SECONDS_ENTRY = "pi-temporal.session-seconds";
+  type Record = {
+    getBranch(): { type: string; customType?: string; data?: unknown }[];
+    appendCustomEntry(customType: string, data: unknown): string;
+  };
+  // Optional, because the checks' fake sessions keep no record. A real session always has one.
+  const managerOf = (session: AgentSession) =>
+    (session as unknown as { sessionManager?: Record }).sessionManager;
+  const recordedSeconds = (session: AgentSession): number | undefined => {
+    const branch = managerOf(session)?.getBranch() ?? [];
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
+      if (entry.type === "custom" && entry.customType === SESSION_SECONDS_ENTRY) {
+        const seconds = (entry.data as { seconds?: unknown } | undefined)?.seconds;
+        return typeof seconds === "number" ? seconds : undefined;
+      }
+    }
+    return undefined;
+  };
+  // Written by the step that ends a turn, under the session lease like any other append.
+  const recordSeconds = (session: AgentSession, seconds: number | undefined) => {
+    if (seconds === undefined) return;
+    managerOf(session)?.appendCustomEntry(SESSION_SECONDS_ENTRY, { seconds });
+  };
+  const withSeconds = (session: AgentSession) => {
+    const seconds = recordedSeconds(session);
+    return seconds === undefined ? {} : { sessionSeconds: seconds };
+  };
+
   // Session-wide billing, including compacted history, so the delta across one activity is its
   // spend. Undefined for fake sessions in checks.
   const billed = (session: AgentSession) => {
@@ -321,6 +352,8 @@ export function makeActivities(
   }
 
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
+    // The step's own time goes into the session's, since the step that ends a turn records it.
+    const stepStartedAt = Date.now();
     // Tree shipping needs stepped mode's fences. Retrying can't fix a config mismatch.
     if (opts.shipTree) {
       throw ApplicationFailure.nonRetryable(
@@ -376,6 +409,11 @@ export function makeActivities(
           );
           const { done } = sealed;
           await session.waitForIdle();
+          // Read before the write, so the Workflow adds this turn's time once, not twice.
+          const secondsBefore = withSeconds(session);
+          if (done && input.sessionSeconds !== undefined) {
+            recordSeconds(session, input.sessionSeconds + (Date.now() - stepStartedAt) / 1000);
+          }
           const messages = session.state.messages as Msg[];
           const spent = spentSince(before, session);
           await shipTree(input.sessionFile);
@@ -388,6 +426,7 @@ export function makeActivities(
             finalText: done ? lastAssistantText(messages) : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
+            ...secondsBefore,
           };
         } finally {
           session.dispose();
@@ -431,6 +470,7 @@ export function makeActivities(
             ...(opts.stepQueue === undefined ? {} : { queue: opts.stepQueue }),
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
+            ...withSeconds(session),
           };
         } finally {
           session.dispose();
@@ -585,6 +625,9 @@ export function makeActivities(
           });
           const { done } = sealed;
           await session.waitForIdle();
+          // Read before the write, so the Workflow adds this turn's time once, not twice.
+          const secondsBefore = withSeconds(session);
+          if (done) recordSeconds(session, input.sessionSeconds);
           // Kept results stay until the next step sweeps them, so a retried seal can read them.
           const answer = lastAssistantText(session.state.messages as Msg[]);
           // Ship after the seal, so the tree matches the transcript.
@@ -604,6 +647,7 @@ export function makeActivities(
             finalText: done ? answer : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
+            ...secondsBefore,
           };
         } finally {
           session.dispose();

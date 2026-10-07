@@ -30,6 +30,8 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 const steps = new Map<string, number>();
 // Billed totals per session file. Like the session file, this outlives a workflow run.
 const recorded = new Map<string, number>();
+// Turn time per session file, written by the step that ends a turn, as the activities do.
+const recordedSeconds = new Map<string, number>();
 let tokensPerStep = 0;
 let secondsPerStep = 0;
 let answerAfter = Number.POSITIVE_INFINITY;
@@ -44,7 +46,12 @@ const activities = {
     while (Date.now() < gateUntil) await sleep(100);
     const billed = (recorded.get(input.sessionFile) ?? 0) + tokensPerStep;
     recorded.set(input.sessionFile, billed);
+    const secondsBefore = recordedSeconds.get(input.sessionFile);
+    if (taken >= answerAfter && input.sessionSeconds !== undefined) {
+      recordedSeconds.set(input.sessionFile, input.sessionSeconds + secondsPerStep);
+    }
     return {
+      ...(secondsBefore === undefined ? {} : { sessionSeconds: secondsBefore }),
       done: taken >= answerAfter,
       retryAttempt: 0,
       finalText: taken >= answerAfter ? "answered" : "",
@@ -164,6 +171,25 @@ async function main() {
       "and a later run of that session is bounded by what the record says it spent",
       secondRun.finished?.outcome === "budget",
       secondRun.finished,
+    );
+
+    // The same for time. A run woken after an idle exit has no count of its own, so the earlier
+    // turns' time must come back from the record.
+    answerAfter = 2;
+    tokensPerStep = 0;
+    secondsPerStep = 1;
+    const slow = `${queue}-woken-slow-session`;
+    const slowFirst = await turn({ sessionSeconds: 2.5 }, slow, `${slow}-run-1`);
+    check(
+      "a turn of a fresh session inside its time answers",
+      slowFirst.finished?.outcome === "answered",
+      slowFirst.finished,
+    );
+    const slowSecond = await turn({ sessionSeconds: 2.5 }, slow, `${slow}-run-2`);
+    check(
+      "and a later run is bounded by the time the record says the session took",
+      slowSecond.finished?.outcome === "budget" && slowSecond.taken === 1,
+      slowSecond,
     );
 
     // `hardSeconds` is the only bound that interrupts a running step, like a user stop.

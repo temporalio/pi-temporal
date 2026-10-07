@@ -27,7 +27,7 @@ import {
 } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { withSessionLock } from "./session-lock.js";
 
@@ -69,8 +69,11 @@ const bundleName = (seq: number) => `${String(seq).padStart(8, "0")}.bundle`;
 const treesRoot = () =>
   join(process.env.PI_TEMPORAL_DATA ?? join(homedir(), ".pi-temporal"), "trees");
 
+// Keyed and run by the absolute path. A relative one would name a different host directory per
+// cwd, and git, which runs in the directory and also names it as the work tree, would nest it.
 function hostDir(projectDir: string) {
-  return join(treesRoot(), createHash("sha256").update(projectDir).digest("hex").slice(0, 16));
+  const key = resolve(projectDir);
+  return join(treesRoot(), createHash("sha256").update(key).digest("hex").slice(0, 16));
 }
 
 const gitDir = (projectDir: string) => join(hostDir(projectDir), "git");
@@ -153,11 +156,11 @@ const git = (projectDir: string, args: string[], input?: string) => {
     "git",
     ["--git-dir", gitDir(projectDir), "-c", "core.autocrlf=false", ...args],
     {
-      cwd: projectDir,
+      cwd: resolve(projectDir),
       maxBuffer: 64 * 1024 * 1024,
       env: {
         ...gitEnv(),
-        GIT_WORK_TREE: projectDir,
+        GIT_WORK_TREE: resolve(projectDir),
         // Fixed identity, so a capture doesn't depend on who runs it.
         GIT_AUTHOR_NAME: "pi-temporal",
         GIT_AUTHOR_EMAIL: "pi-temporal@localhost",

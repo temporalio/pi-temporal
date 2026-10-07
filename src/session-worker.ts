@@ -67,13 +67,12 @@ export async function createSessionWorker(
   let stopping: Promise<void> | undefined;
   return {
     worker,
+    // Settles when either poller fails, or when both end on a shutdown. A dead pinned poller
+    // looks healthy otherwise, and every pinned unit waits out its queue timeout.
     run: () => {
       runningPinned ??= pinned.run();
-      runningPinned.catch(() => {
-        // The caller awaits the other one. This must not go unhandled.
-      });
       running ??= worker.run();
-      return running;
+      return Promise.all([running, runningPinned]).then(() => undefined);
     },
     // Once only. A worker that died is stopped by its owner, which may also stop it on exit.
     stop: () => (stopping ??= stopOnce()),

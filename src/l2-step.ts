@@ -136,12 +136,20 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
   const { runModelCall } = deps.activities;
 
   return async (input: RunStepInput): Promise<RunStepResult> => {
+    // The Workflow clock, so replay agrees. The seal adds this step's own time to the session's.
+    const stepStartedAt = Date.now();
     const model = await runModelCall(input);
     const withSpend = (result: RunStepResult): RunStepResult => {
       const spent = together(model.spent, result.spent);
       // Prefer the seal's total. It read the session after the model call wrote to it.
       const total = result.total ?? model.total;
-      return { ...result, ...(spent ? { spent } : {}), ...(total ? { total } : {}) };
+      const sessionSeconds = result.sessionSeconds ?? model.sessionSeconds;
+      return {
+        ...result,
+        ...(spent ? { spent } : {}),
+        ...(total ? { total } : {}),
+        ...(sessionSeconds === undefined ? {} : { sessionSeconds }),
+      };
     };
     if (model.settled) {
       // Already finalized from the transcript. Nothing to dispatch or seal.
@@ -234,6 +242,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         calls: model.calls,
         retryAttempt: input.retryAttempt,
         overflowRecoveryAttempted: input.overflowRecoveryAttempted,
+        sessionSeconds:
+          input.sessionSeconds === undefined
+            ? undefined
+            : input.sessionSeconds + (Date.now() - stepStartedAt) / 1000,
         interrupted,
         ...(lost ? { lost: true } : {}),
       };

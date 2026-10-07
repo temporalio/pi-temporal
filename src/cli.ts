@@ -324,9 +324,11 @@ async function watch(args: string[]) {
       const readable = opened.size - offset;
       if (readable <= 0) return;
       const buffer = Buffer.alloc(readable);
-      await handle.read(buffer, 0, buffer.length, offset);
-      offset = opened.size;
-      carry += decoder.write(buffer);
+      // A read can return less than asked, more so on shared storage. Advance by what came back,
+      // and the next tick reads the rest.
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+      offset += bytesRead;
+      carry += decoder.write(buffer.subarray(0, bytesRead));
       const lines = carry.split("\n");
       // A read can end mid-line. Keep the partial line for the next tick.
       carry = lines.pop() ?? "";
