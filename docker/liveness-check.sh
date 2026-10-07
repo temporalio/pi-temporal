@@ -17,8 +17,9 @@ pinned_fork
 docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null \
   || { echo "build failed"; exit 1; }
 
-# Not `--user root`: the check is what the worker's own user can read.
-exec docker run --rm \
+# The image has no `USER`, so pick the non-root `node` user here. The check is about what a
+# process without root can read in `/proc`.
+exec docker run --rm --user node \
   -v "$PWD/src:/app/src:ro" \
   -v "$PWD/checks/liveness-linux-check.mts:/app/checks/liveness-linux-check.mts:ro" \
   -e PI_TEMPORAL_DATA=/tmp/data \
