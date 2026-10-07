@@ -1,6 +1,7 @@
 // The per-session durable executor. One workflow per Pi session. It owns the small control state
-// (prompt queue, current step). The conversation lives in Pi's session JSONL. One step is one
-// activity, so a worker crash re-drives only that step.
+// (prompt queue, current step). The conversation lives in Pi's session JSONL. A step is one
+// activity, or in stepped mode a model call, one activity per tool call, and a seal. A worker
+// crash re-drives only the unit it was running.
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
@@ -96,20 +97,22 @@ const pinnedTo = (taskQueue: string, timeoutMinutes: number) => ({
     taskQueue,
     scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
   }).runToolCall,
+  // A seal runs under the session lock and is safe to repeat, so it may retry. A queue timeout is
+  // never retried, so a lost host still fails fast.
   sealStep: proxyActivities<SteppedActivities>({
     ...cappedOptions,
-    retry: { maximumAttempts: 1 },
+    retry: { maximumAttempts: 3 },
     taskQueue,
     scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
   }).sealStep,
 });
 
-/** The pinned policy permits one attempt, so this timeout excludes an earlier started attempt. */
+/** A pinned tool call has one attempt, so this timeout excludes an earlier started attempt. A
+ * seal may have had an earlier attempt, but a seal is safe to repeat. */
 const isUnclaimed = (err: unknown) =>
   err instanceof ActivityFailure &&
   ((err.cause instanceof TimeoutFailure && err.cause.timeoutType === "SCHEDULE_TO_START") ||
     (err.cause instanceof ApplicationFailure && err.cause.type === FAILED_BEFORE_CLAIM));
-
 
 // Copies a template project for a scheduled session. Capped so an unpolled queue can't block it.
 const { adoptProject } = proxyActivities<{

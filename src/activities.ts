@@ -16,6 +16,7 @@ import {
   type TurnToolCallOutcome,
 } from "@earendil-works/pi-coding-agent";
 import type {
+  DeferredToolCall,
   ModelCallResult,
   RunStepInput,
   RunStepResult,
@@ -63,6 +64,27 @@ type Msg = { role?: string; content?: unknown; toolCallId?: string };
 
 const markerPresent = (messages: Msg[], promptId: string) =>
   messages.some((m) => textOf(m.content).includes(marker(promptId)));
+
+/** Whether this turn's prompt is in the session file. A compaction can summarize the prompt out
+ * of the context, but the branch keeps every raw message entry. */
+export const promptRecorded = (session: AgentSession, promptId: string): boolean => {
+  const manager = (session as { sessionManager?: SessionManager }).sessionManager;
+  // Fake sessions in checks have no manager. Their context is the whole transcript.
+  if (typeof manager?.getBranch !== "function") {
+    return markerPresent(session.state.messages as Msg[], promptId);
+  }
+  const branch = manager.getBranch().flatMap((entry) => (entry.type === "message" ? [entry] : []));
+  return markerPresent(branch.map((entry) => entry.message as Msg), promptId);
+};
+
+/** For a call nothing started. Unknown would tell the model it may have taken effect. */
+const notRunOutcome = (call: DeferredToolCall): TurnToolCallOutcome => {
+  const outcome = unknownToolCallOutcome(call);
+  outcome.message.content = [
+    { type: "text", text: "This tool call did not run. The turn stopped before it started." },
+  ];
+  return outcome;
+};
 
 // The last assistant message only, even if empty. Looking further back would return an earlier
 // turn's answer.
@@ -204,24 +226,29 @@ export function makeActivities(
     return { tokens: after.tokens - before.tokens, cost: after.cost - before.cost };
   };
 
-  // Session total from the file. A run started after idle has an empty count, so the workflow
-  // can't know this.
-  const totalOf = (session: AgentSession): Spend | undefined => billed(session);
-
   async function openSession(sessionFile: string, guard?: () => void): Promise<AgentSession> {
     if (dependencies.openSession) return dependencies.openSession(sessionFile, guard);
     await mkdir(dirname(sessionFile), { recursive: true });
     const sessionManager = SessionManager.open(sessionFile);
     sessionManager.setWriteGuard(guard);
 
-    const modelRuntime = await ModelRuntime.create();
-    if (opts.apiKey) await modelRuntime.setRuntimeApiKey(provider, opts.apiKey);
-    const available = await modelRuntime.getAvailable(provider);
+    // A bad key or provider fails the same way on every attempt, so don't retry it.
+    const modelRuntime = await ModelRuntime.create().catch((err: unknown) => {
+      throw ApplicationFailure.nonRetryable(`could not set up the model runtime: ${String(err)}`);
+    });
+    const available = await (async () => {
+      if (opts.apiKey) await modelRuntime.setRuntimeApiKey(provider, opts.apiKey);
+      return await modelRuntime.getAvailable(provider);
+    })().catch((err: unknown) => {
+      throw ApplicationFailure.nonRetryable(`could not set up ${provider}: ${String(err)}`);
+    });
     // Default to the provider's small, cheap model.
     const hint = opts.modelHint ?? (provider === "anthropic" ? "haiku" : "mini");
     const model = available.find((m) => m.id.includes(hint)) ?? available[0];
     if (!model) {
-      throw new Error(`no ${provider} model available; check the key and provider support`);
+      throw ApplicationFailure.nonRetryable(
+        `no ${provider} model available; check the key and provider support`,
+      );
     }
 
     const { session } = await createAgentSession({
@@ -254,7 +281,9 @@ export function makeActivities(
     // Drop earlier steps' results. This step's stay so a retried seal still reads them.
     if (stepped) await pending.sweep(input.sessionFile, input.promptId, input.step);
 
-    if (!markerPresent(messages(), input.promptId)) {
+    // Past the first step the prompt is in, whatever a lookup says. Recording it again would put
+    // a second prompt in the middle of the turn.
+    if (input.step <= 1 && !promptRecorded(session, input.promptId)) {
       // New turn. Drop every earlier turn's results, which a per-step sweep may not reach.
       if (stepped) await pending.sweepResults(input.sessionFile);
       // Settle a stopped turn's open calls first. Providers reject unanswered calls, so a prompt
@@ -262,20 +291,22 @@ export function makeActivities(
       settleWhatStopped(session);
       // Record without running, so the first step is a normal step that Temporal can retry.
       if (!(await session.recordPrompt(`${input.text}${marker(input.promptId)}`))) {
-        throw new Error("Pi did not record the prompt; an extension may have taken the text");
+        throw ApplicationFailure.nonRetryable(
+          "Pi did not record the prompt; an extension may have taken the text",
+        );
       }
       return undefined;
     }
 
     // A retry. Recorded calls that no dispatch started are handed back by the model call, not
     // settled as unknown. Only when their assistant message is still last in the transcript.
-    const dangling = danglingCallIds(messages());
-    const last = messages()[messages().length - 1];
-    const handBack =
-      last?.role === "assistant" &&
-      (await noDispatchStarted(input.sessionFile, input.promptId, input.step, dangling));
-    if (stepped && handBack) {
-      return undefined;
+    if (stepped) {
+      const dangling = danglingCallIds(messages());
+      const last = messages()[messages().length - 1];
+      const handBack =
+        last?.role === "assistant" &&
+        (await noDispatchStarted(input.sessionFile, input.promptId, input.step, dangling));
+      if (handBack) return undefined;
     }
 
     if (!settleWhatStopped(session)) {
@@ -325,9 +356,9 @@ export function makeActivities(
           stopped ||= stopRequested();
           const sealed = await session.sealStep(
             // Calls with no outcome are already in the transcript. Calls the stop kept from
-            // starting get unknown, so the step still closes.
+            // starting get a result saying so, so the step still closes.
             calls.flatMap((call) => {
-              if (notStarted.has(call.id)) return [unknownToolCallOutcome(call)];
+              if (notStarted.has(call.id)) return [notRunOutcome(call)];
               return results.get(call.id) ?? [];
             }),
             {
@@ -345,7 +376,7 @@ export function makeActivities(
           const spent = spentSince(before, session);
           await shipTree(input.sessionFile);
           if (stopped) throw Context.current().cancellationSignal.reason;
-          const total = totalOf(session);
+          const total = billed(session);
           return {
             done,
             retryAttempt: sealed.retryAttempt,
@@ -388,7 +419,7 @@ export function makeActivities(
           const before = billed(session);
           const outcome = await session.modelCall();
           const spent = spentSince(before, session);
-          const total = totalOf(session);
+          const total = billed(session);
           return {
             calls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
             sequential: mustSerialize(outcome.sequential),
@@ -408,7 +439,10 @@ export function makeActivities(
 
   // Typed only when no attempt left a dispatch note. An earlier attempt may still run the tool.
   const beforeClaim = async (err: unknown, input: ToolCallInput): Promise<unknown> => {
-    if (err instanceof ApplicationFailure) return err;
+    // A refusal comes from `bringTree`, which always runs before the claim. Typed like any other
+    // failure before the claim, so a pinned step moves to a free host.
+    const refused = err instanceof ApplicationFailure && err.type === "WorktreeQuarantined";
+    if (err instanceof ApplicationFailure && !refused) return err;
     const { sessionFile, turn, step, call } = input;
     const noted = await pending.wasDispatched(sessionFile, turn, step, call.id).catch(() => true);
     if (noted) return err;
@@ -416,6 +450,7 @@ export function makeActivities(
       message: err instanceof Error ? err.message : String(err),
       type: FAILED_BEFORE_CLAIM,
       cause: err instanceof Error ? err : undefined,
+      ...(refused ? { details: [err.type], nextRetryDelay: REFUSAL_RETRY } : {}),
     });
   };
 
@@ -460,6 +495,8 @@ export function makeActivities(
         }
 
         const { turn, step, call } = input;
+        // A stopped turn's seal may be about to take this claim. Don't race it.
+        if (stopRequested()) throw Context.current().cancellationSignal.reason;
         if (!(await pending.noteDispatch(input.sessionFile, turn, step, call.id))) {
           // An earlier dispatch started this tool, so it may have taken effect. Report unknown
           // rather than re-run a push or delete.
@@ -484,15 +521,20 @@ export function makeActivities(
           outcome,
         );
         // Ship from here. Only this host has the tool's changes, and the seal may land elsewhere.
+        // The result is kept, so a failure here must not fail the call. The next step's restore
+        // or a later capture can carry the files.
         await withSessionLock(input.sessionFile, () =>
           shipTree(input.sessionFile, { current: writer, fence: { turn, step } }),
-        );
+        ).catch((err: unknown) => {
+          console.error(`could not ship the project tree after ${call.id}: ${String(err)}`);
+        });
         return { outcome: "settled" };
       } finally {
         session.dispose();
       }
     } catch (err) {
-      throw claimed ? err : await beforeClaim(err, input);
+      // A stop stays a stop. Typed as a failure, it would hide the cancellation.
+      throw claimed || stopRequested() ? err : await beforeClaim(err, input);
     } finally {
       stop();
     }
@@ -503,9 +545,9 @@ export function makeActivities(
     const stop = heartbeatEvery(3000);
     try {
       return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
-        // Close the step first. The lost host may still publish from a stale tip, and this lets
-        // that capture be refused.
-        if (input.lost && opts.shipTree) {
+        // Close the step first. The lost host, or a stopped tool still running there, may publish
+        // from a stale tip later, and this lets that capture be refused.
+        if (input.interrupted && opts.shipTree) {
           await worktree.closeStep(input.sessionFile, { turn: input.turn, step: input.step });
         }
         // A cancelled tool may still be writing on another host.
@@ -514,11 +556,17 @@ export function makeActivities(
         try {
           const results: TurnToolCallOutcome[] = [];
           for (const call of input.calls) {
-            // No kept result means the dispatch never came back. Seal it as unknown, since
-            // providers reject unanswered calls.
             const { turn, step } = input;
             const kept = await pending.readResult(input.sessionFile, turn, step, call.id);
-            results.push(kept ?? unknownToolCallOutcome(call));
+            if (kept) {
+              results.push(kept);
+              continue;
+            }
+            // No kept result. Take the claim, so a late attempt can't run the tool after the
+            // step closed. If the seal gets it, nothing started the call. Otherwise it's unknown,
+            // since providers reject unanswered calls.
+            const unstarted = await pending.noteDispatch(input.sessionFile, turn, step, call.id);
+            results.push(unstarted ? notRunOutcome(call) : unknownToolCallOutcome(call));
           }
 
           // `expectCalls` stops results being attached to a message appended since the model call.
@@ -540,7 +588,7 @@ export function makeActivities(
             await shipTree(input.sessionFile, { fence: { turn: input.turn, step: input.step } });
           }
           const spent = spentSince(before, session);
-          const total = totalOf(session);
+          const total = billed(session);
           return {
             done,
             retryAttempt: sealed.retryAttempt,
