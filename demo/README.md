@@ -1,8 +1,8 @@
 # Chaos demo
 
-One task, three Workers in Docker, and a loop that kills a Worker every so often. The task is
-submitted once and never restarted. When a Worker dies mid-step, the turn goes on with another
-Worker, the project files travel with the session, and the turn finishes on whoever is left.
+Submit one task to three Workers in Docker, then kill Workers while it runs. The script submits
+the task once. After a Worker dies, another Worker restores the project files and continues the
+turn. An interrupted tool with no saved result is reported to the model as an unknown outcome.
 
 ## Run it
 
@@ -11,24 +11,26 @@ Worker, the project files travel with the session, and the turn finishes on whoe
 ANTHROPIC_API_KEY=... demo/run.sh
 ```
 
-`ANTHROPIC_API_KEY_FILE` works too. You need Docker and `python3`. A run takes a few minutes and
-costs a few cents of `claude-haiku-4-5`.
+`ANTHROPIC_API_KEY_FILE` works too. You’ll need Docker and `python3`. The default model is
+`claude-haiku-4-5`. Allow a few minutes for a run. Model charges depend on how much work is
+interrupted and repeated.
 
-The task writes a small program, runs it, saves its output, and answers with the result. Three
-steps sleep for 30 seconds so kills land mid-work. Each kill waits until something has finished
-since the last one, because recovering a step takes a heartbeat timeout plus the lease's stale
+The task writes and runs a small program, then saves its output and replies with the result.
+Three commands sleep for 30 seconds to give the kill loop time to interrupt them. The loop waits
+for progress between kills because recovery needs a heartbeat timeout and the lease’s stale
 window.
 
 ## What to watch
 
-- The chaos lines say which Worker was killed, what it was running, and when it came back.
+- The chaos lines identify the killed Worker and its active work. They also show when it returns.
 - The `|` lines are the session as `pi-temporal watch` sees it.
 - The `running:` lines show the Activities in flight, with attempt number and Worker. After a
-  kill, the model call or seal that was running shows up again as attempt 2.
+  kill, a retried model call or seal appears with a higher attempt number.
 - The Temporal UI at http://localhost:8233 shows each attempt and the Worker that ran it.
 
-At the end it prints the answer, the `result.txt` the task wrote, and a kill summary. It exits
-non-zero if the turn didn't finish. Logs stay under `demo/logs/<run>/`.
+When the turn ends, the script prints the answer and the contents of `result.txt`. It also reports
+the kills. If the turn didn’t finish, the script exits with a nonzero status. Logs stay under
+`demo/logs/<run>/`.
 
 ## Knobs
 
