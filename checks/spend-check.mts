@@ -1,0 +1,99 @@
+// Checks what `runStep` reports a step cost. Runs the real activity over a faked session and
+// asserts `spent` is this step's delta, `total` is the session's billed total, and both are
+// undefined (not zero) when the session keeps no totals.
+//
+// No server and no model key. Usage: npx tsx checks/spend-check.mts
+
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { makeActivities } from "../src/activities.js";
+
+const failures: string[] = [];
+const check = (what: string, ok: boolean, detail?: unknown) => {
+  console.log(`${ok ? "PASS" : "FAIL"} ${what}${ok ? "" : ` (${JSON.stringify(detail)})`}`);
+  if (!ok) failures.push(what);
+};
+
+const root = await mkdtemp(join(tmpdir(), "pi-spend-"));
+const sessionFile = join(root, "session.jsonl");
+
+try {
+  // Already billed for earlier turns. Pi's totals cover every entry, even compacted history.
+  let billed = { tokens: 1_000, cost: 0.5 };
+  const activities = makeActivities(
+    { projectDir: root },
+    {
+      openSession: async () =>
+        ({
+          state: { messages: [] },
+          prepareStep: () => true,
+          recordPrompt: async () => true,
+          // No tool calls, so the step seals as answered.
+          modelCall: async () => {
+            billed = { tokens: billed.tokens + 250, cost: billed.cost + 0.125 };
+            return { toolCalls: [], sequential: false, ended: false };
+          },
+          runToolCall: async () => undefined,
+          sealStep: async () => ({ done: true, retryAttempt: 0 }),
+          async waitForIdle() {},
+          getSessionStats: () => ({ tokens: { total: billed.tokens }, cost: billed.cost }),
+          dispose() {},
+        }) as unknown as AgentSession,
+    },
+  );
+
+  const result = await activities.runStep({
+    sessionId: "session",
+    sessionFile,
+    promptId: "prompt",
+    text: "run",
+    step: 1,
+  });
+
+  check("a step reports what it spent", result.spent?.tokens === 250, result.spent);
+  check("in money as well as tokens", result.spent?.cost === 0.125, result.spent);
+  // A run started after idle retirement can only learn the session total from here.
+  check(
+    "and what the session has been billed in total",
+    result.total?.tokens === 1_250,
+    result.total,
+  );
+  check("with the same two numbers", result.total?.cost === 0.625, result.total);
+
+  // Missing totals must not read as zero, or a budget would never stop the turn.
+  const quiet = makeActivities(
+    { projectDir: root },
+    {
+      openSession: async () =>
+        ({
+          state: { messages: [] },
+          prepareStep: () => true,
+          recordPrompt: async () => true,
+          modelCall: async () => ({ toolCalls: [], sequential: false, ended: false }),
+          runToolCall: async () => undefined,
+          sealStep: async () => ({ done: true, retryAttempt: 0 }),
+          async waitForIdle() {},
+          dispose() {},
+        }) as unknown as AgentSession,
+    },
+  );
+  const silent = await quiet.runStep({
+    sessionId: "session",
+    sessionFile: join(root, "quiet.jsonl"),
+    promptId: "prompt",
+    text: "run",
+    step: 1,
+  });
+  check(
+    "a session that keeps no totals reports none",
+    silent.spent === undefined && silent.total === undefined,
+    silent,
+  );
+} finally {
+  await rm(root, { recursive: true, force: true });
+}
+
+console.log(failures.length === 0 ? "spend-check: OK" : `spend-check: ${failures.length} failed`);
+process.exitCode = failures.length === 0 ? 0 : 1;
