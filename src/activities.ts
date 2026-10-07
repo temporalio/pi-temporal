@@ -334,6 +334,7 @@ export function makeActivities(
               expectCalls: calls.map((call) => call.id),
               // Carried by the workflow, since this session is rebuilt every step.
               retryAttempt: input.retryAttempt,
+              overflowRecoveryAttempted: input.overflowRecoveryAttempted,
               // A stopped turn records results only. No retry, no compaction.
               postRun: !stopped,
             },
@@ -348,6 +349,7 @@ export function makeActivities(
           return {
             done,
             retryAttempt: sealed.retryAttempt,
+            overflowRecoveryAttempted: sealed.overflowRecoveryAttempted,
             finalText: done ? lastAssistantText(messages) : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
@@ -461,8 +463,7 @@ export function makeActivities(
         if (!(await pending.noteDispatch(input.sessionFile, turn, step, call.id))) {
           // An earlier dispatch started this tool, so it may have taken effect. Report unknown
           // rather than re-run a push or delete.
-          const unknown = unknownToolCallOutcome(input.call);
-          await pending.keepResult(input.sessionFile, turn, step, call.id, unknown);
+          // The first attempt may still return. The seal supplies unknown if no result arrives.
           return { outcome: "unknown" };
         }
         claimed = true;
@@ -526,6 +527,7 @@ export function makeActivities(
           const sealed = await session.sealStep(results, {
             expectCalls: input.calls.map((call) => call.id),
             retryAttempt: input.retryAttempt,
+            overflowRecoveryAttempted: input.overflowRecoveryAttempted,
             // A stopped turn records results only. No retry, no compaction.
             postRun: !input.interrupted,
           });
@@ -542,6 +544,7 @@ export function makeActivities(
           return {
             done,
             retryAttempt: sealed.retryAttempt,
+            overflowRecoveryAttempted: sealed.overflowRecoveryAttempted,
             finalText: done ? answer : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),

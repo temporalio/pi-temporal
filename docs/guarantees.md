@@ -47,10 +47,19 @@ directory. Its 50-second validity and 60-second reclaim windows allow for clock 
 don’t prove a bound. The guard stops the transcript write. It doesn’t stop a tool’s external
 effects, which is what the claim is for.
 
+The last released epoch stays on disk with an expired timestamp, so epochs only grow. A claim
+counts only while no newer epoch exists, so a contender that paused and recreated an old epoch
+backs off. A failed renewal doesn’t extend write permission. A failed read of a lease, a claim, a
+kept result, or a tree record doesn’t admit a writer.
+
+The lock directories outlive the session, `forget` included. They are `<session>.jsonl.lock`,
+`<session>.jsonl.tree/writers.lock`, and the host-local `trees/<hash>/tree.lock`. Each keeps one
+expired claim. Don’t delete them in cleanup scripts, or an epoch can start again from one.
+
 Stepped Worker tool calls have a 30-minute timeout per attempt by default.
-`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it for calls on the shared Task Queue. Host-pinned
-calls keep the default timeout. A timed-out call with a dispatch claim isn’t repeated, because
-its effects may already have happened.
+`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it, for host-pinned calls too. A host-pinned call’s
+total also has room for its queue wait. A timed-out call with a dispatch claim isn’t repeated,
+because its effects may already have happened.
 
 Each stepped Activity opens its own `AgentSession`. A step with four tool calls opens the session
 six times. Session-open time grows with the transcript, so splitting a step adds work to each
@@ -98,7 +107,9 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
   another Worker. If a started call’s Worker stops answering, the step is closed without it and
   the turn continues with the next step elsewhere. The closure is written to the shared
   directory, so anything the old host publishes for that step afterwards is refused
-  (`lost-host-check`, `migration-rejoin-check`).
+  (`lost-host-check`, `migration-rejoin-check`). The closure stays until `forget` removes the
+  session’s tree store. A timed-out attempt has no lifetime bound, so later turns can’t make its
+  closure safe to drop.
 - A directory is refused while a call that outlived its Activity may still write it. A marker
   records the call’s process. The host clears it only after checking the process and its process
   group, plus the cgroup on Linux. It also checks for processes with the exported name, working
@@ -108,7 +119,8 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
   replacement directory. `release-tree` clears a directory by hand (`quarantine-check`,
   `quarantine-routing-check`, `docker/restart-check.sh`).
 - One session owns each directory. It hands the directory back when it goes idle
-  (`worktree-check`, `storage-repair-check`).
+  (`worktree-check`, `storage-repair-check`). It keeps the directory while a writer marker is
+  live, even when the files match the last snapshot, since a tool can write after its turn ends.
 
 The snapshot skips ignored files and ships a nested git checkout as a gitlink. `forget` removes a
 session’s tree store, salvage included.

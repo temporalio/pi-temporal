@@ -233,6 +233,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         step: input.step,
         calls: model.calls,
         retryAttempt: input.retryAttempt,
+        overflowRecoveryAttempted: input.overflowRecoveryAttempted,
         interrupted,
         ...(lost ? { lost: true } : {}),
       };
@@ -260,7 +261,12 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
           step: input.step,
         });
         // Always not done. If the transcript is already complete, the next model call settles it.
-        return withSpend({ done: false, retryAttempt: sealed.retryAttempt, finalText: "" });
+        return withSpend({
+          done: false,
+          retryAttempt: sealed.retryAttempt,
+          overflowRecoveryAttempted: sealed.overflowRecoveryAttempted,
+          finalText: "",
+        });
       }
       throw failure;
     };

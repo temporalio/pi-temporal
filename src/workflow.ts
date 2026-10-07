@@ -76,13 +76,21 @@ function toolCallActivities(timeoutMinutes: number) {
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
-const PINNED_SCHEDULE_TO_START = "30 seconds";
+const PINNED_SCHEDULE_TO_START_SECONDS = 30;
+const PINNED_SCHEDULE_TO_START = `${PINNED_SCHEDULE_TO_START_SECONDS} seconds`;
 
 /** The same activities on one worker's own queue. The queue comes from the model call's result in
  * history, so building this per queue is deterministic on replay. */
-const pinnedTo = (taskQueue: string) => ({
+const pinnedTo = (taskQueue: string, timeoutMinutes: number) => ({
   runToolCall: proxyActivities<SteppedActivities>({
     ...cappedOptions,
+    startToCloseTimeout: `${timeoutMinutes} minutes`,
+    // The total starts when the call is queued, so it has room for the queue wait on top of the
+    // tool's own timeout. Otherwise a long tool loses the time it waited.
+    scheduleToCloseTimeout: `${Math.max(
+      CAP_MINUTES * 60,
+      timeoutMinutes * 60 + PINNED_SCHEDULE_TO_START_SECONDS,
+    )} seconds`,
     // A retry's queue timeout cannot rule out an earlier attempt still running.
     retry: { maximumAttempts: 1 },
     taskQueue,
@@ -155,7 +163,10 @@ export async function piSession(
         },
         isCancellation,
         outOfBudget: () => outOfBudget(),
-        pinnedTo,
+        // No patch gate. Replay doesn't compare activity timeouts, so a running session takes the
+        // configured timeout from its next pinned call on.
+        pinnedTo: (queue) =>
+          pinnedTo(queue, options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES),
         isUnclaimed,
         // False only when replaying older histories. See the dep.
         refusesStartedFailures: () => patched("pinned-started-failure-does-not-migrate"),
@@ -228,6 +239,7 @@ export async function piSession(
     let error: string | undefined;
     // Kept here because the session is rebuilt per activity and compaction rewrites the transcript.
     let retryAttempt = 0;
+    let overflowRecoveryAttempted = false;
     // Turn-scoped so the `finally` counts spend even for failed or stopped turns.
     const startedAt = Date.now();
     let tokens = 0;
@@ -284,10 +296,14 @@ export async function piSession(
             sessionFile: file,
             step,
             retryAttempt,
+            overflowRecoveryAttempted,
             ...prompt,
           };
           const result = await runTurnStep(input);
           retryAttempt = result.retryAttempt;
+          // A result with nothing to say, such as one from an older worker, keeps what an earlier
+          // seal reported. Reset to false, it would hand the turn a second compact-and-retry.
+          overflowRecoveryAttempted = result.overflowRecoveryAttempted ?? overflowRecoveryAttempted;
           tokens += result.spent?.tokens ?? 0;
           cost += result.spent?.cost ?? 0;
           recorded = result.total ?? recorded;

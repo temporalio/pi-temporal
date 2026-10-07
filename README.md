@@ -111,7 +111,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_TEMPORAL_TASK_QUEUE` | the Task Queue sessions use | `pi-session` |
 | `PI_TEMPORAL_PROVIDER` | `openai` or `anthropic` (reads `<PROVIDER>_API_KEY` or `_API_KEY_FILE`) | `openai` |
 | `PI_MODEL` | substring matched against the provider’s model ids | `mini` / `haiku` |
-| `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` | tool attempt timeout on the shared Task Queue, stepped Worker sessions | 30 |
+| `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` | tool attempt timeout, stepped Worker sessions | 30 |
 | `PI_TEMPORAL_BUDGET_TOKENS`, `_SECONDS` | tokens and wall clock per turn | none |
 | `PI_TEMPORAL_BUDGET_HARD_SECONDS` | deadline that cancels the turn’s wait, even during a call | none |
 | `PI_TEMPORAL_BUDGET_SESSION_TOKENS`, `_SECONDS` | tokens and wall clock per session | none |

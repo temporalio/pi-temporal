@@ -154,7 +154,98 @@ async function forgetWaits() {
     await held;
     await dropping;
   }
-  assert.deepEqual(await fs.readdir(`${file}.tree`), []);
+  assert.deepEqual(await fs.readdir(`${file}.tree`), ["writers.lock"]);
+}
+
+async function liveWriterRetirement() {
+  const file = session("live-writer");
+  await seed("live-writer-seed", file, "keep this directory\n");
+  asHost("live-writer-worker");
+  const dir = project("live-writer-worker");
+  await worktree.ensure(dir, file);
+  await worktree.beginWrite(dir, { turn: "prompt", step: 1, callId: "live" });
+  try {
+    assert.equal(await worktree.retire(dir, file), false);
+    assert.equal(await worktree.sweep(), 0);
+    assert.equal(await read(join(dir, "note.txt")), "keep this directory\n");
+  } finally {
+    await worktree.endWrite(dir, "live");
+  }
+  assert.equal(await worktree.sweep(), 1, "retirement can release a directory after its tool ends");
+}
+
+async function oldClosure() {
+  const file = session("old-closure");
+  await seed("old-closure-seed", file, "original tree\n");
+  for (let step = 1; step <= 501; step++) {
+    await worktree.closeStep(file, { turn: "prompt", step });
+  }
+  const dir = project("old-closure-seed");
+  await fs.writeFile(join(dir, "late.txt"), "late effect\n");
+  await assert.rejects(
+    worktree.capture(dir, file, { fence: { turn: "prompt", step: 1 } }),
+    /was closed/,
+  );
+  asHost("old-closure-worker");
+  await worktree.ensure(project("old-closure-worker"), file);
+  assert.equal(await read(join(project("old-closure-worker"), "late.txt")), "");
+}
+
+async function unreadableTreeState() {
+  const file = session("unreadable-tree");
+  await seed("unreadable-tree-seed", file, "keep the tip\n");
+  const dir = project("unreadable-tree-seed");
+  const tip = join(`${file}.tree`, "tip.json");
+  const saved = await fs.readFile(tip);
+  await fs.writeFile(tip, "{ not json");
+  await fs.writeFile(join(dir, "late.txt"), "not authorized\n");
+  await assert.rejects(worktree.capture(dir, file, { seed: true }), SyntaxError);
+  assert.equal(await fs.readFile(tip, "utf8"), "{ not json");
+  await fs.writeFile(tip, saved);
+  const closed = join(`${file}.tree`, "closed.json");
+  await fs.mkdir(closed);
+  await assert.rejects(
+    worktree.capture(dir, file, { fence: { turn: "prompt", step: 1 } }),
+    { code: "EISDIR" },
+  );
+}
+
+// A step closed before closures became one marker each is still closed.
+async function legacyClosure() {
+  const file = session("legacy-closure");
+  await seed("legacy-closure-seed", file, "original tree\n");
+  await fs.writeFile(
+    join(`${file}.tree`, "closed.json"),
+    JSON.stringify([{ turn: "prompt", step: 1, at: new Date().toISOString() }]),
+  );
+  const dir = project("legacy-closure-seed");
+  await fs.writeFile(join(dir, "late.txt"), "late effect\n");
+  await assert.rejects(
+    worktree.capture(dir, file, { fence: { turn: "prompt", step: 1 } }),
+    /was closed/,
+  );
+}
+
+// A writer that died between its scratch write and the rename leaves an empty `.writing` file.
+async function leftoverScratch() {
+  const file = session("scratch");
+  await seed("scratch-seed", file, "scratch tree\n");
+  asHost("scratch-worker");
+  const dir = project("scratch-worker");
+  await worktree.ensure(dir, file);
+  const { createHash } = await import("node:crypto");
+  const host = join(
+    root, "scratch-worker", "data", "trees",
+    createHash("sha256").update(dir).digest("hex").slice(0, 16),
+  );
+  await fs.mkdir(join(host, "writers"), { recursive: true });
+  await fs.writeFile(join(host, "writers", "call.json.abc.writing"), "");
+  await fs.writeFile(join(host, "held-0000000000000000.json.abc.writing"), "");
+
+  await worktree.ensure(dir, file);
+  await worktree.capture(dir, file);
+  assert.equal(await worktree.clearWriters(dir), 0);
+  await worktree.sweep();
 }
 
 const checks = {
@@ -163,6 +254,11 @@ const checks = {
   forgottenRetirement,
   adoptedAfterForget,
   forgetWaits,
+  liveWriterRetirement,
+  oldClosure,
+  unreadableTreeState,
+  leftoverScratch,
+  legacyClosure,
 };
 try {
   const selected = process.argv[2] as keyof typeof checks | undefined;

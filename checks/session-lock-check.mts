@@ -62,7 +62,12 @@ async function main() {
   check("each one ran", order.length === 4, order);
 
   // A leaked lock would wedge the session.
-  check("the lock is released", (await claimsHeld(file)).length === 0, await claimsHeld(file));
+  const expiredClaims = await claimsHeld(file);
+  check("release retains one expired epoch", expiredClaims.length === 1, expiredClaims);
+  check(
+    "release permits the next holder without waiting",
+    (await stat(join(`${file}.lock`, expiredClaims[0]!))).mtimeMs === 0,
+  );
 
   // A dead holder's claim is reclaimed by age.
   await claimAs(file, "someone-else", 1, 120_000);
