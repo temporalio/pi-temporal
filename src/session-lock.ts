@@ -34,16 +34,27 @@ interface Claim {
   readonly mtimeMs: number;
 }
 
+// A stale handle doesn't prove a claim is gone, only that this read can't say. So the whole scan
+// runs again, and a stale handle that stays is an error. Only a missing entry is absence.
 async function claims(dir: string): Promise<Claim[]> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await scanClaims(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ESTALE" || attempt >= 3) throw err;
+    }
+  }
+}
+
+async function scanClaims(dir: string): Promise<Claim[]> {
   const names = await readdir(dir);
   const found: Claim[] = [];
   for (const name of names) {
     const epoch = Number.parseInt(name, 10);
     if (!Number.isFinite(epoch)) continue;
-    // Another client can delete a superseded claim between the listing and the stat. NFS reports
-    // that as a stale handle.
+    // Another client can delete a superseded claim between the listing and the stat.
     const info = await stat(join(dir, name)).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT" || err.code === "ESTALE") return undefined;
+      if (err.code === "ENOENT") return undefined;
       throw err;
     });
     if (info) found.push({ epoch, name, mtimeMs: info.mtimeMs });

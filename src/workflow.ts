@@ -76,7 +76,8 @@ function toolCallActivities(timeoutMinutes: number) {
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
-const PINNED_SCHEDULE_TO_START = "30 seconds";
+const PINNED_SCHEDULE_TO_START_SECONDS = 30;
+const PINNED_SCHEDULE_TO_START = `${PINNED_SCHEDULE_TO_START_SECONDS} seconds`;
 
 /** The same activities on one worker's own queue. The queue comes from the model call's result in
  * history, so building this per queue is deterministic on replay. */
@@ -84,7 +85,12 @@ const pinnedTo = (taskQueue: string, timeoutMinutes: number) => ({
   runToolCall: proxyActivities<SteppedActivities>({
     ...cappedOptions,
     startToCloseTimeout: `${timeoutMinutes} minutes`,
-    scheduleToCloseTimeout: `${Math.max(CAP_MINUTES, timeoutMinutes)} minutes`,
+    // The total starts when the call is queued, so it has room for the queue wait on top of the
+    // tool's own timeout. Otherwise a long tool loses the time it waited.
+    scheduleToCloseTimeout: `${Math.max(
+      CAP_MINUTES * 60,
+      timeoutMinutes * 60 + PINNED_SCHEDULE_TO_START_SECONDS,
+    )} seconds`,
     // A retry's queue timeout cannot rule out an earlier attempt still running.
     retry: { maximumAttempts: 1 },
     taskQueue,
