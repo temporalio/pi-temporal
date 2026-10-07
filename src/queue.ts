@@ -1,16 +1,7 @@
-// The queue one worker polls on its own, alongside the shared one.
-//
-// A step's tools write the project directory the worker that made the model call is standing in, so
-// the tools and the seal are addressed back to it rather than to whichever worker is free. That is
-// what lets them run at once: they see each other's writes through the filesystem instead of
-// shipping the tree to each other, and shipping is what makes two hosts of one step a problem.
-//
-// Keyed by host as well as directory. Two containers both serve `/project` and share none of it, so
-// a key on the path alone sends a step to a host whose directory is a different directory.
-//
-// Not imported by workflow code: this reaches for `node:crypto` and `node:os`, which the Temporal
-// sandbox does not have. The queue name is chosen by the worker and carried to the workflow as an
-// activity result.
+// The queue one worker polls on its own, next to the shared one. A step's tool calls and seal go
+// back to the worker that made the model call, so they share its project directory on disk.
+// Keyed by host and directory, since two containers can both serve `/project` with different files.
+// Not for workflow code (uses `node:crypto`, `node:os`). Workflows get the name from an activity.
 
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";

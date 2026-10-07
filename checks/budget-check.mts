@@ -1,15 +1,8 @@
-// A turn the operator has put a bound on, and what happens when it reaches it.
+// Checks that the workflow enforces turn and session budgets between steps. Stub activities report
+// spend, and asserts each bound stops the turn after the crossing step, `hardSeconds` stops it
+// mid-step, and a finished turn's deadline never fires into the next turn.
 //
-// This is the thing the workflow having the loop is for. The agent is not asked to keep to a
-// budget and cannot be: the model decides what to ask for next, so whatever says no has to sit
-// somewhere the model does not reach. Here that is between two steps, which is also the only place
-// it can sit: a step that has started is left to finish, because stopping one leaves a call in the
-// transcript that no result answers and the next turn of the session fails rather than this one.
-//
-// Both bounds are driven with stub activities that report what they spent, so what is checked is
-// the workflow adding it up and stopping, not a provider's billing.
-//
-// Needs a Temporal server; no model key. Usage: npx tsx checks/budget-check.mts
+// Needs a Temporal server, no model key. Usage: npx tsx checks/budget-check.mts
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -35,14 +28,12 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 
 /** One step, as expensive and as slow as the case wants, and never finished unless it says so. */
 const steps = new Map<string, number>();
-// What the record says each session has been billed, which is the thing a workflow cannot keep: it
-// outlives the run, the way the session file does.
+// Billed totals per session file. Like the session file, this outlives a workflow run.
 const recorded = new Map<string, number>();
 let tokensPerStep = 0;
 let secondsPerStep = 0;
 let answerAfter = Number.POSITIVE_INFINITY;
-// A wall-clock gate rather than a duration: the stale-deadline case below needs a step held until
-// a moment it names, not for a length of time.
+// Holds a step until this wall-clock time, for the stale-deadline case.
 let gateUntil = 0;
 
 const activities = {
@@ -78,14 +69,11 @@ async function main() {
   });
   const running = worker.run();
 
-  // One workflow per session id, so two turns of the same session meet the same accumulator. A
-  // fresh id per call is a fresh session, which is what the per-turn cases want. The session cases
-  // keep the run alive between turns: what a session has spent is this run's state, so a session
-  // that goes idle and is woken again later starts a new run and counts from zero.
+  // No `session` means a fresh session per call. `run` picks the workflow id, so two turns of one
+  // session can share a run or use two.
   const turn = async (
     budget: SessionTurnOptions["budget"],
     session?: string,
-    // Which run drives it, so a case can put two turns of one session in one run or in two.
     run = session,
   ) => {
     const promptId = randomUUID();
@@ -106,8 +94,7 @@ async function main() {
       finished = (
         await handle.query<TurnState, []>(QUERIES.turnState).catch(() => undefined)
       )?.finished;
-      // This turn's, not the one before it: a session's second turn reads the first one's answer
-      // until its own lands.
+      // Ignore the previous turn's answer until this one lands.
       if (finished?.promptId !== promptId) finished = undefined;
       if (!finished) await sleep(200);
     }
@@ -116,8 +103,7 @@ async function main() {
   };
 
   try {
-    // Tokens. Three steps at 100 is 300, which is over 250, so the third step is the last one the
-    // workflow drives: the bound is checked after a step, because that is when its cost is known.
+    // The bound is checked after each step, so 3 x 100 crosses 250 on the third.
     tokensPerStep = 100;
     const spent = await turn({ tokens: 250 });
     check(
@@ -127,7 +113,6 @@ async function main() {
     );
     check("after the step that crossed the bound, not before it", spent.taken === 3, spent.taken);
 
-    // And a turn well inside its bound is not touched by any of it.
     answerAfter = 2;
     const inside = await turn({ tokens: 250 });
     check(
@@ -137,8 +122,7 @@ async function main() {
     );
     check("and runs every step it needed", inside.taken === 2, inside.taken);
 
-    // A session's own bound, which is the number somebody is billed for. A session of cheap turns
-    // passes every per-turn bound and can still run all night.
+    // Cheap turns pass every per-turn bound, so the session needs its own.
     answerAfter = 2;
     tokensPerStep = 100;
     const session = `${queue}-session-budget`;
@@ -153,7 +137,7 @@ async function main() {
       (first.finished?.spent?.tokens ?? 0) === 200,
       first.finished?.spent,
     );
-    // The same session again: 200 already spent, so this turn crosses 250 on its first step.
+    // 200 already spent, so this turn crosses 250 on its first step.
     const second = await turn({ tokens: 10_000, sessionTokens: 250 }, session);
     check(
       "a later turn of that session is stopped by what the session has spent",
@@ -166,9 +150,7 @@ async function main() {
       second.finished?.spent,
     );
 
-    // And it is the record that answers, not the run. A session that went idle and was woken again
-    // is a fresh workflow with an empty count of its own; what it has been billed is in the
-    // session, and the host reports it.
+    // A new run of the same session starts with no count, so the reported total must bound it.
     answerAfter = 2;
     const woken = `${queue}-woken-session`;
     const firstRun = await turn({ sessionTokens: 250 }, woken, `${woken}-run-1`);
@@ -184,9 +166,7 @@ async function main() {
       secondRun.finished,
     );
 
-    // And a deadline, which stops the turn where it is rather than where it can. A step that has
-    // started is left alone by every bound above; this one is what a user pressing stop does, and
-    // it is the only way a turn does not overshoot by whatever was running.
+    // `hardSeconds` is the only bound that interrupts a running step, like a user stop.
     answerAfter = Number.POSITIVE_INFINITY;
     tokensPerStep = 0;
     secondsPerStep = 5;
@@ -203,7 +183,7 @@ async function main() {
     );
     secondsPerStep = 1;
 
-    // Wall clock, with the same shape: the step that crosses it is the last one.
+    // Soft wall clock: the step that crosses it is the last one.
     answerAfter = Number.POSITIVE_INFINITY;
     tokensPerStep = 0;
     secondsPerStep = 1;
@@ -213,16 +193,11 @@ async function main() {
       late.finished?.outcome === "budget",
       late.finished,
     );
-    // Not before it has spent it: more than one step, and the turn really did run for its bound.
-    // How many steps that is depends on what each one costs to schedule, which is not this check's
-    // business; that it did not stop early is.
+    // The step count depends on scheduling cost. Only check it did not stop early.
     check("and not before it has spent it", late.taken >= 2 && late.ran >= 2_000, late);
 
-    // A deadline dies with its turn. The timer used to sit in the turn's scope, which cancels its
-    // timers when it is cancelled, not when its function returns, so a turn that answered early
-    // left it pending and it fired into whichever turn was running when it expired, stopping it as
-    // if the user had. Two turns of one run: the first answers well inside its deadline, and the
-    // second is held past the moment the first one's timer would fire, then answers inside its own.
+    // A deadline must die with its turn. A scope's timers outlive its function returning, so the
+    // second turn is held past the first one's deadline and must still answer.
     answerAfter = 1;
     tokensPerStep = 0;
     secondsPerStep = 0;

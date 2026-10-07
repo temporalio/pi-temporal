@@ -1,10 +1,6 @@
-// Whether a holder whose event loop stopped can tell it lost the lock, which is the only case the
-// synchronous guard exists for. It needs two processes: the holder has to stop its own loop, and a
-// stopped loop cannot run a contender.
-//
-// `Atomics.wait` on the main thread is what a paused container, a closed lid or SIGSTOP look like
-// from inside the process. No timer fires and no I/O completes, so the lock's mtime ages past
-// STALE_MS and the contender reclaims it.
+// Checks that a lock holder whose event loop stopped can tell it lost the lock. The holder blocks
+// in `Atomics.wait` (like SIGSTOP or a paused container) past `STALE_MS`, a second process
+// reclaims the lock, and both `owned()` and `ownedNow()` must then answer false.
 //
 // Usage: npx tsx checks/stall-check.mts
 
@@ -33,7 +29,7 @@ if (role === "holder") {
   await withSessionLock(file!, async (owned, ownedNow) => {
     await writeFile(`${file}.holding`, "");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, STALL_MS);
-    // What the session's write guard is asked, for a write landing the moment the loop resumes.
+    // The write guard's question for a write that lands as soon as the loop resumes.
     console.log(JSON.stringify({ ownedNow: ownedNow(), owned: await owned() }));
   });
 } else if (role === "contender") {
@@ -60,10 +56,8 @@ if (role === "holder") {
     ownedNow: boolean;
     owned: boolean;
   };
-  // The awaited check reads the file, so it has always been right about this.
   check("an awaited check sees a lock taken during a stall", answers.owned === false, answers);
-  // The synchronous one used to answer from a flag a stopped event loop cannot have updated, so it
-  // said "still mine" for exactly the case it was added to cover.
+  // `ownedNow` must not answer from a flag that a stopped event loop could not have updated.
   check("and so does the synchronous one", answers.ownedNow === false, answers);
 
   console.log(

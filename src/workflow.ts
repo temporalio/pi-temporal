@@ -1,7 +1,6 @@
 // The per-session durable executor. One workflow per Pi session. It owns the small control state
-// (the pending-prompt queue and where a turn is up to); the large conversation state lives in Pi's
-// session JSONL, which the runStep activity reads and writes. One step is one activity, so a
-// worker crash re-drives that step alone, and every step before it stays done.
+// (prompt queue, current step). The conversation lives in Pi's session JSONL. One step is one
+// activity, so a worker crash re-drives only that step.
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
@@ -40,15 +39,13 @@ import type {
 import { makeSteppedStep, type SteppedActivities } from "./l2-step.js";
 
 const activityOptions = {
-  // One step is a single model call plus the tools it asks for, so minutes, not hours. The
-  // heartbeat is the real liveness bound and re-drives within seconds of a worker death.
+  // A step is one model call plus its tools. The heartbeat is the real liveness bound.
   startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
   retry: { maximumAttempts: 100 },
 } as const;
 
-// A total cap on top of the per-attempt one, so a unit that keeps timing out cannot hold the turn
-// and the session's queue for days.
+// Total cap, so a unit that keeps timing out cannot hold the turn and queue for days.
 const CAP_MINUTES = 120;
 const cappedOptions = {
   ...activityOptions,
@@ -65,9 +62,8 @@ const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
 export const DEFAULT_TOOL_TIMEOUT_MINUTES = 30;
 
 function toolCallActivities(timeoutMinutes: number) {
-  // A call that fails for a reason no retry fixes must not hold the step, the turn and the
-  // session's queue behind it. The step waits for every call, so this ceiling is the one on all
-  // of it. A bound past the cap gets the room for at least one attempt.
+  // The step waits on every call, so this bounds the whole step. A bound past the cap still gets
+  // room for one attempt.
   return proxyActivities<SteppedActivities>({
     ...activityOptions,
     startToCloseTimeout: `${timeoutMinutes} minutes`,
@@ -76,16 +72,14 @@ function toolCallActivities(timeoutMinutes: number) {
   });
 }
 
-// The seal also runs what answers for a step that went wrong: a provider retry, and a compaction
-// that is itself a model call over the whole context. So it keeps the step-sized backstop.
+// The seal may run a provider retry and a compaction, so it keeps the step-sized cap.
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
 const PINNED_SCHEDULE_TO_START = "30 seconds";
 
-/** The same two activities, addressed to one worker's own queue. Built per queue rather than once,
- * because the queue is not known until the model call reports it, and that report comes out of
- * history, so this is deterministic on replay. */
+/** The same activities on one worker's own queue. The queue comes from the model call's result in
+ * history, so building this per queue is deterministic on replay. */
 const pinnedTo = (taskQueue: string) => ({
   runToolCall: proxyActivities<SteppedActivities>({
     ...cappedOptions,
@@ -109,8 +103,7 @@ const isUnclaimed = (err: unknown) =>
     (err.cause instanceof ApplicationFailure && err.cause.type === FAILED_BEFORE_CLAIM));
 
 
-// Copying a project a client left for a scheduled session. Short, and it has to finish before the
-// first step, so a queue nobody polls must not hold the run open waiting for it.
+// Copies a template project for a scheduled session. Capped so an unpolled queue can't block it.
 const { adoptProject } = proxyActivities<{
   adoptProject(input: { sessionFile: string; template: string }): Promise<void>;
 }>({
@@ -119,14 +112,12 @@ const { adoptProject } = proxyActivities<{
   retry: { maximumAttempts: 10 },
 });
 
-// Retiring is housekeeping, so it gets a short leash: a session that has already stopped must not
-// keep a run open waiting for it, and the next prompt works whether or not this succeeded.
+// Housekeeping. Short leash, and the next prompt works whether or not it succeeded.
 const { retireSession } = proxyActivities<{
   retireSession(input: { sessionFile: string }): Promise<void>;
 }>({
   startToCloseTimeout: "1 minute",
-  // A total cap as well: a queue nobody is polling must not hold the run open, since anything
-  // queued behind this is waiting on it.
+  // An unpolled queue must not hold the run open.
   scheduleToCloseTimeout: "5 minutes",
   retry: { maximumAttempts: 3 },
 });
@@ -140,13 +131,10 @@ export async function piSession(
   sessionFile: string,
   options?: SessionTurnOptions,
 ): Promise<void> {
-  // A schedule fires with fixed arguments, so it cannot name a session, and every firing has to be
-  // its own. The workflow id is already unique per firing (Temporal suffixes a scheduled one) and
-  // is the one name both sides agree on, so derive from it when nothing was given.
+  // A schedule can't name a session, and each firing needs its own. Temporal makes scheduled
+  // workflow ids unique, so derive the session id from it.
   const id = sessionId || workflowInfo().workflowId.replace(WORKFLOW_ID_PREFIX, "");
-  // Refused rather than defaulted: "." is the working directory of whichever worker runs the step,
-  // so two workers would serve one session from two different files. A start that names neither a
-  // file nor a directory is the caller's bug, and the failure should land on the caller.
+  // No default to ".": that is each worker's own cwd, so two workers would use two files.
   if (!sessionFile && !options?.sessionDir && patched("a-session-log-needs-a-named-home")) {
     throw ApplicationFailure.nonRetryable(
       `session ${id} was started with no session file and no sessionDir`,
@@ -154,9 +142,7 @@ export async function piSession(
   }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
-  // Same loop either way. Only what "one step" means differs, so wake, interrupt, the step
-  // ceiling and idle retirement are unchanged.
-  // Set per turn, because what it reads is that turn's own spend. The step driver is built once.
+  // Set per turn, since it reads that turn's spend. The step driver is built once.
   let outOfBudget = (): boolean => false;
   const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
     ? makeSteppedStep({
@@ -171,18 +157,16 @@ export async function piSession(
         outOfBudget: () => outOfBudget(),
         pinnedTo,
         isUnclaimed,
-        // False only while replaying a history written before this rule existed. See the dep.
+        // False only when replaying older histories. See the dep.
         refusesStartedFailures: () => patched("pinned-started-failure-does-not-migrate"),
         resumesAfterLostHost: () => patched("lost-host-does-not-end-the-turn"),
         nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
-        // The SDK's logger, so a line carries its workflow and run id and is suppressed on replay.
+        // The SDK logger tags workflow and run ids and is quiet on replay.
         log: (message, attributes) => log.info(message, attributes),
       })
     : runStep;
   let projectAdopted = options?.template === undefined;
-  // Seeded from the input, which is what lets a turn start with no client: the task is already in
-  // the workflow when it begins, rather than arriving as a signal from something still running.
-  // `queued` is the other source, from a run that rolled over with work still in hand.
+  // Seeded from input, so a turn can start with no client. `queued` comes from a rollover.
   const queue: PromptInput[] = [
     ...(options?.initialPrompt ? [options.initialPrompt] : []),
     ...(options?.queued ?? []),
@@ -190,8 +174,7 @@ export async function piSession(
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
   let finished: TurnState["finished"] = options?.finished;
-  // What this session has spent, across every turn it has run, carried in from the run that rolled
-  // over. A session does not get its allowance back by outgrowing a run's history.
+  // Session spend, carried across rollovers so the allowance doesn't reset.
   const spent: { tokens: number; cost: number; seconds: number } = {
     tokens: options?.spent?.tokens ?? 0,
     cost: options?.spent?.cost ?? 0,
@@ -209,26 +192,18 @@ export async function piSession(
   for (;;) {
     const woke = await condition(() => queue.length > 0, idleTimeout);
     if (!woke && queue.length === 0) {
-      // Idle: retire, and the next prompt starts a fresh run. Hand the project directory back on
-      // the way out, so a worker is not still holding it for a session nobody is driving. Best
-      // effort: it frees the host that runs this, and a host that served the session earlier and
-      // does not draw this activity keeps its own directory until it serves this session again.
+      // Idle: release the project directory and exit. The next prompt starts a fresh run. Best
+      // effort, and it only frees the host that runs this activity.
       await retireSession({ sessionFile: file }).catch((err) =>
         log.warn("could not retire the session's directory", { sessionId: id, err: String(err) }),
       );
-      // Look again. Awaiting an activity here is what makes this necessary: the server used to
-      // protect the old shape, because a signal landing while the same workflow task was in flight
-      // failed its completion and replayed it with the signal in history. An await splits that into
-      // two tasks, so a prompt accepted during the retirement would be pushed onto a queue nothing
-      // reads again, and `start` would have told the caller it was accepted.
+      // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.
       if (queue.length > 0) continue;
       return;
     }
 
-    // Nothing is in flight at this point, which is the only place a rollover is safe: the queue is
-    // the whole of the control state, and a turn that is mid-step cannot be handed to a new run.
-    // Without this, history grows for the life of the run and the server terminates it mid-turn.
-    // A stepped step is a handful of events per tool, so a busy session reaches the limit in hours.
+    // Roll over only between turns. The queue is then the whole control state. A busy stepped
+    // session can hit the history limit in hours.
     const info = workflowInfo();
     if (info.continueAsNewSuggested || info.historyLength >= (options?.maxHistory ?? Infinity)) {
       log.info("rolling the session over", {
@@ -238,8 +213,7 @@ export async function piSession(
       });
       await continueAsNew<typeof piSession>(id, file, {
         ...options,
-        // Carried as the queue, not as the initial prompt: that one is a schedule's task, and
-        // repeating it on every rollover would ask for the same work again.
+        // The initial prompt is a schedule's task. Carry it only in the queue, or it repeats.
         initialPrompt: undefined,
         template: projectAdopted ? undefined : options?.template,
         queued: queue,
@@ -252,30 +226,23 @@ export async function piSession(
     let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
     let finalText = "";
     let error: string | undefined;
-    // The step's retry budget, kept here because the session that would count it is rebuilt per
-    // activity and the transcript it could be read off is something a compaction rewrites.
+    // Kept here because the session is rebuilt per activity and compaction rewrites the transcript.
     let retryAttempt = 0;
-    // At the turn's scope, not the step's: what a turn spent has to be there for the `finally`
-    // below, which runs whether the turn answered, failed or was stopped. The provider billed for
-    // it either way.
+    // Turn-scoped so the `finally` counts spend even for failed or stopped turns.
     const startedAt = Date.now();
     let tokens = 0;
     let cost = 0;
-    // What the record says the session has been billed, as of the last step that reported it. The
-    // count this workflow keeps is about a run; this one is about the session, and it is the one a
-    // session's own bound is measured against wherever the host can say it.
+    // Session total from the record, as of the last step that reported it. Session bounds use it.
     let recorded: Spend | undefined;
-    // Whether what cancelled this turn was its own deadline rather than somebody pressing stop.
+    // True when the turn's own deadline cancelled it, not the user.
     let deadline = false;
-    // The deadline timer's own scope, cancelled in the `finally` below. A scope cancels its timers
-    // when it is itself cancelled, not when its function returns, so a turn that answered before
-    // the deadline would otherwise leave the timer pending, and it would fire into whichever turn
-    // happened to be running then and stop it as if the user had.
+    // Cancelled in `finally`. A scope's timers die only when the scope is cancelled, so without
+    // this a leftover timer would stop a later turn.
     let deadlineScope: CancellationScope | undefined;
     try {
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
-        // A deadline that ends the turn where it is, rather than at the next place it can stop.
+        // Hard deadline: stop where the turn is, not at the next step boundary.
         if (options?.budget?.hardSeconds !== undefined && patched("a-turn-has-a-budget")) {
           const hardMs = options.budget.hardSeconds * 1000;
           const expire = () => {
@@ -286,24 +253,18 @@ export async function piSession(
             deadlineScope = new CancellationScope();
             deadlineScope.run(() => sleep(hardMs)).then(expire, () => undefined);
           } else {
-            // The old shape, kept for runs that recorded it: the timer sat in the turn scope and
-            // outlived a turn that answered early.
+            // Unpatched shape, kept for replay of runs that recorded it.
             sleep(hardMs).then(expire, () => undefined);
           }
         }
         if (!projectAdopted && options?.template) {
-          // Initialization is part of the turn, so stop and query apply while it waits.
+          // Part of the turn, so stop and query apply while it waits.
           running = { promptId: prompt.promptId, step: 0 };
           await adoptProject({ sessionFile: file, template: options.template });
           projectAdopted = true;
         }
-        // What this turn has spent, and when it started spending it. Both are workflow state: the
-        // session file is shared, so its own totals include turns this workflow never ran, and
-        // `Date.now()` here is the workflow's clock, which reads the same on a replay.
-        // A step that crosses a bound is the last one the workflow drives, and the one already in
-        // flight is left to finish. Handing this to the step lets it stop dispatching the rest of a
-        // batch instead, which is the difference between overshooting by a step and overshooting by
-        // whatever is running.
+        // Workflow state, not file totals, since the session file is shared. `Date.now()` is the
+        // workflow clock, so replay agrees. Passed to the step so it can stop mid-batch.
         outOfBudget = () => {
           const b = options?.budget;
           if (!b) return false;
@@ -335,10 +296,8 @@ export async function piSession(
             finalText = result.finalText;
             return;
           }
-          // Between steps, and inside one only as far as refusing to dispatch what has not started.
-          // A call that has started is left to finish: stopping it would leave a call in the
-          // transcript that no result answers, which is a payload no provider accepts, and the next
-          // turn of this session would fail rather than this one.
+          // Checked between steps. A started call is left to finish, since an unanswered call
+          // would break the session's next turn.
           if (outOfBudget() && patched("a-turn-has-a-budget")) {
             outcome = "budget";
             log.warn("turn stopped where it was: it is out of budget", {
@@ -360,9 +319,7 @@ export async function piSession(
         });
       });
     } catch (err) {
-      // An interrupt cancels the in-flight step; the session keeps serving later prompts. A real
-      // run error is already recorded in the session log, so we log-and-continue rather than fail
-      // the whole session.
+      // A failed turn does not fail the session. The session keeps serving later prompts.
       if (isCancellation(err)) {
         outcome = deadline ? "budget" : "interrupted";
         if (deadline) {
@@ -373,18 +330,15 @@ export async function piSession(
           });
         }
       } else {
-        // A step that exhausted its retries, or blew its ceiling, is not somebody pressing stop.
         outcome = "failed";
         error = err instanceof Error ? err.message : String(err);
         log.warn("turn failed", { sessionId: id, promptId: prompt.promptId, error });
       }
     } finally {
-      // Dead with its turn. A fired or already-cancelled timer makes this a no-op.
       deadlineScope?.cancel();
       current = undefined;
       running = undefined;
-      // Added up here rather than per step, so a turn that failed or was interrupted still counts
-      // what it spent: the provider billed for it either way.
+      // Counted here so failed and interrupted turns still count. The provider billed them.
       spent.tokens += tokens;
       spent.cost += cost;
       spent.seconds += (Date.now() - startedAt) / 1000;

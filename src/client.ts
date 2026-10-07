@@ -1,6 +1,5 @@
-// Client helpers: submit a prompt to a session (start the workflow if idle, then signal), and
-// interrupt a session. The prompt is written as a signal-with-start, so a first prompt starts the
-// per-session workflow and later prompts coalesce into the running one.
+// Client helpers to submit a prompt to a session and to interrupt one. A prompt is a
+// signal-with-start: the first starts the per-session workflow, later ones join the running one.
 
 import { randomUUID } from "node:crypto";
 import { Client, Connection } from "@temporalio/client";
@@ -14,9 +13,8 @@ export async function openClient(cfg: Config = fromEnv()) {
   const client = new Client({
     connection,
     namespace: cfg.namespace,
-    // A closed workflow answers a query by default, with the state it held when it closed. A run
-    // that was terminated mid-turn then reports that turn as still running, and a follower polling
-    // it never stops. Rejecting the query is what turns that into "the session is over".
+    // A closed workflow answers queries with its last state, so one terminated mid-turn looks busy
+    // forever. Rejecting the query tells a follower the session is over.
     workflow: { queryRejectCondition: "NOT_OPEN" },
   });
   return { client, connection };

@@ -1,8 +1,6 @@
-// Dispatch admission has to outlive cleanup of the result it produced. An attempt that stalled
-// before taking its claim comes back after the seal has written the answer and the cleanup has
-// taken the result; if that cleanup also took the admission, its call looks fresh and it runs the
-// tool a second time. A fifth review reproduced that. Both cleanups run here, the one a later step
-// of the turn does and the one a later turn does, because the stall is not bounded by either.
+// Checks that a dispatch claim outlives cleanup of the result it produced. Stalls one attempt
+// before its claim, lets another run the tool, runs both the later-step and later-turn sweeps,
+// then resumes the stale attempt and asserts the effect ran once.
 //
 // Usage: npx tsx checks/stale-dispatch-check.mts
 import assert from "node:assert/strict";
@@ -57,7 +55,6 @@ try {
   await activities.runToolCall(input);
   assert.equal(await readFile(effectFile, "utf8"), "effect\n");
   await pending.sweep(file, input.turn, 2);
-  // And the cleanup a following turn does, which is the wider version of the same interleaving.
   await pending.sweepResults(file);
   release();
   await first;

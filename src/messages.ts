@@ -1,5 +1,4 @@
-// Defensive text extraction from a Pi AgentMessage's content, which is either a string or an
-// array of content blocks (TextContent | ImageContent). Node-side only.
+// Text of a Pi AgentMessage's content, which is a string or an array of content blocks.
 
 export function textOf(content: unknown): string {
   if (typeof content === "string") return content;

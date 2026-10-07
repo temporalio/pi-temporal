@@ -1,3 +1,6 @@
+// Checks that `worktree.sweep` and `worktree.forget` never drop a project a live session still
+// needs. Pauses or fails real fs calls at chosen points and asserts which directories survive.
+
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";

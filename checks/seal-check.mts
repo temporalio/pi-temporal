@@ -1,14 +1,8 @@
-// The seal, for real: the production seal activity over a real `AgentSession`, driven by the
-// workflow through a worker, with a scripted model in place of a provider. Every other check stubs
-// or fakes `sealStep`, so what the seal does inside Pi (recording results, the turn_end and
-// agent_before_settle boundaries, a retry that lands after a crash) was covered only by the fork's
-// own tests, which never run it under Temporal.
+// Checks the real `sealStep` over a real `AgentSession` under Temporal, with `faux-worker.mts` as
+// the worker. Asserts turn_end and agent_before_settle run once, including after a SIGKILL mid-seal
+// and a retry on another worker, and that the session file stays one chain.
 //
-// The worker is a child process (`faux-worker.mts`), so the crash case can kill it outright.
-//
-// Needs a Temporal server (TEMPORAL_ADDRESS, default 127.0.0.1:7233) and no model key. The crash
-// case waits out the activity heartbeat and the session lock's stale window, so it takes a minute
-// or two.
+// Needs a Temporal server and no model key. The crash case takes a minute or two.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -123,8 +117,7 @@ async function main() {
 
   const dirs: string[] = [];
   try {
-    // A last seal that ends the turn. agent_before_settle has to run inside the seal activity, on
-    // the worker that holds the session, and what it returns has to be in the file afterwards.
+    // The last seal ends the turn. agent_before_settle runs inside it and its entry is kept.
     {
       const s = scenario("settle");
       dirs.push(s.dir);
@@ -148,9 +141,8 @@ async function main() {
       check("the session is one chain", linear(entries));
     }
 
-    // A seal killed after its results and its turn_end entries are written, before it returns.
-    // Temporal retries it on another worker, and the retry has to land on one of each: the tool
-    // does not run again, its result is not recorded twice, and turn_end is not dispatched twice.
+    // A seal killed after writing its entries but before returning. The retry on another worker
+    // must not rerun the tool or record anything twice.
     {
       const s = scenario("kill");
       dirs.push(s.dir);
@@ -189,8 +181,7 @@ async function main() {
       check("the session is one chain", linear(entries), shape);
     }
 
-    // A turn_end that commits a custom_message and asks to continue. The seal says the turn is not
-    // done, and the workflow runs one more step from that message.
+    // turn_end commits a custom_message and asks to continue, so one more step runs from it.
     {
       const s = scenario("continue");
       dirs.push(s.dir);
@@ -220,8 +211,7 @@ async function main() {
       );
     }
 
-    // Whole-step mode, which builds each step from the same three primitives inside one activity.
-    // The seal is the same seal, so its boundaries have to behave the same from in there.
+    // Whole-step mode runs the same seal inside `runStep`. Its boundaries must behave the same.
     {
       const s = scenario("whole");
       dirs.push(s.dir);
@@ -258,9 +248,8 @@ async function main() {
       check("the session is one chain", linear(entries), shape);
     }
 
-    // A stop in whole-step mode. The step is one activity, so the stop lands inside it, and what
-    // it must do is stop between units: the call that started finishes, the next one does not
-    // start, and the seal records what there is and nothing more.
+    // A stop in whole-step mode lands inside `runStep`. The running call finishes, the next one
+    // never starts, and the seal records only what there is.
     {
       const s = scenario("whole-stop");
       dirs.push(s.dir);
@@ -279,7 +268,7 @@ async function main() {
         answer?.outcome === "interrupted",
         answer,
       );
-      // The activity outlives the cancellation by the call it was in; its seal lands after.
+      // The activity outlives the cancellation by one call, so its seal lands later.
       await until(
         "the stopped step to be sealed",
         () => entriesOf(s.file).filter(role("toolResult")).length === 2,

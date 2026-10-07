@@ -1,13 +1,7 @@
-// The limit the round-six review left open. Refusing to move a step off a host protects the batch
-// that step belongs to, and nothing else: the turn ends, the session takes another prompt, and that
-// prompt is free to land on the same host and use the same directory while the abandoned tool is
-// still inside its own execution. A settled workflow promise says Temporal stopped waiting. It does
-// not say the body stopped.
-//
-// What is asserted here is the directory being refused, and how much of that refusal the host can
-// take back on its own. A dead pid alone licenses nothing, because a tool's children outlive the
-// worker that spawned them and pids come round again after a restart. A dead writer, nothing left
-// running that carries its name, an empty process group and the same boot together do.
+// Checks that a directory with an abandoned writer marker is refused to later steps and turns.
+// Spawns and kills real processes to assert when the host may clear the marker itself (dead pid,
+// empty group, no process carrying the worker name or standing in the dir, same boot) and when an
+// operator must. Also checks the activity writes the marker and retries refusals without backoff.
 //
 // Usage: npx tsx checks/quarantine-check.mts
 
@@ -30,11 +24,8 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
   if (!ok) failures.push(what);
 };
 
-// A process in a group of its own, which is what a worker somebody's supervisor started has, and
-// what a tool that daemonizes gives itself. It carries a worker name of this check's choosing, so
-// what each case turns on is the one thing that case is about.
-// Per run, because a name is what the host looks for and an assertion that fails before its child
-// is killed leaves that child running. A fixed name would then answer for every later run.
+// Spawned processes get their own group and a chosen worker name. The name is per run so a child
+// leaked by a failed run cannot affect later runs.
 const runToken = randomBytes(4).toString("hex");
 const kids: ReturnType<typeof spawn>[] = [];
 
@@ -42,16 +33,14 @@ function spawned(worker?: string) {
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
     detached: true,
     stdio: "ignore",
-    // Without one, it gets this process's environment, which is the case that says the name is
-    // exported rather than only written into the marker.
+    // No name means this process's env, to check the worker name is exported.
     env:
       worker === undefined
         ? process.env
         : { ...process.env, PI_TEMPORAL_WORKER: `${worker}-${runToken}` },
   });
   kids.push(child);
-  // Not unref'd: killing it and waiting for the exit is what this is for, and an unref'd handle
-  // lets the whole check exit while that wait is still outstanding.
+  // Not unref'd, so the check cannot exit while waiting for its exit.
   return { child, pid: child.pid!, pgid: child.pid! };
 }
 
@@ -68,8 +57,7 @@ async function ended(started: ReturnType<typeof spawned>) {
   return started;
 }
 
-// Markers are host-local and keyed by a hash of the directory, so this walks to the one directory
-// this check made rather than repeating the naming scheme.
+// Markers live under a hashed directory name, so find it rather than recompute it.
 async function writersHere() {
   const trees = join(process.env.PI_TEMPORAL_DATA!, "trees");
   const [dir] = await readdir(trees).catch(() => [] as string[]);
@@ -102,13 +90,11 @@ async function main() {
   await writeFile(join(project, "README.md"), "one\n");
   await worktree.capture(project, sessionFile, { seed: true });
 
-  // Turn 1, step 1: a tool starts writing and never comes back. Temporal times its attempt out,
-  // the driver refuses to move the rest of that step, and the turn ends there.
+  // A tool starts writing and never returns. The turn ends there.
   const stranded = { turn: "turn-1", step: 1, callId: "call-a" };
   await worktree.beginWrite(project, stranded);
 
-  // Turn 2 arrives. It is a new turn, so the step guard the driver applies has nothing to say
-  // about it, and the session is free to run it here.
+  // A new turn is not covered by the step guard, so only the marker protects the directory.
   const next = { turn: "turn-2", step: 1, callId: "call-b" };
   let refusedRestore: unknown;
   await worktree.ensure(project, sessionFile, next).catch((err) => {
@@ -126,15 +112,14 @@ async function main() {
     refusedCapture: String(refusedCapture),
   });
 
-  // The reason for the refusal is in the message, because an operator is the one who acts on it.
+  // An operator acts on the message, so it must say why.
   check(
     "the refusal names the call that never returned",
     String(refusedRestore).includes("call-a") && String(refusedRestore).includes("turn-1"),
     String(refusedRestore),
   );
 
-  // A sibling of the same step is not a stranded writer. Two tools of one step run at once here on
-  // purpose, and refusing them would be refusing the feature.
+  // Tools of one step run concurrently by design, so a sibling is not refused.
   const sibling = { turn: "turn-1", step: 1, callId: "call-c" };
   let siblingOk = true;
   await worktree.ensure(project, sessionFile, sibling).catch(() => {
@@ -142,8 +127,6 @@ async function main() {
   });
   check("a sibling of the same step is not refused", siblingOk);
 
-  // The next step of the same turn is not the same step, and a writer the step before it left
-  // behind is exactly as unaccounted for as one from another turn.
   let refusedNextStep = false;
   await worktree
     .ensure(project, sessionFile, { turn: "turn-1", step: 2, callId: "call-x" })
@@ -152,8 +135,7 @@ async function main() {
     });
   check("the next step of the same turn is refused too", refusedNextStep);
 
-  // The abandoned tool finally returns. Whatever it did, it is not doing it any more, so the
-  // directory is usable again with no operator involved.
+  // The abandoned tool returns, so the directory is free again.
   await worktree.endWrite(project, stranded.callId);
   let reusable = true;
   await worktree.ensure(project, sessionFile, next).catch(() => {
@@ -161,28 +143,24 @@ async function main() {
   });
   check("a writer that comes back releases the directory", reusable);
 
-  // A worker that died mid-tool leaves its marker behind, and the marker is what a person used to
-  // have to clear by hand. Most of that is answerable without one: the process that wrote it is
-  // gone, nothing it started is left in its group, and the machine has not restarted underneath the
-  // pids that say those two things.
+  // A worker that died mid-tool leaves its marker. The host clears it itself when the writer is
+  // gone, nothing it started remains, and the machine has not rebooted since.
   const later = { turn: "turn-4", step: 1, callId: "call-e" };
   const usable = async () =>
     await worktree.ensure(project, sessionFile, later).then(() => true, () => false);
 
-  // Written by this process, which is running. Nothing to conclude, so the refusal stands.
+  // Written by this live process.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   check("a marker whose writer is still running keeps the directory refused", !(await usable()));
 
-  // The worker died and left nothing behind: no process of its own, nothing carrying its name, and
-  // an empty group. That is the whole of the proof that its tools are over.
+  // Dead worker, nothing carrying its name, empty group.
   const gone = await ended(spawned("gone"));
   const stale = { pid: gone.pid, pgid: gone.pgid, worker: `gone-${runToken}` };
   await editMarker(stale);
   check("a marker whose writer left nothing running clears itself", await usable());
   check("and the marker is taken off the host", (await markers()).length === 0);
 
-  // The worker died and something it started did not. That is the case the refusal is for, and no
-  // pid check licenses reuse while it holds.
+  // Dead worker, but something it started is still in its group.
   const orphan = spawned("orphaned");
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...stale, pgid: orphan.pgid, worker: `orphaned-${runToken}` });
@@ -190,8 +168,7 @@ async function main() {
   await ended(orphan);
   check("and releases it once that work is over", await usable());
 
-  // A tool that asks for a group of its own is out of the group check's reach. What it cannot put
-  // down is the name its worker left in the environment it inherited.
+  // A tool in its own group is still found by the inherited worker name.
   const escaped = spawned("escaped");
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...stale, worker: `escaped-${runToken}` });
@@ -199,10 +176,7 @@ async function main() {
   await ended(escaped);
   check("and that one releases the directory too", await usable());
 
-  // A tool that leaves the group and is handed an environment of somebody else's choosing has put
-  // down everything the worker gave it. What it cannot put down and go on writing is the directory
-  // it writes, so that is the last reading, and it is the one that does not depend on the tool
-  // having kept anything.
+  // A tool with a new group and a clean env is still found by its cwd in the directory.
   const standing = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
     detached: true,
     stdio: "ignore",
@@ -230,9 +204,7 @@ async function main() {
   await ended({ child: standing, pid: standing.pid!, pgid: standing.pid! });
   check("and releases it when that process leaves", await usable());
 
-  // The name has to reach the tool, not only the marker, or none of the above is about anything
-  // that runs here. This child is given no environment of its own, so the only way it can carry
-  // the name is that the worker put it where a child would inherit it.
+  // The worker must export its name so real tools inherit it, not just write it in the marker.
   const inheriting = spawned();
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...stale, worker: process.env.PI_TEMPORAL_WORKER });
@@ -242,24 +214,19 @@ async function main() {
   await ended(inheriting);
   check("and the directory is free once it exits", await usable());
 
-  // A worker restarted from the same shell is in the group its predecessor was in, so the group
-  // answers for this process rather than for the marker. What the dead worker started is what
-  // decides, and it started nothing.
+  // A worker restarted from the same shell shares its predecessor's group, so it is ignored.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...stale, pgid: await ourGroup() });
   check("a marker from a predecessor in this process's own group clears itself", await usable());
 
-  // The control group is Linux's, and a tool keeps it through `setsid` and through `sudo`, which
-  // empties the environment it passes on. A Mac has no such thing to read, so the rule is asked on
-  // its own, with the reading a Linux host would have made handed to it.
+  // A Linux cgroup survives `setsid` and `sudo`. macOS has none, so feed the rule fake readings.
   const readings = {
     groups: new Set<number>(), workers: new Set<string>(), holding: [],
     ourGroup: await ourGroup(), ourCgroup: "/the-one-this-process-is-in",
   };
   const dead = {
     turn: "turn-3", step: 1, callId: "call-d", host: hostname(), pid: gone.pid,
-    // The stamp the module compares against, not the wall clock: a marker dated now would read as
-    // one from before a restart and never reach the rule this is about.
+    // Boot time as the module computes it, so the marker does not look pre-reboot.
     bootAt: Math.round(Date.now() - uptime() * 1000), started: new Date().toISOString(),
   };
   const inCgroup = (note: Record<string, unknown>, live: string[]) =>
@@ -283,57 +250,49 @@ async function main() {
     inCgroup({ cgroup: readings.ourCgroup }, [readings.ourCgroup]) === undefined,
   );
 
-  // A pid means nothing across a restart, so a marker from before one is not read as a live writer.
+  // Pids mean nothing across a reboot.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ bootAt: 0 });
   check("a marker from before the machine restarted clears itself", await usable());
 
-  // A worker restarted in the same container comes back with the same pid, on the same boot, in the
-  // same groups. A marker naming this pid with another start is that predecessor's, so it clears.
+  // Same pid with a different start time is a predecessor, for example after a container restart.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ pidStartedAt: "before this process started" });
   check("a marker from a previous run of this pid clears itself", await usable());
-  // The same pid and the same start is this process, which is still inside its call.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   check("one from this very process keeps the directory refused", !(await usable()));
   await worktree.clearWriters(project);
 
-  // Another process holding the marker's pid now, which is a reused pid when it started at another
-  // time than the writer did.
+  // A live pid that started at a different time than the writer is a reused pid.
   const holder = spawned("reused");
   const reusedNote = { pid: holder.pid, pgid: gone.pgid, worker: `dead-writer-${runToken}` };
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...reusedNote, pidStartedAt: "not when that process started" });
   check("a live pid that started after the writer did clears the marker", await usable());
-  // When it started at the time the marker says, it is the writer.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...reusedNote, pidStartedAt: await worktree.startTimeOf(holder.pid!) });
   check("one that started when the writer did keeps it refused", !(await usable()));
-  // A marker from an older worker records no start, and a live pid still reads as its writer.
+  // No recorded start: a live pid counts as the writer.
   await worktree.clearWriters(project);
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...reusedNote, pidStartedAt: undefined });
   check("an older marker with no start keeps a live pid refused", !(await usable()));
   await worktree.clearWriters(project);
-  // A start read in another pid namespace, as a container sharing this hostname would write, says
-  // nothing about the process holding that pid here.
+  // A start time from another pid namespace says nothing about this pid.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...reusedNote, pidStartedAt: "elsewhere", pidNs: "pid:[elsewhere]" });
   check("one from another pid namespace keeps a live pid refused", !(await usable()));
   await worktree.clearWriters(project);
   await ended(holder);
 
-  // What is left is a tool that put itself in a group of its own, which nothing here can follow.
-  // That one needs a person, and what the person has is a command that says what it forgot.
+  // A live writer the host cannot rule out needs an operator and `clearWriters`.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   check("a live writer still needs an operator", !(await usable()));
   const cleared = await worktree.clearWriters(project);
   check("clearing it says what it forgot", cleared === 1, cleared);
   check("and the directory works again", await usable());
 
-  // And the activity is what writes the marker. Driven through the real tool activity, with the
-  // session faked: what is asserted is that the marker exists while the tool body runs and is gone
-  // once it returns, because everything above rests on the activity doing that.
+  // The real tool activity must hold the marker exactly while the tool body runs.
   const marked: boolean[] = [];
   const seen = { turn: "turn-5", step: 1, callId: "call-f" };
   const activities = makeActivities(
@@ -351,7 +310,6 @@ async function main() {
             ],
           },
           async runToolCall() {
-            // Inside the body: this is the window the quarantine exists for.
             marked.push(
               (await worktree
                 .ensure(project, sessionFile, { turn: "turn-6", step: 1, callId: "other" })
@@ -382,11 +340,8 @@ async function main() {
     });
   check("and unmarks it when the tool returns", afterActivity);
 
-  // And what the activity does with a refusal decides what it costs the session. A refused
-  // directory is this host saying no, not a failing unit of work: the same dispatch runs fine
-  // somewhere else, so the failure carries its own retry delay rather than climbing the backoff a
-  // failing activity earns. Without it, the host that answers first and refuses fastest pushes the
-  // next attempt minutes out while a free host sits idle.
+  // A refusal is this host saying no, not a failing activity. It sets `nextRetryDelay` so another
+  // host can take the work without climbing the backoff.
   await worktree.beginWrite(project, { turn: "turn-7", step: 1, callId: "call-g" });
   const refusal = await activities
     .runToolCall({
@@ -406,10 +361,8 @@ async function main() {
   );
   await worktree.clearWriters(project);
 
-  // And the directory the session built for itself is not refused at all: it is moved out of the
-  // way, and the session gets a fresh one here. The writer nobody can account for goes on writing
-  // the directory it has open, under its new name, where nothing it does reaches what comes next.
-  // That is the case the readings above cannot close, and it costs a rename.
+  // A directory the session built itself is moved aside instead of refused, and rebuilt fresh.
+  // The stranded writer keeps writing to the renamed copy.
   const built = join(root, "built-here");
   await mkdir(built, { recursive: true });
   await worktree.ensure(built, sessionFile);
@@ -440,8 +393,7 @@ async function main() {
   );
   check("and no marker is left on it", (await markers()).length === 0);
 
-  // And never while one of this step's own tools is inside it: moving the directory then would take
-  // the floor out from under a call that is running and accounted for.
+  // Never moved while one of this step's own calls is running in it.
   await worktree.beginWrite(built, { turn: "turn-12", step: 1, callId: "call-k" });
   await worktree.beginWrite(built, { turn: "turn-13", step: 1, callId: "call-l" });
   let movedUnderOurOwn = true;
@@ -460,8 +412,7 @@ async function main() {
   );
   await worktree.clearWriters(built);
 
-  // The file the stranded tool wrote is still there. Quarantine refuses reuse; it does not throw
-  // away what the tool did, which is the other half of not losing work.
+  // Quarantine refuses reuse but never deletes what the tool wrote.
   await writeFile(join(project, "late.txt"), "written by the stranded tool\n");
   check(
     "nothing the stranded tool wrote is removed",
@@ -483,8 +434,6 @@ main()
     process.exitCode = 1;
   })
   .finally(() => {
-    // Whatever happened above, nothing this check started is left carrying a name a later run
-    // would find.
     for (const kid of kids) kid.kill("SIGKILL");
     setTimeout(() => process.exit(process.exitCode ?? 0), 200);
   });

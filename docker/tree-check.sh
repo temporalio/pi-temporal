@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
-# The project's files moving between machines, which is the half the session log does not cover.
-#
-# Two workers, each a container with its own `/project`. They share the session directory and
-# nothing else, so a file written on the first host reaches the second only by travelling with the
-# session. A session writes a file, the host that wrote it is killed, and the next turn runs on a
-# host whose project directory has never held anything.
+# Checks that project files travel between hosts with the session. Each worker container has its
+# own `/project`. A turn writes a file, that host is killed, and the next turn runs on a host
+# whose project directory is empty.
 #
 # Usage: OPENAI_API_KEY=... docker/tree-check.sh
 #
-# KEEP=1 leaves the stack up to look at. NFS=1 puts the session directory on a real NFSv4 server
-# instead of a local volume, which is the filesystem the lock's caveats are about.
+# KEEP=1 leaves the stack up. NFS=1 puts the session directory on a real NFSv4 server.
 
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 COMPOSE="docker compose -f docker/compose.yml"
-# The same checks over a real network filesystem. A local volume answers the exclusive-create and
-# atomic-rename questions by construction, which is what the lock rests on, so it proves them only
-# where a fleet does not run.
 [ -n "${NFS:-}" ] && COMPOSE="$COMPOSE -f docker/compose.nfs.yml"
 export PI_TEMPORAL_TASK_QUEUE="pi-tree-$$"
 export PI_TEMPORAL_SHIP_TREE=1
@@ -39,11 +32,9 @@ pinned_fork
 $COMPOSE down -v >/dev/null 2>&1
 docker build -q -f docker/Dockerfile -t pi-temporal:l3 . >/dev/null \
   || { echo "build failed"; exit 1; }
-# One worker for the first half, so the second one is provably a host that has never seen this
-# project. The second half brings both up, which is the only way a step's activities get spread.
-# The file server first, and waited for. The session directory is a volume the DAEMON mounts, and
-# it does that while creating a container rather than while starting it, so `depends_on` is too
-# late: the mount is attempted before anything has waited for the export to exist.
+# One worker first, so worker B has provably never seen the project.
+# Wait for the NFS server explicitly. The daemon mounts the volume at container create time,
+# before `depends_on` waits for anything.
 if [ -n "${NFS:-}" ]; then
   $COMPOSE up -d --wait nfs >/dev/null 2>&1 || { echo "the file server did not start"; exit 1; }
 fi
@@ -52,9 +43,7 @@ $COMPOSE up -d temporal worker-a >/dev/null 2>&1 || { echo "stack failed to star
 hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
 [ -n "$hostA" ] && ok "worker A is up ($hostA)" || { bad "worker A came up"; exit 1; }
 
-# Something already in the project, so the check covers a tree that has content before the agent
-# touches it rather than only what the agent creates. On the CLIENT, because the client is what
-# sends the project: no worker may establish it, since a worker is whichever one Temporal picked.
+# Pre-existing content, seeded on the client, since the client is what sends the project.
 $COMPOSE run --rm -T --entrypoint sh client -c 'echo seeded > /project/seed.txt' >/dev/null 2>&1
 
 sid=$($COMPOSE run --rm -T client start --project=/project \
@@ -62,7 +51,7 @@ sid=$($COMPOSE run --rm -T client start --project=/project \
   2>/dev/null | tr -d '\r' | head -1)
 [ -n "$sid" ] && ok "a client started the session ($sid)" || { bad "no session"; exit 1; }
 
-# Wait for the turn rather than for a duration, then confirm the file is really on host A.
+# Wait for the turn, then confirm the file is on host A.
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
 wrote=$($COMPOSE exec -T worker-a sh -c 'cat /project/note.txt 2>&1' 2>/dev/null | tr -d '\r')
 case "$wrote" in
@@ -91,15 +80,14 @@ empty=$($COMPOSE exec -T worker-b sh -c 'ls -A /project | wc -l' 2>/dev/null | t
   && ok "worker B's project is empty before the turn" \
   || bad "worker B's project was not empty" "$empty"
 
-# --- the same session, on the other host. The file exists there only if the tree travelled.
+# --- the same session on host B. The file is there only if the tree travelled.
 task="Use the bash tool to run exactly: cat /project/note.txt /project/seed.txt. "
 task+="Report what it printed."
 $COMPOSE run --rm -T client start --project=/project "$task" \
   --session="$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
 
-# Asked of worker B's own disk, not of the transcript: the transcript still holds turn 1, where the
-# file did exist, so matching it anywhere would prove nothing about B.
+# Check B's disk, not the transcript, which still holds turn 1's output.
 landed=$($COMPOSE exec -T worker-b sh -c 'cat /project/note.txt 2>&1' 2>/dev/null | tr -d '\r')
 case "$landed" in
   CARRIED*) ok "the file the agent wrote travelled to worker B" ;;
@@ -111,8 +99,7 @@ case "$seed" in
   *) bad "the rest of the project travelled too" "$seed" ;;
 esac
 
-# --- both hosts polling, so a step's three activities can be dispatched to different ones. The
-# model call, each tool call and the seal are separate dispatches: nothing pins them together.
+# --- both hosts polling, so a step's activities may land on different hosts.
 $COMPOSE up -d worker-a >/dev/null 2>&1
 sleep 8
 $COMPOSE run --rm -T client start --project=/project \
@@ -124,9 +111,8 @@ $COMPOSE run --rm -T client start --project=/project \
   --session="$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
 
-# What the host that ran the read saw, which is the claim. Asserting both hosts hold the file is
-# stronger but flaky: nothing forces a turn's activities to spread, so a whole turn can land on one
-# host and the check would fail with nothing wrong.
+# Assert what the reading host saw. Checking both hosts' disks would flake, since nothing forces
+# a turn's activities to spread.
 read_back=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
 case "$read_back" in
   *"tool result: SPREAD"*)

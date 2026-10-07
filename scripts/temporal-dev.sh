@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# A local Temporal server to try this against. Reuses one that is already listening, so running it
-# again in another terminal is harmless. Ctrl-C stops it.
+# Starts a local Temporal dev server, or reuses one already listening. Ctrl-C stops it.
 #
 #   TEMPORAL_PORT      gRPC port, default 7233
 #   TEMPORAL_UI_PORT   web UI port, default the gRPC port plus 1000
@@ -26,8 +25,6 @@ if listening "$port"; then
 fi
 
 args=(server start-dev --port "$port" --ui-port "$ui_port" --log-level warn)
-# Without a db file the dev server forgets everything on restart, which is the wrong default when
-# the thing being demonstrated is that work survives a process dying.
 [ -n "${TEMPORAL_DB_FILE:-}" ] && args+=(--db-filename "$TEMPORAL_DB_FILE")
 
 echo "Temporal on 127.0.0.1:$port    UI http://127.0.0.1:$ui_port"

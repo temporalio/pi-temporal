@@ -1,9 +1,6 @@
-// The readings the refusal rests on, run where they are actually made.
-//
-// Everything about a stranded writer is answered from `/proc` on Linux and from `ps` and `lsof`
-// everywhere else, and those are different code. A fleet runs the first one; a laptop runs the
-// second, which is the only one the other checks ever reach. So this is the same questions asked
-// inside a container, where `/proc` is what answers them.
+// Checks the Linux `/proc` path of stranded-writer detection, which other checks on macOS never
+// reach. Plants a stale writer marker, then asserts the directory stays refused while a process
+// has its cwd or an open file in it, and clears once nothing does.
 //
 // Usage: docker/liveness-check.sh   (or `npx tsx checks/liveness-linux-check.mts` on a Linux host)
 
@@ -88,8 +85,7 @@ async function main() {
     (await readdir((await markers())!).catch(() => [])).length === 0,
   );
 
-  // A tool that put itself in a group of its own and kept nothing the worker gave it, standing in
-  // the directory it writes.
+  // A detached tool with nothing from the worker, whose cwd is the project.
   const standing = spawned({ cwd: project });
   await worktree.beginWrite(project, { turn: "turn-1", step: 1, callId: "call-a" });
   await editMarker(stale);
@@ -102,8 +98,7 @@ async function main() {
   await ended(standing);
   check("and releases it when that process leaves", await usable());
 
-  // And one that moved out of the directory but still holds a file under it open, which is what a
-  // tool that daemonized the textbook way looks like: `chdir("/")`, and the work carries on.
+  // A daemonized tool: `chdir("/")` but still holding a file under the project open.
   const kept = join(project, "held-open.txt");
   await writeFile(kept, "written by a tool that is still inside\n");
   const holder = spawned({
@@ -111,7 +106,7 @@ async function main() {
     script:
       `require("node:fs").openSync(${JSON.stringify(kept)}, "r"); setInterval(() => {}, 1000)`,
   });
-  // Its file is opened a moment after it starts, so the reading has to be taken after that.
+  // Wait until the child has opened its file.
   await new Promise((r) => setTimeout(r, 1500));
   await worktree.beginWrite(project, { turn: "turn-1", step: 1, callId: "call-a" });
   await editMarker(stale);
@@ -120,8 +115,7 @@ async function main() {
   await ended(holder);
   check("and that one releases it too", await usable());
 
-  // The control group this process is in is readable at all, which is what the rule that answers
-  // for a tool running as somebody else rests on.
+  // The cgroup rule for tools running as another user needs this to be readable.
   const ours = (await readFile("/proc/self/cgroup", "utf8")).split("\n")[0];
   check("this host reports a control group to record", ours.split(":").length >= 3, ours);
   await worktree.beginWrite(project, { turn: "turn-1", step: 1, callId: "call-a" });
@@ -133,13 +127,11 @@ async function main() {
     typeof note.cgroup === "string" && note.cgroup.length > 0,
     note,
   );
-  // Every process in a container shares one, so a marker naming this one says nothing either way.
+  // Every process in a container shares this cgroup, so it proves nothing either way.
   await editMarker({ ...stale, cgroup: note.cgroup });
   check("a marker naming the group this process is in still clears", await usable());
 
-  // And whether this host could move that directory out of the way at all, which is the difference
-  // between a stranded tool costing a directory and costing it until somebody comes. The reading is
-  // a prediction for an operator; what decides is the rename. Both cases exist on any Linux host.
+  // `cannotMoveAside` is a hint for operators. The rename itself decides.
   check(
     "a plain directory can be set aside",
     (await worktree.cannotMoveAside(project)) === undefined,

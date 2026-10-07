@@ -18,12 +18,11 @@ jobs:
             package-lock.json
             fork.pin
       - run: npm ci
-      # After npm ci, which wipes node_modules and would take the fork link with it.
+      # After `npm ci`, which removes the fork link.
       - run: scripts/setup-fork.sh
       - run: npm run typecheck
-  # The checks drive the real activities and workflows against a dev server, which is the only
-  # place the lock, claim and tree rules are exercised. Typecheck alone would merge a regression
-  # in any of them green.
+  # Runs the real activities and workflows against a dev server. The lock, claim and tree rules
+  # are only tested here.
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -52,5 +51,5 @@ jobs:
           cat "$RUNNER_TEMP/temporal.log"
           exit 1
       - run: npm run checks
-      # A worker restarted in its own container is the one case that needs a container to happen.
+      # Restarting a worker's own container needs Docker.
       - run: docker/restart-check.sh

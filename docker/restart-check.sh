@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# A worker killed mid-tool and brought back as the same container, which is what `docker start`, a
-# restart policy and a Kubernetes container restart all do. It comes back as the same pid on the
-# same boot, in the same groups, with the same environment, so every reading of the marker its
-# predecessor left says that writer is still running unless something tells the two processes
-# apart. What is asserted is that the directory comes back instead of staying refused for good.
-#
-# Needs Docker and no model key, and no Temporal: it drives the tree store directly.
+# Kills a worker mid-tool and restarts the same container (as `docker start` or a Kubernetes
+# restart does). It comes back with the same pid on the same boot, so its old writer marker looks
+# live. Asserts the project directory is freed, not refused forever.
+# Needs Docker only. No model key, no Temporal.
 #
 # Usage: docker/restart-check.sh
 
@@ -24,9 +21,8 @@ trap cleanup EXIT
 build="$(docker build -q -f docker/Dockerfile -t pi-temporal:l3 . 2>&1)" \
   || { echo "build failed:"; echo "$build"; exit 1; }
 
-# The source is mounted over the image's copy, so the code under test is this checkout's. Both
-# mounts survive a restart of the container, and so does everything it wrote under /work. The
-# project is a volume of its own, which cannot be moved aside.
+# Mount this checkout's source. Mounts and /work survive the restart. /project is its own volume,
+# so it can't be moved aside.
 docker run -d --name "$name" \
   -v "$PWD/src:/app/src:ro" \
   -v "$PWD/checks/same-container-restart.mts:/app/checks/same-container-restart.mts:ro" \

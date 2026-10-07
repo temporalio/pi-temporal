@@ -1,3 +1,6 @@
+// Checks that a firing queued before `unschedule` can still adopt its project. Triggers the
+// schedule with no worker, deletes it through the CLI, then runs `adoptProject` for the firing.
+
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";

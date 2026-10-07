@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs the fork's pi with the pi-temporal extension loaded, pointed at the local Temporal server.
-# Type /background <task> once it is up. Extra arguments go through to pi.
-#
-# The background task's tools run in the directory you launch this from, so launch it in the
-# project you want the task to work on.
+# Runs the fork's pi with the pi-temporal extension, against the local Temporal server. Extra
+# arguments go to pi. Launch it from the project you want `/background` tasks to work on.
 #
 #   TEMPORAL_PORT          which server to talk to, default 7233
 #   OPENAI_API_KEY         the key for the background task's model
@@ -24,14 +21,13 @@ cli="$root/.fork/pi/packages/coding-agent/dist/cli.js"
 port="${TEMPORAL_PORT:-7233}"
 export TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:$port}"
 
-# Pinned so a test does not depend on which model the TUI happens to have selected. The key has to
-# belong to the same provider.
+# Pinned so tests don't depend on the TUI's selected model. The key must match the provider.
 export PI_TEMPORAL_PROVIDER="${PI_TEMPORAL_PROVIDER:-openai}"
 export PI_MODEL="${PI_MODEL:-gpt-4o-mini}"
 
 if [ -z "${OPENAI_API_KEY:-}" ]; then
-  key_file="${OPENAI_API_KEY_FILE:-$HOME/.config/ai363/llm.key}"
-  [ -f "$key_file" ] || {
+  key_file="${OPENAI_API_KEY_FILE:-}"
+  [ -n "$key_file" ] && [ -f "$key_file" ] || {
     echo "set OPENAI_API_KEY, or OPENAI_API_KEY_FILE to a file holding one" >&2
     exit 1
   }

@@ -1,3 +1,7 @@
+// Checks the per-call dispatch claim in `runToolCall`. Races two attempts at the claim and asserts
+// one effect runs. Also asserts a failed claim write blocks the effect, and that
+// `FAILED_BEFORE_CLAIM` is reported only when no attempt claimed the call.
+
 import assert from "node:assert/strict";
 import fs, { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -70,8 +74,7 @@ try {
   );
   console.log("PASS a failed dispatch write blocks the effect");
 
-  // A failure before any attempt claimed the call is one the tool cannot have started from, and the
-  // workflow may only move a pinned step on that answer. One that follows a claim must not give it.
+  // The workflow moves a pinned step only on `FAILED_BEFORE_CLAIM`. A claimed call must not say it.
   const cannotOpen = makeActivities({ projectDir: root }, {
     openSession: async () => {
       throw new Error("cannot open the session");

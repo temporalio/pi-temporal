@@ -1,16 +1,9 @@
-# The same two workers, with the session directory on a real network filesystem instead of a local
-# volume.
+# Puts /sessions on a real NFSv4 server, to test that exclusive create and atomic rename hold
+# there (NFSv3 doesn't, see `session-lock.ts`).
 #
 #   NFS=1 docker/tree-check.sh
 #
-# What this is for. Everything the lock does rests on an exclusive create being exclusive, and on a
-# rename being atomic, and a local volume answers both by construction. It says nothing about the
-# filesystem a fleet actually shares. NFSv4 does answer them (v3 does not, which is the caveat in
-# `session-lock.ts`), so this is the shape that tests the claim rather than assuming it.
-#
-# The mount is the daemon's, not the container's: the volume driver mounts the export and hands the
-# result to the workers, so nothing here needs a privileged worker or an `nfs-common` in the image.
-# The server itself is privileged, because `nfsd` is the kernel's.
+# The Docker daemon mounts the export, so workers need no privileges. Only the server does.
 
 name: pi-temporal-l3
 
@@ -23,9 +16,7 @@ services:
     volumes:
       - nfsdata:/exports
     ports:
-      # Published, because the daemon does the mounting and a compose service name means nothing to
-      # it. The port is fixed for the same reason the cluster's is: a check that has to discover one
-      # is a check that fails for a reason nobody reads.
+      # Published on a fixed port, since the daemon mounts it and can't resolve service names.
       - "12049:2049"
     healthcheck:
       test: ["CMD-SHELL", "rpcinfo -T tcp 127.0.0.1 100003 4 >/dev/null 2>&1"]
@@ -54,8 +45,7 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      # `soft` so a server that dies fails the check rather than hanging it. `nolock` because what
-      # excludes two writers here is an exclusive create and a rename, not an advisory lock: that is
-      # the whole point of the lock's shape, and this is where it is put to the test.
+      # `soft` so a dead server fails the check instead of hanging it. `nolock` because the session
+      # lock uses exclusive create and rename, not advisory locks.
       o: "addr=127.0.0.1,nfsvers=4,port=12049,nolock,soft"
       device: ":/"

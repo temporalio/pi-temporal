@@ -1,13 +1,6 @@
-// What an activity says a step cost, which is what every bound above it is made of.
-//
-// Two numbers, and they answer different questions. What this step spent is a difference the
-// activity takes across its own work, because the session's own totals are for the whole session
-// and a turn's bound is about one turn. What the session has been billed is that total, read off
-// the record rather than added up here, because nothing the workflow keeps survives the session
-// going idle and being woken again as a fresh run.
-//
-// Driven through the real activity with the session faked, so what is checked is the activity
-// reading its session and reporting it, which no stub-driven check can say anything about.
+// Checks what `runStep` reports a step cost. Runs the real activity over a faked session and
+// asserts `spent` is this step's delta, `total` is the session's billed total, and both are
+// undefined (not zero) when the session keeps no totals.
 //
 // No server and no model key. Usage: npx tsx checks/spend-check.mts
 
@@ -27,8 +20,7 @@ const root = await mkdtemp(join(tmpdir(), "pi-spend-"));
 const sessionFile = join(root, "session.jsonl");
 
 try {
-  // A session that was already billed for earlier turns, and is billed more by this step. The
-  // shape is Pi's own: totals over every entry, including history a compaction rewrote.
+  // Already billed for earlier turns. Pi's totals cover every entry, even compacted history.
   let billed = { tokens: 1_000, cost: 0.5 };
   const activities = makeActivities(
     { projectDir: root },
@@ -38,7 +30,7 @@ try {
           state: { messages: [] },
           prepareStep: () => true,
           recordPrompt: async () => true,
-          // The model call is what spends, and a step that asks for no tool seals as answered.
+          // No tool calls, so the step seals as answered.
           modelCall: async () => {
             billed = { tokens: billed.tokens + 250, cost: billed.cost + 0.125 };
             return { toolCalls: [], sequential: false, ended: false };
@@ -60,11 +52,9 @@ try {
     step: 1,
   });
 
-  // The difference this step made, not the session's total: a turn's bound is about the turn.
   check("a step reports what it spent", result.spent?.tokens === 250, result.spent);
   check("in money as well as tokens", result.spent?.cost === 0.125, result.spent);
-  // And the total, which is what a session's bound is measured against and what a run that starts
-  // after an idle retirement has no other way to know.
+  // A run started after idle retirement can only learn the session total from here.
   check(
     "and what the session has been billed in total",
     result.total?.tokens === 1_250,
@@ -72,8 +62,7 @@ try {
   );
   check("with the same two numbers", result.total?.cost === 0.625, result.total);
 
-  // A session that cannot say is reported as nothing rather than as zero: a bound that reads a
-  // missing count as nothing spent is one that never stops a turn.
+  // Missing totals must not read as zero, or a budget would never stop the turn.
   const quiet = makeActivities(
     { projectDir: root },
     {

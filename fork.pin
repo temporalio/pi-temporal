@@ -1,25 +1,7 @@
-# The Pi build this executor depends on.
-#
-# temporalio/pi branch moe/pin-head, a merge of the open fork pull requests: #12 (moe/write-guard,
-# a sibling of the stack) and #4 (moe/turn-steps, the top of the stack). Neither head alone has
-# everything below. Once they merge, the pin moves to fork main.
-#
-#   #9 (merged) splits one turn of the agent loop into a model call, its tool calls and a seal.
-#   #12 adds SessionManager.setWriteGuard, which is the only place a driver can be sure it still
-#      owns the file: the write a model call ends with lands minutes after anything else could
-#      have checked.
-#   #2 adds prepareStep and recordPrompt on AgentSession: settle what a stopped turn left behind,
-#      and record a prompt without a model call, so a worker can drive a session one step at a
-#      time.
-#   #4 adds modelCall, runToolCall and sealStep, which split a step so each tool call is its own
-#      unit of work, and hands the same three to an executor as turn.steps through
-#      pi.registerTurnExecutor. A seal records that a turn's turn_end ran, so one retried in
-#      another process does not run it again. The seal reads no retry budget off the transcript:
-#      the driver carries the count each seal returns into the next one.
-# None of it is in the published @earendil-works/pi-coding-agent, so the dependency is a build of
-# the fork.
-#
-# Bump PI_FORK_REF when the PR moves, then re-run scripts/setup-fork.sh.
+# Pins a build of the temporalio/pi fork. The step-level API this executor needs (`prepareStep`,
+# `recordPrompt`, `modelCall`/`runToolCall`/`sealStep`, `setWriteGuard`, `registerTurnExecutor`)
+# isn't in the published @earendil-works/pi-coding-agent.
+# To bump it, set PI_FORK_REF to the new fork commit, then re-run scripts/setup-fork.sh.
 
 PI_FORK_REPO=https://github.com/temporalio/pi.git
 PI_FORK_REF=5461517979366af8896c55b502e8c6d0d0ca4e11

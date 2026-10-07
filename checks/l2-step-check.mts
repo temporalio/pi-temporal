@@ -1,7 +1,6 @@
-// Checks the stepped step body (src/l2-step.ts) against fake activities: no Temporal, no model
-// key, no session file. What is pinned here is the orchestration, which is the part a live run
-// cannot show you: every call reaches the seal, an interrupt is not swallowed, one broken tool
-// does not take the turn with it, and a batch that says so runs in order.
+// Checks the stepped step body (`src/l2-step.ts`) against fake activities, with no server. Asserts
+// every call reaches the seal, interrupts propagate, one failed tool does not end the turn, and
+// pinned work falls back to the shared queue only when it never started.
 //
 // Usage: npx tsx checks/l2-step-check.mts
 
@@ -66,7 +65,6 @@ async function drive(
       },
     },
     isCancellation,
-    // Straight through: what matters here is that the seal still runs after a stop.
     nonCancellable: (fn) => fn(),
     log: (message, attributes) => lines.push({ message, attributes }),
   });
@@ -95,9 +93,9 @@ async function main() {
     check("a settled step reports the answer it found", found, run.result);
   }
 
-  // Every call reaches the seal, in the order the model asked, and they overlap by default.
+  // Every call reaches the seal in model order. Calls overlap by default.
   {
-    // The tool waits, so two of them running at once is observable.
+    // The tool waits, so overlap is observable.
     const batch = { calls: [call("c1"), call("c2")], sequential: false, ended: false };
     const run = await drive(batch, async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -111,7 +109,7 @@ async function main() {
     check("nothing is said about a step that settled", run.lines.length === 0, run.lines);
   }
 
-  // A tool of the batch declares itself sequential, so the workflow runs them one at a time.
+  // A sequential batch runs one call at a time.
   {
     const batch = { calls: [call("c1"), call("c2")], sequential: true, ended: false };
     const run = await drive(batch, async () => {
@@ -122,8 +120,7 @@ async function main() {
     check("a sequential batch still reaches the seal", run.seals.length === 1, run.seals);
   }
 
-  // One tool that ran out of retries must not take the turn with it: the seal settles it as an
-  // unknown outcome and the model gets to react.
+  // A tool out of retries is sealed as unknown so the model can react. The turn goes on.
   {
     const batch = { calls: [call("c1"), call("c2")], sequential: false, ended: false };
     const run = await drive(batch, async (input) => {
@@ -139,14 +136,13 @@ async function main() {
     check("the failure is reported where the turn is read", told, run.lines);
   }
 
-  // An interrupt is not a failed tool. Sealing would close a step the user stopped.
+  // An interrupt is not a failed tool. It ends the turn.
   {
     const run = await drive({ calls: [call("c1")], sequential: false, ended: false }, async () => {
       throw new FakeCancel("interrupted");
     });
     check("an interrupt ends the turn", run.error instanceof FakeCancel, String(run.error));
-    // Sealed on the way out, so a call that finished before the stop keeps its result. Skipping it
-    // would have the next prompt told the outcome is unknown for work that is on disk.
+    // Still sealed on the way out, so calls that finished before the stop keep their results.
     check("an interrupted step is still closed", run.seals.length === 1, run.seals);
   }
 
@@ -160,17 +156,15 @@ async function main() {
     check("an interrupt stops the rest of a sequential batch", stopped, run.dispatched);
   }
 
-  // A model call that ended the run dispatches nothing, and still seals: what answers for a
-  // failed model call (a retry, a compaction) happens there.
+  // An ended model call still seals, since retry or compaction for a failed call happens there.
   {
     const run = await drive({ calls: [], sequential: false, ended: true });
     check("an ended model call dispatches nothing", run.dispatched.length === 0, run.dispatched);
     check("an ended model call is still sealed", run.seals.length === 1, run.seals);
   }
 
-  // The retry budget rides the workflow, so what the seal reports has to reach the next step.
-  // Dropping it on the way through is silent: the field is optional to the compiler and zero
-  // reads as "no failures yet", so a failing provider is asked again on every step.
+  // `retryAttempt` must round-trip through the step. It is optional, so dropping it compiles and
+  // silently resets the retry budget every step.
   {
     const seals: SealStepInput[] = [];
     const step = makeSteppedStep({
@@ -190,7 +184,7 @@ async function main() {
     check("and what it spends comes back", result.retryAttempt === 2, result);
   }
 
-  // A call reported as unknown is one nothing ran twice, and it is said out loud.
+  // An unknown outcome is logged and still sealed.
   {
     const run = await drive({ calls: [call("c1")], sequential: false, ended: false }, async () => ({
       outcome: "unknown",
@@ -201,10 +195,8 @@ async function main() {
     check("an unknown outcome still seals", run.seals.length === 1, run.seals);
   }
 
-  // Pinning the rest of a step to the worker that made its model call, and what happens when that
-  // worker is gone. The pin is what lets a step's tools run together again while the tree travels:
-  // they write one directory instead of shipping it to each other. The fallback is what keeps a
-  // dead worker from holding the step for good.
+  // A step's tools and seal are pinned to the worker that made the model call, so they share one
+  // directory. If nobody claims the pinned work, it falls back to the shared queue.
   {
     const pinnedTools: ToolCallInput[] = [];
     const pinnedSeals: SealStepInput[] = [];
@@ -212,8 +204,7 @@ async function main() {
     const sharedSeals: SealStepInput[] = [];
     let refuse = false;
     let refused = 0;
-    // What Temporal raises when nobody took the work. Matched by shape, because that is what the
-    // workflow's own predicate matches.
+    // Shaped like Temporal's schedule-to-start timeout, which is what the workflow matches on.
     const unclaimed = () =>
       Object.assign(new Error("activity failed"), {
         name: "ActivityFailure",
@@ -270,8 +261,8 @@ async function main() {
 
     refuse = true;
     await pinnedStep([call("c")])(INPUT);
-    // Schedule-to-start is the one failure that says the activity never started, so moving the work
-    // cannot run a tool twice. One refusal, not two: the seal that follows already knows.
+    // Only schedule-to-start proves the work never started, so moving it cannot run a tool twice.
+    // After one refusal the seal skips the pinned queue.
     check(
       "and move to the shared queue when nobody takes them",
       sharedTools.length === 1 && sharedSeals.length === 1 && refused === 1,
@@ -316,7 +307,7 @@ async function main() {
             if (pinnedFails) throw failed;
             return { outcome: "settled" };
           } finally {
-            // This fake body ends here; a server timeout need not stop a real body.
+            // A real body may keep running past a server timeout. This fake one stops here.
             pinnedActive = false;
           }
         },

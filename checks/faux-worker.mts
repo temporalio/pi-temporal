@@ -1,11 +1,6 @@
-// A worker whose activities are the real ones over a real `AgentSession`, with a scripted model in
-// place of a provider. The checks that use it run it as a child process, because what they prove
-// is what happens when a process dies or stops in the middle of an activity, and only a separate
-// process can be killed or paused without taking the check with it.
-//
-// The model, the tool and the extensions all decide from the transcript and from marker files in
-// the scratch directory, never from this process's memory, so a retry on a fresh process makes the
-// same choices the first attempt did.
+// Not a check. A worker with the real activities over a real `AgentSession` and a scripted model,
+// run as a child process so checks can kill or pause it mid-activity. Every choice it makes comes
+// from the transcript and marker files, never memory, so a retry on a fresh process repeats it.
 //
 // Run as a worker: npx tsx checks/faux-worker.mts --queue=<task queue> --dir=<scratch dir>
 
@@ -25,8 +20,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { makeActivities } from "../src/activities.js";
 
-// The fork's own copies, loaded by path. The provider registry and the stream class are module
-// state, so a second copy resolved some other way would build streams the agent does not know.
+// Load the agent's own copies by path. The provider registry and stream class are module state.
 const codingAgent = new URL("../node_modules/@earendil-works/pi-coding-agent", import.meta.url);
 const forkPackages = join(realpathSync(fileURLToPath(codingAgent)), "..");
 const piAi = await import(pathToFileURL(join(forkPackages, "ai", "dist", "index.js")).href);
@@ -49,7 +43,7 @@ export const SCENARIO = {
 export const files = (dir: string) => ({
   probes: join(dir, "probe.log"),
   probesStarted: join(dir, "probe-started.log"),
-  // Present while the probe should take long enough for the check to stop the turn inside it.
+  // While present, the probe is slow enough to stop the turn inside it.
   slowProbe: join(dir, "slow-probe"),
   modelCalls: join(dir, "model.log"),
   settled: join(dir, "settle.log"),
@@ -99,8 +93,7 @@ function scriptedStream(dir: string) {
     const stream = piAi.createAssistantMessageEventStream();
     void (async () => {
       appendFileSync(files(dir).modelCalls, `${process.pid}\n`);
-      // Held long enough for the check to stop this process mid-call. The append this call ends
-      // with is the write a stopped holder must not make once it comes back.
+      // Gives the check time to SIGSTOP this process. The append after it must then be refused.
       if (
         promptOf(context.messages).includes(SCENARIO.pauseModel) &&
         firstTime(files(dir).modelPausePoint)
@@ -147,8 +140,7 @@ const branchMessages = (ctx: { sessionManager: { getBranch(): unknown[] } }) =>
       return [];
     });
 
-// What the checks watch for. Each boundary leaves a marker entry in the session file, so a
-// boundary that ran twice shows up as two.
+// Each boundary leaves a marker entry in the session file, so one that ran twice shows as two.
 function scenarioExtension(dir: string) {
   return (pi: {
     on(event: string, handler: (event: unknown, ctx: never) => unknown): void;
@@ -182,8 +174,7 @@ function scenarioExtension(dir: string) {
       }
       appendFileSync(files(dir).settled, `${process.pid} ${activity}\n`);
       const seen = branchMessages(ctx as never);
-      // After the tool results and the turn_end entries are written, before the activity returns:
-      // the check kills this process here, and the retry has to converge on one of each.
+      // Entries are written but the activity has not returned. The check kills this process here.
       if (promptOf(seen).includes(SCENARIO.killSeal) && firstTime(files(dir).sealKillPoint)) {
         await new Promise(() => {});
       }
@@ -197,8 +188,7 @@ export function fauxOpenSession(dir: string, projectDir: string) {
   return async (sessionFile: string, guard?: () => void): Promise<AgentSession> => {
     mkdirSync(dirname(sessionFile), { recursive: true });
     const sessionManager = SessionManager.open(sessionFile);
-    // Observed rather than replaced: a refusal is what the fence check is about, so it is written
-    // down before it is thrown.
+    // Wrap the guard to log each refusal for `fence-check.mts`, then rethrow.
     sessionManager.setWriteGuard(
       guard &&
         (() => {

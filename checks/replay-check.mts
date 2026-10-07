@@ -1,17 +1,9 @@
-// Whether a session that is already running can be served by a worker carrying this code.
+// Checks that this workflow code replays both its own history and the kept ones in `histories/`.
+// Each kept history predates a rule that changed which activities a step schedules, so it only
+// replays if that rule sits behind `patched()`. To record another, revert the rule and run this
+// with `REPLAY_HISTORY` pointing at the file to keep.
 //
-// The migration policy decides which activities a step schedules after a pinned dispatch fails, so
-// it decides the command sequence a workflow already wrote down. A history recorded before that
-// rule existed holds a shared dispatch where this code seals, and replaying it is a nondeterminism
-// error unless the rule is behind a patch. It is: the workflow asks `patched()`, which answers
-// false for exactly those runs, so they keep the behaviour they recorded.
-//
-// Both directions are checked here, because a patch that is never exercised is a patch nobody
-// knows is wired up: a history this code writes, and the kept ones under `histories/`, each
-// recorded by running this file against the code that predates a rule. Record another by reverting
-// that rule and pointing `REPLAY_HISTORY` at a file to keep.
-//
-// Needs a Temporal server; no model key. Usage: npx tsx checks/replay-check.mts
+// Needs a Temporal server, no model key. Usage: npx tsx checks/replay-check.mts
 
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
@@ -101,9 +93,7 @@ async function main() {
     const settled = handle.result().catch(() => undefined);
     await Promise.race([settled, new Promise((r) => setTimeout(r, 30_000))]);
 
-    // Exported through the CLI, which writes the proto3 JSON the replayer reads back. Encoding a
-    // fetched history by hand loses the timestamp form and the replayer then rejects the file for
-    // a reason that has nothing to do with the workflow.
+    // Export through the CLI. Hand-encoding a fetched history breaks timestamps for the replayer.
     const shown = await run(
       "temporal",
       // prettier-ignore
@@ -117,13 +107,11 @@ async function main() {
       "a step with a failed pinned dispatch produced a history",
       (history.events?.length ?? 0) > 0,
     );
-    // Under this code the work does not move, so nothing scheduled a shared tool call.
     check("this code refused to migrate the started failure", sharedTools === 0, {
       sharedTools,
       pinnedAttempts,
     });
 
-    // The same code replaying its own history is the case that must always work.
     let ownReplay: unknown;
     await Worker.runReplayHistory(
       { workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)) },
@@ -137,10 +125,7 @@ async function main() {
       String(ownReplay),
     );
 
-    // And the ones from before each rule. Recorded by running this file against the code that
-    // predates it and keeping the export; without its patch, each is where the nondeterminism
-    // appeared. A rule that changes which activities a step schedules needs one of these, and a
-    // patch nothing replays through is a patch nobody knows is wired up.
+    // Each kept history fails replay with nondeterminism if its rule's patch is removed.
     const kept = (name: string) => fileURLToPath(new URL(`./histories/${name}`, import.meta.url));
     for (const older of [
       { path: process.env.OLD_POLICY_HISTORY ?? kept("before-the-migration-rule.json"),

@@ -1,9 +1,8 @@
-// Checks the executor's shape against a real Temporal server, with the activities stubbed: one
-// unit of work per step, the loop stops when a step reports done, and an interrupt ends the turn
-// without ending the session. Runs the same three checks in both modes, so the split is held to
-// the whole-step mode's behaviour rather than to its own.
+// Checks the workflow step loop against a live server with stubbed activities. Asserts one step
+// at a time until done, and that an interrupt ends the turn but not the session. Runs the same
+// checks in whole-step and stepped mode.
 //
-// Needs a Temporal server; no model key. Usage: tsx checks/step-loop-check.mts
+// Needs a Temporal server, no model key. Usage: tsx checks/step-loop-check.mts
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -43,12 +42,8 @@ async function waitFor(what: string, ok: () => boolean, ms = 20_000) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-/**
- * Stubs for one mode. Both count the steps a prompt was driven through, so the same checks read
- * the same thing whether a step was one activity or three.
- */
+/** Stubs for one mode. Both record the step numbers each prompt was driven through. */
 function stubs(stepped: boolean) {
-  // What the stub saw, per prompt: the step number the workflow asked for, in order.
   const seen = new Map<string, number[]>();
   const stepsFor = (promptId: string) => seen.get(promptId) ?? [];
   const note = (input: RunStepInput) => {
@@ -70,8 +65,7 @@ function stubs(stepped: boolean) {
     },
   };
 
-  // The stepped mode counts at the model call, so a step is still one count. The tool call is
-  // where a hanging turn hangs, which is what the interrupt has to reach.
+  // Stepped mode counts at the model call and hangs in the tool call.
   const split = {
     async runModelCall(input: RunStepInput): Promise<ModelCallResult> {
       note(input);
@@ -82,7 +76,7 @@ function stubs(stepped: boolean) {
       };
     },
     async runToolCall(input: ToolCallInput): Promise<ToolCallResult> {
-      // The prompt's text does not reach a tool call, so which sessions hang is decided outside.
+      // The prompt text does not reach a tool call, so hanging is keyed by session.
       if (hangingCalls.has(input.sessionId)) await sleep(60_000);
       return { outcome: "settled" };
     },

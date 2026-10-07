@@ -1,14 +1,7 @@
-// A client for a session nobody is sitting in front of. `/background` inside pi already sends a
-// task to a worker, but the commands to reach one live inside a pi session, so a task could only be
-// started, watched and stopped from the terminal that happened to start it.
-//
-// These talk to Temporal and to the session file, never to a pi process, because there is nothing
-// to talk to: a worker-owned session has no server and no port. The workflow holds the control
-// state (what is queued, which step a turn is on) and the session file holds the conversation, so
-// following one is a query plus a tail. Both are reachable from any machine that can reach the
-// cluster and the session directory, which is what makes the session outlive its client.
-//
-// Usage: tsx src/cli.ts <command> ...; run it with no command for the list.
+// The `pi-temporal` CLI: start, watch, stop and schedule worker-owned sessions from any machine.
+// It talks only to Temporal and the session file, never to a pi process. The workflow holds the
+// control state and the file holds the conversation, so following a session is a query plus a tail.
+// Usage: tsx src/cli.ts <command> ... (no command prints the list).
 
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
@@ -34,24 +27,18 @@ import { textOf } from "./messages.js";
 const POLL_MS = 1_000;
 
 const say = (line: string) => process.stderr.write(line + "\n");
-// Anything a script is meant to read. Kept off stderr so `$(pi-temporal start ...)` is an id and
-// not an id plus whatever else was worth printing to a person.
+// Machine-readable output goes to stdout, so `$(pi-temporal start ...)` captures only the id.
 const emit = (line: string) => process.stdout.write(line + "\n");
 
 import { resolve } from "node:path";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// A session with no live workflow is idle, not an error: the supervisor retires after its idle
-// timeout, and a session that finished an hour ago is the normal case for `watch` and `running`.
-//
-// A query is answered by a worker, so an open session whose workers are all down does not answer at
-// all. Left unbounded that turns one dead worker into a listing that hangs, so give up and say so.
+// Queries are answered by workers, so a session whose workers are all down never answers. Bound it.
 const QUERY_MS = 3_000;
 
-// Three answers, not two. "Gone" means the session is over; "unreachable" means nobody could
-// answer, which is what a worker restart looks like from here. A follower that treats the second
-// as the first stops in the middle of a handover and reports the turn as finished.
+// "Unreachable" is what a worker restart looks like. Treating it as "gone" would end a follower
+// mid-handover and report the turn as finished.
 type Reached = { kind: "state"; state: TurnState } | { kind: "gone" } | { kind: "unreachable" };
 
 async function turnStateOf(
@@ -59,35 +46,27 @@ async function turnStateOf(
   sessionId: string,
 ): Promise<Reached> {
   try {
-    // The SDK's own deadline, not a race against a timer. Racing leaves the call retrying in the
-    // background after we stopped waiting for it, and closing the connection under one of those
-    // throws from a grpc timer, where no caller can catch it.
+    // Use the SDK deadline, not a timer race. A raced call keeps retrying, and closing the
+    // connection under it throws from a grpc timer that no caller can catch.
     const state = await client.withDeadline(Date.now() + QUERY_MS, () =>
       client.workflow.getHandle(workflowId(sessionId)).query<TurnState, []>("turnState"),
     );
     return { kind: "state", state };
   } catch (err) {
-    // The query was refused because the run is closed, which includes a run the server terminated
-    // for outgrowing its history. That is a finished session, not an unreachable one.
+    // Rejected because the run is closed (including terminated). The session is finished.
     if (err instanceof QueryRejectedError) return { kind: "gone" };
-    // No workflow under this id: a session that retired, or was never started. Decided by the
-    // error's type rather than its text, because any error whose message happens to say "not
-    // found" about something else would otherwise end a follower mid-turn.
+    // Retired or never started. Match on the error type, not its message text.
     if (err instanceof WorkflowNotFoundError) return { kind: "gone" };
     // Anything else (a deadline, a worker that cannot answer) must not read as "finished".
     return { kind: "unreachable" };
   }
 }
 
-// Hand the project over with the task. A no-op unless the tree travels, because with the tree off
-// every worker runs in the directory it was pointed at and there is nothing to send.
+// Send the project with the task. A no-op unless the tree ships.
 async function seedProject(sessionId: string, projectFlag: string | undefined) {
   const cfg = fromEnv();
   if (!cfg.shipTree) return;
-  // Named, never guessed. Falling back to the working directory means `pi-temporal start` from a
-  // home directory ships every dotfile in it, `~/.ssh` and `~/.aws` included, because nothing there
-  // is covered by a `.gitignore`. It also means a thin client with no project sends an empty tree
-  // and every worker that does have the files is then refused.
+  // Never fall back to cwd. From a home directory that would ship `~/.ssh` and `~/.aws`.
   const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR;
   if (!projectDir) {
     throw new Error(
@@ -95,8 +74,7 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
     );
   }
   const file = sessionFileFor(cfg.sessionDir, sessionId);
-  // Only the first prompt of a session sends it. A later `start --session=<id>` is a continuation,
-  // and by then the workers have moved the tip past whatever this client holds.
+  // Only the first prompt sends it. Later, the workers' tip is ahead of this client's copy.
   if (await worktree.established(file)) {
     say("  the session already has its project");
     return;
@@ -120,19 +98,15 @@ async function start(args: string[]) {
   const text = args.find((a) => !a.startsWith("--"));
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
   const sessionId = flagOf(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
-  // Before the prompt, so the project is established from the directory the person running this
-  // meant. Left to the workers it is established by whichever one draws the first activity, and
-  // that is right only when that worker happens to be the one holding the files.
+  // Seed before the prompt, or the first worker to run an activity would supply the project.
   await seedProject(sessionId, flagOf(args, "project"));
-  // signal-with-start, so this both creates the session and hands it the prompt. Nothing waits for
-  // the turn: whichever worker is polling the queue runs it.
+  // Creates the session and delivers the prompt. Doesn't wait for the turn.
   await submitPrompt(sessionId, text);
   emit(sessionId);
   say(`  follow it with: pi-temporal watch ${sessionId}`);
 }
 
-// A task with no client at all. `start` still needs something to run it; a schedule does not, and
-// the session is created by the workflow rather than by whoever asked for it.
+// A recurring task with no client. Each firing creates its own session.
 async function schedule(args: string[]) {
   refuseConflicts();
   const text = args.find((a) => !a.startsWith("--"));
@@ -141,10 +115,8 @@ async function schedule(args: string[]) {
   const id = flagOf(args, "id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
-  // Every firing is its own session and nothing is running at firing time to send it a project, so
-  // the project is sent once, here, and each firing takes a copy of it. A worker may not establish
-  // a project from its own directory; copying a store a client wrote is a different thing, and it
-  // is the one that lets a schedule and the travelling tree compose.
+  // No client runs at firing time, so capture the project once as a template and each firing
+  // copies it. Workers never seed a project from their own directory.
   const scheduled = fromEnv();
   let template: string | undefined;
   if (scheduled.shipTree) {
@@ -157,8 +129,7 @@ async function schedule(args: string[]) {
     }
     template = sessionFileFor(scheduled.sessionDir, `schedule-${id}`);
     await worktree.capture(projectDir, template, { seed: true });
-    // A template is not a session anything runs, so nothing ever retires it. Leaving this host's
-    // claim on the directory it came from would refuse every later session started there.
+    // Nothing retires a template. Drop its claim, or later sessions in this directory are refused.
     await worktree.unclaim(projectDir, template);
     say(`  sent the project from ${projectDir}`);
   }
@@ -168,20 +139,15 @@ async function schedule(args: string[]) {
     await client.schedule.create({
       scheduleId: id,
       spec: cron ? { cronExpressions: [cron] } : { intervals: [{ every: every! }] },
-      // A run that is still going when the next one is due keeps going, and the next one is
-      // skipped. An agent task is not a metrics scrape: two of them on one repo is a bad day.
+      // Skip a firing while the last run is still going. Two agents on one repo collide.
       policies: { overlap: ScheduleOverlapPolicy.SKIP },
       action: {
         type: "startWorkflow",
         workflowType: WORKFLOW_TYPE,
         taskQueue: cfg.taskQueue,
-        // Named the way a session's workflow is always named, because Temporal appends the firing
-        // time to it. Without this a scheduled run lands on an id that `running` and `watch` do
-        // not recognise as a session, and the only sessions you could see would be the ones a
-        // client started.
+        // Session-style id (Temporal appends the firing time), so `running` and `watch` see it.
         workflowId: workflowId(id),
-        // No session id and no file: each firing derives its own from the workflow id it is given,
-        // so two runs of the same schedule are two sessions rather than one confused one.
+        // Empty session id and file. Each firing derives its own from its workflow id.
         args: [
           "",
           "",
@@ -219,8 +185,7 @@ async function running() {
       say("nothing running");
       return;
     }
-    // Concurrently, because the slow case is a session whose workers are gone and the cost of
-    // those is otherwise paid one after another by whoever asked what is running.
+    // Concurrent, so sessions with dead workers time out together, not one after another.
     const rows = await Promise.all(
       ids.map(async (id) => {
         const reached = await turnStateOf(client, id);
@@ -237,8 +202,7 @@ async function running() {
   }
 }
 
-// One line per thing that happened, read off the session's own log. A tail rather than a stream
-// because a worker-owned session publishes nothing: the file is where the turn is written down.
+// One line per log entry. A worker-owned session publishes nothing, so `watch` tails the file.
 function render(entry: { message?: { role?: string; content?: unknown } }): string | undefined {
   const message = entry.message;
   if (!message?.role) return undefined;
@@ -275,15 +239,13 @@ async function watch(args: string[]) {
       return; // the first step has not written the file yet
     }
     const size = info.size;
-    // Recorded after the handle is open, not here: a file replaced between the two would be read
-    // at the old offset while the new inode is already noted, and the next tick sees no change.
-    // A compaction rewrites the whole file, and the rewrite can be the same size or bigger, so
-    // watching the length alone misses it. A new inode is the part that always changes.
+    // Compaction rewrites the file, maybe at the same size or bigger, so track the inode too.
+    // `inode` is recorded from the open handle, so a swap between `stat` and `open` isn't missed.
     if (inode !== undefined && info.ino !== inode) {
       offset = 0;
       carry = "";
     } else if (size < offset) {
-      // Shorter than what we read means it is not the file we were reading either way.
+      // Shorter than what we read, so it's a different file.
       offset = 0;
       carry = "";
     }
@@ -303,7 +265,7 @@ async function watch(args: string[]) {
       offset = opened.size;
       carry += buffer.toString("utf8");
       const lines = carry.split("\n");
-      // A tail can land mid-line, and half a JSON document is not a parse error worth reporting.
+      // A read can end mid-line. Keep the partial line for the next tick.
       carry = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.trim()) continue;
@@ -311,7 +273,7 @@ async function watch(args: string[]) {
           const shown = render(JSON.parse(line));
           if (shown) emit(shown);
         } catch {
-          // not an entry we can read; the log is pi's, not ours to police
+          // Not an entry we can render. The log format is pi's.
         }
       }
     } finally {
@@ -323,14 +285,12 @@ async function watch(args: string[]) {
     for (;;) {
       await drain();
       const reached = await turnStateOf(client, sessionId);
-      // Nobody could answer, so keep following. This is what the window between one worker dying
-      // and the next one picking the turn up looks like, and the turn is still going.
+      // Likely a worker handover. The turn is still going, so keep following.
       if (reached.kind === "unreachable") {
         await sleep(POLL_MS);
         continue;
       }
-      // Idle is the exit: nothing running and nothing waiting. Turn-level, so unlike a workflow
-      // still being open it does not sit through the supervisor's idle timeout.
+      // Exit when nothing is running or queued, without waiting out the workflow's idle timeout.
       const state = reached.kind === "state" ? reached.state : undefined;
       if (!state || (!state.running && state.queued === 0)) {
         await drain();
@@ -379,9 +339,7 @@ async function main() {
       say(`interrupted ${sessionId}`);
       return;
     }
-    // What this process resolved, and what is wrong with it. Deploying used to mean setting a
-    // handful of variables that have to agree, with no way to ask whether they did until a session
-    // answered with the wrong files hours later.
+    // Print the resolved configuration and any problems with it.
     case "doctor": {
       const cfg = fromEnv();
       say("pi-temporal");
@@ -408,16 +366,13 @@ async function main() {
       else if (reach.startsWith("reached")) say("this deployment looks consistent");
       return;
     }
-    // Reclaiming the disk a finished session's files cost. Nothing does this on its own: a session
-    // that went idle can be prompted again, and the bundles are what its next turn restores from,
-    // so only somebody who knows the session is done can say so. The transcript is left alone.
+    // Drop a finished session's project bundles. Manual, since an idle session can be prompted
+    // again and would restore from them. The transcript is kept.
     case "forget": {
       const sessionId = rest.find((a) => !a.startsWith("--"));
       if (!sessionId) throw new Error("forget wants a session id");
       const { client, connection } = await connect();
-      // Only a session nothing is driving, and only when that is known rather than assumed: a
-      // worker that cannot be reached is not a finished session, and dropping the bundles of a
-      // running one takes the project out from under its next step.
+      // Only when the session is known to be gone. Unreachable is not finished.
       const reached = await turnStateOf(client, sessionId).finally(() => connection.close());
       if (reached.kind !== "gone") {
         throw new Error(
@@ -432,9 +387,8 @@ async function main() {
       return;
     }
     case "release-tree": {
-      // The directory a stranded tool left refused. Nothing here can tell whether that tool is
-      // still running, which is the whole reason the refusal is persistent, so this says what it
-      // is forgetting and leaves the judgement with whoever ran it.
+      // Clear the refusal a stranded tool left. We can't tell if that tool still runs, so the
+      // operator decides.
       const dir = rest.find((a) => !a.startsWith("--"));
       if (!dir) throw new Error("release-tree wants a project directory");
       const forgotten = await worktree.clearWriters(resolve(dir));
