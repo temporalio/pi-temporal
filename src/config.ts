@@ -5,7 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { TurnBudget } from "./protocol.js";
+import { sessionIdProblem, type TurnBudget } from "./protocol.js";
 
 export type Profile = "local" | "fleet";
 
@@ -222,5 +222,8 @@ function budgetFromEnv(): TurnBudget | undefined {
   return set.length > 0 ? (Object.fromEntries(set) as TurnBudget) : undefined;
 }
 
-export const sessionFileFor = (sessionDir: string, sessionId: string) =>
-  `${sessionDir}/${sessionId}.jsonl`;
+export const sessionFileFor = (sessionDir: string, sessionId: string) => {
+  const problem = sessionIdProblem(sessionId);
+  if (problem) throw new Error(`session id ${JSON.stringify(sessionId)} can't be used: ${problem}`);
+  return `${sessionDir}/${sessionId}.jsonl`;
+};

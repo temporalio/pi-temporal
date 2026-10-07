@@ -27,6 +27,7 @@ import {
   MAX_STEPS_PER_TURN,
   QUERIES,
   SIGNALS,
+  sessionIdProblem,
   WORKFLOW_ID_PREFIX,
 } from "./protocol.js";
 import type {
@@ -149,6 +150,14 @@ export async function piSession(
   if (!sessionFile && !options?.sessionDir && patched("a-session-log-needs-a-named-home")) {
     throw ApplicationFailure.nonRetryable(
       `session ${id} was started with no session file and no sessionDir`,
+    );
+  }
+  // A schedule id is the user's and becomes the file name here. Only an unsafe one reaches the
+  // patch, so runs with safe ids record nothing new.
+  const problem = sessionFile ? undefined : sessionIdProblem(id);
+  if (problem && patched("a-session-id-names-one-file")) {
+    throw ApplicationFailure.nonRetryable(
+      `session id ${JSON.stringify(id)} can't be used: ${problem}`,
     );
   }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;

@@ -11,6 +11,16 @@ export const TURN_STOPPED = "TurnStopped";
 
 export const workflowId = (sessionId: string) => `${WORKFLOW_ID_PREFIX}${sessionId}`;
 
+/**
+ * Why a session id can't name its log file, or undefined. The id becomes a file name in the
+ * session directory, so it must stay one name there. Plain code, since the Workflow calls it too.
+ */
+export const sessionIdProblem = (sessionId: string): string | undefined => {
+  if (!sessionId || sessionId === "." || sessionId === "..") return "it is empty or a dot name";
+  if (/[/\\\0]/.test(sessionId)) return "it holds a path separator or NUL";
+  return undefined;
+};
+
 export const SIGNALS = {
   submitPrompt: "submitPrompt",
   interrupt: "interrupt",

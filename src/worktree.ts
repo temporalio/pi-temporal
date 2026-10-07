@@ -511,6 +511,9 @@ async function writersHere(projectDir: string): Promise<(WriterNote & { because:
 /** Thrown when a directory is refused because a writer from an earlier step never came back. */
 export class Quarantined extends Error {}
 
+/** A refusal by design, as opposed to a failure that a retry can fix. */
+export const isRefusal = (err: unknown) => err instanceof WrongTree || err instanceof Quarantined;
+
 /**
  * Refuse a directory a writer from another step may still be inside. The current step's own
  * markers don't count, since its calls run in parallel by design.
@@ -1000,9 +1003,8 @@ export async function adopt(template: string, sessionFile: string): Promise<bool
     const from = shareDir(template);
     const to = shareDir(sessionFile);
     await mkdir(to, { recursive: true });
-    for (const name of (await readdir(from).catch(() => [] as string[])).filter((n) =>
-      n.endsWith(".bundle"),
-    )) {
+    // Strict, so a template that can't be read isn't copied as one with no bundles.
+    for (const name of (await listDir(from)).filter((n) => n.endsWith(".bundle"))) {
       // Scratch name, so no host unbundles a half-copied file.
       const scratch = join(to, `${name}.${scratchToken()}.writing`);
       await writeFile(scratch, await readFile(join(from, name)));

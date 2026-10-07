@@ -109,12 +109,12 @@ type Block = { type?: string; id?: string };
 
 const blocksOf = (content: unknown) => (Array.isArray(content) ? (content as Block[]) : []);
 
-const recordedInTranscript = (messages: Msg[], callId: string) =>
-  messages.some(
-    (m) =>
-      m.role === "assistant" &&
-      blocksOf(m.content).some((b) => b.type === "toolCall" && b.id === callId),
-  );
+// Only the latest response. A provider can reuse a call id, and an older call with the same id is
+// not this step's call.
+const recordedInTranscript = (messages: Msg[], callId: string) => {
+  const latest = [...messages].reverse().find((m) => m.role === "assistant");
+  return blocksOf(latest?.content).some((b) => b.type === "toolCall" && b.id === callId);
+};
 
 /** The calls nothing answered yet, which is what prepareStep would settle. */
 const danglingCallIds = (messages: Msg[]) =>
@@ -188,18 +188,22 @@ export function makeActivities(
     }
   };
 
+  // The files are set aside either way, since they're the only record of what the tool did. A
+  // refusal by design (behind the tip, step closed) doesn't fail the activity. Anything else does
+  // when `retryable`, because the seal is the last capture before another worker reads the tip.
+  // A tool call's capture never fails the call: its result is kept, and the seal ships again.
   const shipTree = async (
     sessionFile: string,
     of: { readonly current?: worktree.Writer; readonly fence?: worktree.Fence } = {},
+    retryable = false,
   ) => {
     if (!opts.shipTree) return;
-    // Don't fail the step. The result is recorded and a retry would not re-run the tool. Set the
-    // files aside instead, since they are the only record of what the tool did.
     await worktree.capture(opts.projectDir, sessionFile, of).catch(async (err) => {
       console.error(`could not ship the project tree: ${String(err)}`);
       await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
         console.error(`and could not set it aside either: ${String(keepErr)}`);
       });
+      if (retryable && !worktree.isRefusal(err)) throw err;
     });
   };
 
@@ -585,7 +589,11 @@ export function makeActivities(
           const answer = lastAssistantText(session.state.messages as Msg[]);
           // Ship after the seal, so the tree matches the transcript.
           if (!input.interrupted) {
-            await shipTree(input.sessionFile, { fence: { turn: input.turn, step: input.step } });
+            await shipTree(
+              input.sessionFile,
+              { fence: { turn: input.turn, step: input.step } },
+              true,
+            );
           }
           const spent = spentSince(before, session);
           const total = billed(session);
@@ -610,10 +618,8 @@ export function makeActivities(
    * session. Also records the session as over, so other hosts can release theirs. */
   async function retireSession(input: { readonly sessionFile: string }): Promise<void> {
     if (!opts.shipTree) return;
-    const freed = await worktree.retire(opts.projectDir, input.sessionFile).catch((err) => {
-      console.warn(`could not hand back ${opts.projectDir}: ${String(err)}`);
-      return false;
-    });
+    // Thrown, so Temporal retries. The Workflow gives up quietly once retries run out.
+    const freed = await worktree.retire(opts.projectDir, input.sessionFile);
     if (freed) console.log(`handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
   }
 

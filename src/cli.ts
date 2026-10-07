@@ -68,7 +68,9 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
   const cfg = fromEnv();
   if (!cfg.shipTree) return;
   // Never fall back to cwd. From a home directory that would ship `~/.ssh` and `~/.aws`.
-  const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR;
+  const given = projectFlag ?? process.env.PI_PROJECT_DIR;
+  // Absolute, since git runs in the directory and also names it as the work tree.
+  const projectDir = given === undefined ? undefined : resolve(given);
   if (!projectDir) {
     throw new Error(
       'the tree is on, so this needs the project: pi-temporal start "..." --project=/path/to/repo',
@@ -149,7 +151,8 @@ async function schedule(args: string[]) {
   let projectDir: string | undefined;
   let template: string | undefined;
   if (scheduled.shipTree) {
-    projectDir = flag("project") ?? process.env.PI_PROJECT_DIR;
+    const given = flag("project") ?? process.env.PI_PROJECT_DIR;
+    projectDir = given === undefined ? undefined : resolve(given);
     if (!projectDir) {
       throw new Error(
         "the tree is on, so a schedule needs the project: " +

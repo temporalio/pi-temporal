@@ -1,13 +1,15 @@
 // The standalone worker process. Run one or many on the same task queue, and any of them can drive
 // any session from the shared session directory. The pi extension runs the same worker in-process.
 
+import { resolve } from "node:path";
 import { connectionOptions, describe, fromEnv, modelApiKey, notes, preflight } from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
 import * as worktree from "./worktree.js";
 
 async function main() {
   const cfg = fromEnv();
-  const projectDir = process.env.PI_PROJECT_DIR ?? process.cwd();
+  // Absolute, since git runs in the directory and also names it as the work tree.
+  const projectDir = resolve(process.env.PI_PROJECT_DIR ?? process.cwd());
 
   for (const note of notes(cfg)) console.log(`  note: ${note}`);
   // A project directory that can't be moved aside stays blocked after a lost tool call until it's
