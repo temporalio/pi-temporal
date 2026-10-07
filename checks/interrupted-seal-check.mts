@@ -113,7 +113,8 @@ for (const { failure, atSeal } of [
     assert.equal(await readFile(join(project, "local.txt"), "utf8"), "local work\n");
     // Nothing was restored or captured: no bundle, no tip, and no host directory at all.
     assert.deepEqual(
-      (await readdir(`${file}.tree`).catch(() => [])).filter((name) => name !== "closed.json"),
+      (await readdir(`${file}.tree`).catch(() => []))
+        .filter((name) => name !== "closed.json" && name !== "writers.lock"),
       [],
     );
     await assert.rejects(stat(join(root, "host")), { code: "ENOENT" });

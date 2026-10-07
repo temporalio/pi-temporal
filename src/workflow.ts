@@ -80,9 +80,11 @@ const PINNED_SCHEDULE_TO_START = "30 seconds";
 
 /** The same activities on one worker's own queue. The queue comes from the model call's result in
  * history, so building this per queue is deterministic on replay. */
-const pinnedTo = (taskQueue: string) => ({
+const pinnedTo = (taskQueue: string, timeoutMinutes: number) => ({
   runToolCall: proxyActivities<SteppedActivities>({
     ...cappedOptions,
+    startToCloseTimeout: `${timeoutMinutes} minutes`,
+    scheduleToCloseTimeout: `${Math.max(CAP_MINUTES, timeoutMinutes)} minutes`,
     // A retry's queue timeout cannot rule out an earlier attempt still running.
     retry: { maximumAttempts: 1 },
     taskQueue,
@@ -155,7 +157,12 @@ export async function piSession(
         },
         isCancellation,
         outOfBudget: () => outOfBudget(),
-        pinnedTo,
+        pinnedTo: (queue) => pinnedTo(
+          queue,
+          patched("pinned-tools-use-the-configured-timeout")
+            ? options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES
+            : DEFAULT_TOOL_TIMEOUT_MINUTES,
+        ),
         isUnclaimed,
         // False only when replaying older histories. See the dep.
         refusesStartedFailures: () => patched("pinned-started-failure-does-not-migrate"),

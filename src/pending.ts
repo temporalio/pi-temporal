@@ -25,10 +25,17 @@ const keyFor = (turn: string) =>
 const turnDir = (sessionFile: string, turn: string) => join(rootFor(sessionFile), keyFor(turn));
 const dirFor = (sessionFile: string, turn: string, step: number) =>
   join(turnDir(sessionFile, turn), String(step));
+const callKey = (callId: string) => {
+  // Provider IDs must stay within one file, so a claim can't overwrite another call's state.
+  if (!callId || /[/\\\0]/.test(callId) || Buffer.byteLength(callId) > 200) {
+    throw new Error("the tool call ID cannot be used as a file name");
+  }
+  return callId;
+};
 const resultPath = (sessionFile: string, turn: string, step: number, callId: string) =>
-  join(dirFor(sessionFile, turn, step), `${callId}${RESULT}`);
+  join(dirFor(sessionFile, turn, step), `${callKey(callId)}${RESULT}`);
 const dispatchPath = (sessionFile: string, turn: string, step: number, callId: string) =>
-  join(dirFor(sessionFile, turn, step), `${callId}${STARTED}`);
+  join(dirFor(sessionFile, turn, step), `${callKey(callId)}${STARTED}`);
 
 /** Exported for the checks, so they use the real layout instead of restating it. */
 export const stepDirFor = dirFor;

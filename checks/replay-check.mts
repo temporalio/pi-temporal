@@ -86,6 +86,7 @@ async function main() {
       taskQueue: queue,
       args: ["replay", "/unused/replay.jsonl", {
         stepped: true,
+        toolTimeoutMinutes: 1,
         idleTimeout: "100 milliseconds",
         initialPrompt: { promptId: "replay", text: "run" },
       } as Partial<RunStepInput> as never],
@@ -103,6 +104,13 @@ async function main() {
     );
     await writeFile(path, shown.stdout);
     const history = historyFromJSON(JSON.parse(shown.stdout));
+    const tool = history.events?.find(
+      (event) => event.activityTaskScheduledEventAttributes?.activityType?.name === "runToolCall",
+    )?.activityTaskScheduledEventAttributes;
+    assert.equal(Number(tool?.startToCloseTimeout?.seconds), 60);
+    assert.equal(Number(tool?.scheduleToCloseTimeout?.seconds), 7200);
+    assert.equal(tool?.taskQueue?.name, pinnedQueue);
+    console.log("PASS the pinned tool uses its configured timeout");
     check(
       "a step with a failed pinned dispatch produced a history",
       (history.events?.length ?? 0) > 0,

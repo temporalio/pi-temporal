@@ -5,7 +5,7 @@
 // directory of claims named by epoch. Taking over is an exclusive create of epoch N+1, so it is a
 // compare-and-set on the state the contender read.
 
-import { mkdir, readdir, readFile, rm, rmdir, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,7 +39,10 @@ async function claims(dir: string): Promise<Claim[]> {
   for (const name of names) {
     const epoch = Number.parseInt(name, 10);
     if (!Number.isFinite(epoch)) continue;
-    const info = await stat(join(dir, name)).catch(() => undefined);
+    const info = await stat(join(dir, name)).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return undefined;
+      throw err;
+    });
     if (info) found.push({ epoch, name, mtimeMs: info.mtimeMs });
   }
   return found.sort((a, b) => a.epoch - b.epoch);
@@ -60,7 +63,7 @@ export async function withSessionLock<T>(
   const dir = lockDir(sessionFile);
   const token = randomUUID();
   const deadline = Date.now() + waitMs;
-  let mine!: { readonly epoch: number; readonly name: string };
+  let mine!: { readonly epoch: number; readonly name: string; readonly confirmedAt: number };
 
   // The first activity of a session creates its directory, inside the lock.
   await mkdir(dirname(dir), { recursive: true });
@@ -75,11 +78,21 @@ export async function withSessionLock<T>(
       const name = claimName(epoch);
       if (claimPauseMs > 0) await new Promise((resolve) => setTimeout(resolve, claimPauseMs));
       try {
+        const confirmedAt = Date.now();
         await writeFile(join(dir, name), held(token), { encoding: "utf8", flag: "wx" });
-        mine = { epoch, name };
+        const latest = (await claims(dir)).at(-1);
+        if (latest?.epoch !== epoch) {
+          await rm(join(dir, name), { force: true });
+          continue;
+        }
+        mine = { epoch, name, confirmedAt };
         // Lower epochs are superseded. Their holders notice because something newer exists.
         for (const stale of existing) {
           if (stale.epoch < epoch) await rm(join(dir, stale.name), { force: true });
+        }
+        if ((await claims(dir)).at(-1)?.epoch !== epoch) {
+          await rm(join(dir, name), { force: true });
+          continue;
         }
         break;
       } catch (err) {
@@ -97,7 +110,7 @@ export async function withSessionLock<T>(
   // Never unset. A lock taken away does not come back.
   let lost = false;
   // A paused event loop runs no timers, so the guard must also expire by elapsed time.
-  let lastConfirmed = Date.now();
+  let lastConfirmed = mine.confirmedAt;
 
   const holderOf = async (name: string) => {
     const text = await readFile(join(dir, name), "utf8").catch(() => undefined);
@@ -116,37 +129,46 @@ export async function withSessionLock<T>(
     return (await holderOf(owner.name)) === token;
   };
 
+  let refreshing: Promise<void> | undefined;
   const refresh = setInterval(() => {
-    void (async () => {
-      // A failed read on shared storage is not a lost lock. Keep refreshing.
+    if (lost || refreshing) return;
+    refreshing = (async () => {
+      const confirmedAt = Date.now();
       const list = await claims(dir).catch(() => undefined);
-      if (!list) return;
+      if (!list || lost) return;
       const owner = list[list.length - 1];
-      // Removed or superseded.
-      if (!owner || owner.epoch > mine.epoch) {
+      if (!owner || owner.epoch !== mine.epoch) {
         lost = true;
         clearInterval(refresh);
         return;
       }
       const holder = await holderOf(owner.name);
-      // Unreadable is not a loss, but not a confirmation either, so `ownedNow` decays.
-      if (holder === undefined) return;
+      if (holder === undefined || lost) return;
       if (holder !== token) {
         lost = true;
         clearInterval(refresh);
         return;
       }
-      lastConfirmed = Date.now();
-      const now = new Date();
-      await utimes(join(dir, mine.name), now, now).catch(() => {});
-    })();
+      const now = new Date(confirmedAt);
+      const renewed = await utimes(join(dir, mine.name), now, now).then(
+        () => true,
+        () => false,
+      );
+      // Readers can still see our token when storage refuses renewal. That isn't a new lease.
+      if (renewed && !lost) lastConfirmed = confirmedAt;
+    })().finally(() => {
+      refreshing = undefined;
+    });
   }, REFRESH_MS);
   refresh.unref?.();
 
   // Reads storage instead of trusting the refresher, which can be up to `REFRESH_MS` stale.
   const owned = async () => {
     const list = await claims(dir).catch(() => undefined);
-    return list !== undefined && (await stillOurs(list));
+    if (lost || list === undefined) return false;
+    const ours = await stillOurs(list);
+    if (!ours) lost = true;
+    return ours;
   };
 
   // For synchronous appends that cannot await shared storage.
@@ -158,9 +180,14 @@ export async function withSessionLock<T>(
     clearInterval(refresh);
     // Pi keeps the `ownedNow` closure for the session's life, so it must answer no after release.
     lost = true;
-    // Only remove our own claim. A superseder or a restarted epoch may own this name now.
-    if ((await holderOf(mine.name)) === token) await rm(join(dir, mine.name), { force: true });
-    await rmdir(dir).catch(() => {});
+    await refreshing;
+    // Epoch reuse would let a paused contender overtake a new holder. Keep one expired claim.
+    if ((await holderOf(mine.name)) === token) {
+      const released = new Date(0);
+      await utimes(join(dir, mine.name), released, released).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== "ENOENT") throw err;
+      });
+    }
   }
 }
 

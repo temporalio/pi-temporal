@@ -187,7 +187,8 @@ async function main() {
   await writeFile(join(projectE, "real.txt"), "the project\n");
   asHost(root, "d");
   await worktree.capture(projectD, fresh);
-  const seeded = await readdir(`${fresh}.tree`).catch(() => [] as string[]);
+  const seeded = (await readdir(`${fresh}.tree`).catch(() => [] as string[]))
+    .filter((name) => name !== "writers.lock");
   check("a tool call cannot establish the project", seeded.length === 0, seeded);
   const unestablished = await worktree.ensure(projectD, fresh).then(() => false, () => true);
   check("and no activity runs before a client sends it", unestablished);
@@ -386,7 +387,8 @@ async function main() {
 
   asHost(root, "a");
   await worktree.forget(sessionFile, projectA);
-  const gone = (await readdir(`${sessionFile}.tree`)).length === 0;
+  const gone = (await readdir(`${sessionFile}.tree`))
+    .every((name) => name === "writers.lock");
   check("forgetting a session drops what its tree cost", gone);
 
   const taken = await worktree

@@ -111,8 +111,10 @@ const withTreeLocks = <T>(
 async function readJson<T>(path: string): Promise<T | undefined> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as T;
-  } catch {
-    return undefined;
+  } catch (err) {
+    // Missing state permits creation. Unreadable state can't permit a new writer.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
   }
 }
 
@@ -511,7 +513,6 @@ export interface Fence {
 // Steps closed without their host, in the shared directory because that host can't be reached.
 // Its stale tool would otherwise publish against a tip that still looks live and revert newer work.
 const closedPath = (sessionFile: string) => join(shareDir(sessionFile), "closed.json");
-const CLOSED_KEPT = 500;
 
 interface ClosedStep extends Fence {
   readonly at: string;
@@ -526,7 +527,8 @@ export async function closeStep(sessionFile: string, fence: Fence): Promise<void
     const closed = (await readJson<ClosedStep[]>(closedPath(sessionFile))) ?? [];
     if (closed.some((c) => c.turn === fence.turn && c.step === fence.step)) return;
     const now = [...closed, { ...fence, at: new Date().toISOString() }];
-    await writeJson(closedPath(sessionFile), now.slice(-CLOSED_KEPT));
+    // A timed-out attempt has no lifetime bound, so its closure must survive later turns.
+    await writeJson(closedPath(sessionFile), now);
   });
 }
 
@@ -537,9 +539,8 @@ const isClosed = async (sessionFile: string, fence: Fence) =>
   );
 
 /**
- * Rename a refused directory aside so the session gets a fresh one. A stray writer keeps writing
- * the old one at its new path and can't reach the new one. Not done for a directory this session
- * didn't build, one holding a call of the current step, or a mount point. Returns the new path.
+ * Relative paths stay on a renamed directory, but absolute paths aren't fenced. An adopted
+ * checkout may hold ignored files with no other copy, so only a directory we built can move.
  */
 async function moveAside(
   projectDir: string,
@@ -719,6 +720,8 @@ async function salvage(projectDir: string, sessionFile: string, tree: string) {
 // empty, since a root `.git` survives and the next restore would refuse it.
 async function handBack(projectDir: string, held: Held) {
   if (!held.built) return false;
+  // A tool can outlive the turn while its directory still matches the last snapshot.
+  if ((await writersHere(projectDir)).length > 0) return false;
   // Compare with this host's own tree, since it may be behind the final tip.
   if ((await treeHere(projectDir)) !== held.tree) return false;
   await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
@@ -838,8 +841,8 @@ export async function ensure(
       if (moved === undefined) throw err;
       console.warn(
         `moved ${projectDir} to ${moved}: a tool call from an earlier step never came back and ` +
-          `this host cannot show it stopped. What it wrote is there; nothing it does now reaches ` +
-          `the directory this session builds next.`,
+          `this host cannot show it stopped. Relative paths stay in the moved directory. ` +
+          `Absolute paths can still reach its replacement.`,
       );
     });
     await revive(sessionFile);

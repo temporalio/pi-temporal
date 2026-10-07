@@ -461,8 +461,7 @@ export function makeActivities(
         if (!(await pending.noteDispatch(input.sessionFile, turn, step, call.id))) {
           // An earlier dispatch started this tool, so it may have taken effect. Report unknown
           // rather than re-run a push or delete.
-          const unknown = unknownToolCallOutcome(input.call);
-          await pending.keepResult(input.sessionFile, turn, step, call.id, unknown);
+          // The first attempt may still return. The seal supplies unknown if no result arrives.
           return { outcome: "unknown" };
         }
         claimed = true;
