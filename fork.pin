@@ -1,0 +1,7 @@
+# Pins a build of the temporalio/pi fork. The step-level API this executor needs (`prepareStep`,
+# `recordPrompt`, `modelCall`/`runToolCall`/`sealStep`, `setWriteGuard`, `registerTurnExecutor`)
+# isn't in the published @earendil-works/pi-coding-agent.
+# To bump it, set PI_FORK_REF to the new fork commit, then re-run scripts/setup-fork.sh.
+
+PI_FORK_REPO=https://github.com/temporalio/pi.git
+PI_FORK_REF=5461517979366af8896c55b502e8c6d0d0ca4e11
