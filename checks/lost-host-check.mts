@@ -62,7 +62,7 @@ try {
         await worktree.beginWrite(a, writer);
         finishAbandoned = async () => {
           await writeFile(join(a, "from-the-abandoned-tool.txt"), "written after the step ended\n");
-          await worktree.endWrite(a, writer.callId);
+          await worktree.endWrite(a, writer);
           return await worktree
             .capture(a, sessionFile, { current: writer, fence: { turn, step: 1 } })
             .then(() => undefined, (err: unknown) => err);

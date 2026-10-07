@@ -2,7 +2,16 @@
 // any session from the shared session directory. The pi extension runs the same worker in-process.
 
 import { resolve } from "node:path";
-import { connectionOptions, describe, fromEnv, modelApiKey, notes, preflight } from "./config.js";
+import {
+  connectionOptions,
+  describe,
+  dropFromEnv,
+  fromEnv,
+  modelApiKey,
+  notes,
+  preflight,
+  TEMPORAL_CREDENTIAL_VARS,
+} from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
 import * as worktree from "./worktree.js";
 
@@ -45,10 +54,13 @@ async function main() {
 
   const apiKey = modelApiKey(process.env.PI_TEMPORAL_PROVIDER);
   // Tools the agent runs inherit this process's env. They must not see the keys.
-  for (const name of ["PI_TEMPORAL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) {
-    delete process.env[name];
-    delete process.env[`${name}_FILE`];
-  }
+  dropFromEnv(TEMPORAL_CREDENTIAL_VARS);
+  dropFromEnv([
+    "OPENAI_API_KEY",
+    "OPENAI_API_KEY_FILE",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_API_KEY_FILE",
+  ]);
 
   const { run } = await createSessionWorker({
     address: cfg.address,

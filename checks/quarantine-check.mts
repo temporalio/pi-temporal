@@ -119,6 +119,21 @@ async function main() {
     String(refusedRestore),
   );
 
+  // A later step can reuse the call id. Its marker must not replace the stranded one, or ending
+  // the later call would clear the only sign that the first tool may still be writing.
+  const reused = { turn: "turn-2", step: 3, callId: "call-a" };
+  await worktree.beginWrite(project, reused);
+  await worktree.endWrite(project, reused);
+  let stillRefused: unknown;
+  await worktree.ensure(project, sessionFile, next).catch((err) => {
+    stillRefused = err;
+  });
+  check(
+    "a later call that reuses the id leaves the stranded marker in place",
+    stillRefused instanceof worktree.Quarantined,
+    String(stillRefused),
+  );
+
   // Tools of one step run concurrently by design, so a sibling is not refused.
   const sibling = { turn: "turn-1", step: 1, callId: "call-c" };
   let siblingOk = true;
@@ -136,7 +151,7 @@ async function main() {
   check("the next step of the same turn is refused too", refusedNextStep);
 
   // The abandoned tool returns, so the directory is free again.
-  await worktree.endWrite(project, stranded.callId);
+  await worktree.endWrite(project, stranded);
   let reusable = true;
   await worktree.ensure(project, sessionFile, next).catch(() => {
     reusable = false;

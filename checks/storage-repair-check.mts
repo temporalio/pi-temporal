@@ -169,7 +169,7 @@ async function liveWriterRetirement() {
     assert.equal(await worktree.sweep(), 0);
     assert.equal(await read(join(dir, "note.txt")), "keep this directory\n");
   } finally {
-    await worktree.endWrite(dir, "live");
+    await worktree.endWrite(dir, { turn: "prompt", step: 1, callId: "live" });
   }
   assert.equal(await worktree.sweep(), 1, "retirement can release a directory after its tool ends");
 }

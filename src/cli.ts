@@ -17,7 +17,7 @@ import {
   sessionFileFor,
 } from "./config.js";
 import * as worktree from "./worktree.js";
-import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
+import { sessionIdProblem, WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
 import {
   QueryRejectedError,
   ScheduleAlreadyRunning,
@@ -161,6 +161,11 @@ async function schedule(args: string[]) {
   const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
+  // Each firing's session id is this id plus the firing time, and the template is named after it
+  // too. Refused here, before the schedule exists, since a firing would only fail later.
+  const firing = `${id}-0000-00-00T00:00:00Z`;
+  const unsafe = sessionIdProblem(firing) ?? sessionIdProblem(`schedule-${id}`);
+  if (unsafe) throw new Error(`schedule id ${JSON.stringify(id)} can't be used: ${unsafe}`);
   // No client runs at firing time, so capture the project once as a template and each firing
   // copies it. Workers never seed a project from their own directory.
   const scheduled = fromEnv();

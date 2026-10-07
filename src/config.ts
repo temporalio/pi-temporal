@@ -86,6 +86,20 @@ export function fromEnv(): Config {
   };
 }
 
+// What reaches the Temporal control plane. Once `fromEnv` has read them, a process that runs
+// agent tools drops them, so a tool can't read them from its inherited environment.
+export const TEMPORAL_CREDENTIAL_VARS = [
+  "PI_TEMPORAL_API_KEY",
+  "PI_TEMPORAL_API_KEY_FILE",
+  "PI_TEMPORAL_TLS_CERT",
+  "PI_TEMPORAL_TLS_KEY",
+  "PI_TEMPORAL_TLS_CA",
+];
+
+export function dropFromEnv(names: readonly string[]): void {
+  for (const name of names) delete process.env[name];
+}
+
 /** What the SDK's `Connection.connect` and `NativeConnection.connect` both take. */
 export function connectionOptions(cfg: Config) {
   const tls =

@@ -556,7 +556,7 @@ export function makeActivities(
         // directory, since a timed-out attempt may still be running.
         if (opts.shipTree) await worktree.beginWrite(opts.projectDir, writer);
         const outcome = await session.runToolCall(input.call.id).finally(async () => {
-          if (opts.shipTree) await worktree.endWrite(opts.projectDir, input.call.id);
+          if (opts.shipTree) await worktree.endWrite(opts.projectDir, writer);
         });
         if (!outcome) return { outcome: "already-settled" };
 

@@ -89,6 +89,18 @@ try {
     { down, claims, shipped },
   );
 
+  // Each firing's session id is built from the schedule id, so an unsafe one would never run.
+  const unsafeId = await cli(["schedule", "t", "--every=1h", "--id=a/b"]);
+  const unsafeExists = await client.schedule
+    .getHandle("a/b")
+    .describe()
+    .then(() => true, () => false);
+  check(
+    "schedule refuses an id a firing can't use, before it exists",
+    unsafeId.code !== 0 && /can't be used/.test(unsafeId.err) && !unsafeExists,
+    { unsafeId, unsafeExists },
+  );
+
   const watched = await cli(["watch", `${id}-nobody`]);
   check(
     "watch on an unknown id says so and fails",

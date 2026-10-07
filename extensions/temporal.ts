@@ -41,10 +41,12 @@ import {
   clientProblems,
   type Config,
   connectionOptions,
+  dropFromEnv,
   fromEnv,
   modelApiKey,
   preflight,
   sessionFileFor,
+  TEMPORAL_CREDENTIAL_VARS,
 } from "../src/config.js";
 
 const STATUS_KEY = "pi-temporal";
@@ -87,6 +89,9 @@ interface Task {
 
 export default function (pi: ExtensionAPI) {
   const cfg = env();
+  // pi's tools inherit this process's env. They must not see the Temporal credentials, which are
+  // read once into `cfg` above. The model keys stay, since pi itself needs them.
+  dropFromEnv(TEMPORAL_CREDENTIAL_VARS);
   // Connect lazily, so a pi that never runs a task opens no connection.
   let connecting: Promise<{ client: Client; connection: Connection }> | undefined;
   let embedding: Promise<SessionWorker> | undefined;
@@ -101,7 +106,7 @@ export default function (pi: ExtensionAPI) {
 
   const connect = () => {
     if (connecting) return connecting;
-    const opening = openClient(fromEnv());
+    const opening = openClient(cfg);
     // Forget a failed attempt, so the next use tries again.
     opening.catch(() => {
       if (connecting === opening) connecting = undefined;
@@ -116,7 +121,7 @@ export default function (pi: ExtensionAPI) {
     const starting: Promise<SessionWorker> = (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
-        connect: connectionOptions(fromEnv()),
+        connect: connectionOptions(cfg),
         namespace: cfg.namespace,
         taskQueue: cfg.taskQueue,
         // Tools run where you are, so a background task sees the project you asked from.
@@ -236,7 +241,7 @@ export default function (pi: ExtensionAPI) {
     const starting: Promise<SessionWorker> = (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
-        connect: connectionOptions(fromEnv()),
+        connect: connectionOptions(cfg),
         namespace: cfg.namespace,
         taskQueue: turnQueue,
         projectDir: process.cwd(),

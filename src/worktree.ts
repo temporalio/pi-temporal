@@ -207,11 +207,15 @@ class WrongTree extends Error {}
 // is gone (see `insideBecause`). If it can't, `release-tree` clears it. Another host can still
 // serve the session meanwhile.
 const writersDir = (projectDir: string) => join(hostDir(projectDir), "writers");
-const writerPath = (projectDir: string, callId: string) =>
-  join(
+// Keyed by turn, step, and call. A call id is unique only within one response, and a later step
+// that reused it would otherwise overwrite, then clear, the marker of a tool that's still running.
+const writerPath = (projectDir: string, writer: Writer) => {
+  const key = `${writer.turn}\0${writer.step}\0${writer.callId}`;
+  return join(
     writersDir(projectDir),
-    `${createHash("sha256").update(callId).digest("hex").slice(0, 16)}.json`,
+    `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.json`,
   );
+};
 
 /** What a tool call is, for telling this step's writers from an earlier turn's. */
 export interface Writer {
@@ -439,7 +443,7 @@ async function samePids(note: WriterNote): Promise<boolean> {
 /** Mark a tool call as about to write this directory. `endWrite` clears it. */
 export async function beginWrite(projectDir: string, writer: Writer): Promise<void> {
   await mkdir(writersDir(projectDir), { recursive: true });
-  await writeJson(writerPath(projectDir, writer.callId), {
+  await writeJson(writerPath(projectDir, writer), {
     ...writer,
     host: hostname(),
     pid: process.pid,
@@ -453,8 +457,8 @@ export async function beginWrite(projectDir: string, writer: Writer): Promise<vo
   } satisfies WriterNote);
 }
 
-export async function endWrite(projectDir: string, callId: string): Promise<void> {
-  await rm(writerPath(projectDir, callId), { force: true });
+export async function endWrite(projectDir: string, writer: Writer): Promise<void> {
+  await rm(writerPath(projectDir, writer), { force: true });
 }
 
 /**
