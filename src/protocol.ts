@@ -1,0 +1,241 @@
+// Names and shapes shared by the workflow, the client, and (type-only) the activities.
+// Keep this free of Pi SDK and Node imports. The workflow bundles it into the Temporal sandbox.
+
+export const WORKFLOW_TYPE = "piSession";
+export const WORKFLOW_ID_PREFIX = "pi-session-";
+// A tool call that failed before any attempt claimed it, so the tool never started and the
+// workflow may move a pinned step.
+export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
+// A live tool call that failed because the user stopped the turn.
+export const TURN_STOPPED = "TurnStopped";
+
+export const workflowId = (sessionId: string) => `${WORKFLOW_ID_PREFIX}${sessionId}`;
+
+export const SIGNALS = {
+  submitPrompt: "submitPrompt",
+  interrupt: "interrupt",
+} as const;
+
+export const QUERIES = {
+  turnState: "turnState",
+} as const;
+
+// What the session is doing, for outside watchers. The conversation itself is in the session file.
+export interface TurnState {
+  // Prompts accepted but not started.
+  readonly queued: number;
+  readonly running?: { readonly promptId: string; readonly step: number };
+  // The last turn to stop, and why.
+  readonly finished?: {
+    readonly promptId: string;
+    // "interrupted" means the user pressed stop. Any other death is "failed". "budget" means the
+    // operator's bound was reached, and the session moves on to the next prompt.
+    readonly outcome: "answered" | "interrupted" | "failed" | "ceiling" | "budget";
+    // Session spend when this turn ended.
+    readonly spent?: Spent;
+    // Short error for clients that only read `turnState`. The session log has the detail.
+    readonly error?: string;
+    readonly finalText: string;
+  };
+}
+
+export interface PromptInput {
+  // Deterministic id, so a re-driven activity can tell whether it already ran.
+  readonly promptId: string;
+  readonly text: string;
+}
+
+export interface RunStepInput extends PromptInput {
+  // Failed attempts of this step so far. The workflow keeps the count because the session is
+  // rebuilt per activity and compaction can rewrite the transcript.
+  readonly retryAttempt?: number;
+  readonly sessionId: string;
+  // Absolute path to the Pi session JSONL, the durable log. Shared storage across workers.
+  readonly sessionFile: string;
+  // For the Temporal UI and logs only. The transcript decides what runs next.
+  readonly step: number;
+}
+
+/** What one unit of work cost. Per activity, not a running total, because the session file is
+ * shared and a total read from it includes turns this one did not run. */
+export interface Spend {
+  readonly tokens: number;
+  // Present where the host knows the price.
+  readonly cost?: number;
+}
+
+export interface RunStepResult {
+  // False means the workflow schedules another step.
+  readonly done: boolean;
+  // Required, so a step cannot silently drop the retry cap.
+  readonly retryAttempt: number;
+  // The assistant's final text once done. The log is the source of truth.
+  readonly finalText: string;
+  // This step's spend, for the turn budget.
+  readonly spent?: Spend;
+  // Session total read off the record, so it survives rollovers, idle restarts, and other clients.
+  readonly total?: Spend;
+}
+
+export interface SessionTurnOptions {
+  // Idle time before the workflow exits. The next prompt starts a fresh run from the session file.
+  readonly idleTimeout?: string;
+  // Drive each step as a model call, one activity per tool call, and a seal, instead of one
+  // activity for the whole step. Off by default.
+  readonly stepped?: boolean;
+  // A prompt to run at start, for starters with no client, such as a Temporal schedule.
+  readonly initialPrompt?: PromptInput;
+  // Session log location when the id is derived. The workflow cannot read the environment.
+  readonly sessionDir?: string;
+  // A project store copied into each scheduled session before its first activity.
+  readonly template?: string;
+  // Queue carried across a rollover. It is the whole control state.
+  readonly queued?: readonly PromptInput[];
+  // Spend carried across a rollover.
+  readonly spent?: Spent;
+  // Last turn result carried across a rollover, so a client polling `turnState` still sees it.
+  readonly finished?: TurnState["finished"];
+  // Operator spend bound per turn. Off by default, since a bound that ends real work is a policy
+  // call. `MAX_STEPS_PER_TURN` is a separate runaway guard.
+  readonly budget?: TurnBudget;
+  // Roll over at this many history events, in addition to the server's suggestion. Also lets
+  // checks reach the rollover path.
+  readonly maxHistory?: number;
+  // Bound on one tool call in stepped mode. A call that crosses it is not re-run, because its
+  // dispatch note says it started.
+  readonly toolTimeoutMinutes?: number;
+}
+
+// A call the model asked for, recorded but not run. Arguments stay in the transcript, not history.
+export interface DeferredToolCall {
+  readonly id: string;
+  readonly name: string;
+}
+
+export interface ModelCallResult {
+  // A retry that landed after the turn's last step finished. Nothing is dispatched or sealed.
+  readonly settled?: RunStepResult;
+  readonly calls: readonly DeferredToolCall[];
+  // A tool of this step requires sequential execution.
+  readonly sequential: boolean;
+  // The response ended the run. Nothing is dispatched, but the step is still sealed, since retries
+  // and compaction happen there.
+  readonly ended: boolean;
+  // This worker's own queue. The rest of the step runs there, on the host that holds the project
+  // directory. Absent when the worker has none, and the step uses the shared queue.
+  //
+  // Only a dispatch nobody started may move off it, and only after every pinned sibling settled.
+  // A started attempt may still have a tool writing that directory.
+  readonly queue?: string;
+  // The model call's spend. A compacting seal reports its own.
+  readonly spent?: Spend;
+  // Session total from the record. See `RunStepResult`.
+  readonly total?: Spend;
+}
+
+export interface ToolCallInput {
+  readonly sessionId: string;
+  readonly sessionFile: string;
+  // The prompt id. Steps restart at one each turn, so dispatch state is keyed by turn too.
+  readonly turn: string;
+  readonly step: number;
+  readonly call: DeferredToolCall;
+}
+
+// How a dispatch ended. The transcript can't tell a skipped tool from a lost result, so this does.
+// - `settled`: the tool ran and its result is durable.
+// - `already-settled`: a result was already recorded, so nothing ran. The at-least-once case.
+// - `unknown`: an earlier dispatch had started, so the tool may have taken effect. Reported to the
+//   model as an unknown outcome rather than run twice.
+export type ToolCallOutcome = "settled" | "already-settled" | "unknown";
+
+export interface ToolCallResult {
+  readonly outcome: ToolCallOutcome;
+}
+
+export interface SealStepInput {
+  readonly sessionId: string;
+  readonly sessionFile: string;
+  // Which turn's kept results to read. See `ToolCallInput`.
+  readonly turn: string;
+  readonly step: number;
+  readonly retryAttempt?: number;
+  // The turn was stopped. Record results only, with no provider retry or compaction.
+  readonly interrupted?: boolean;
+  // Closed without the host that ran it. A tool there may still be running, so this is recorded
+  // where every host reads it, and that host's later output is kept rather than published.
+  readonly lost?: boolean;
+  // In the model's order. A call with no result is settled as unknown, because providers reject a
+  // transcript with an unanswered call.
+  readonly calls: readonly DeferredToolCall[];
+}
+
+/**
+ * What a turn may spend. Enforced between steps, never inside one, because stopping mid-step
+ * leaves a tool call the transcript cannot represent. The model cannot be trusted to keep it, so
+ * the workflow enforces it.
+ */
+export interface TurnBudget {
+  // Wall clock for the turn in seconds, on the workflow clock so replay agrees. A number, not a
+  // duration string, because the duration parser is not workflow-safe.
+  readonly seconds?: number;
+  // Tokens the turn's model calls may spend.
+  readonly tokens?: number;
+  // A hard deadline. At `seconds` the turn stops between steps. At this one it stops at once, as
+  // if the user pressed stop. In-flight calls come back as unknown and remote tools keep running.
+  // Opt-in.
+  readonly hardSeconds?: number;
+  // The same bounds for the whole session. Measured against the session record where the host
+  // reports it, otherwise the workflow's own count carried across rollovers.
+  readonly sessionSeconds?: number;
+  readonly sessionTokens?: number;
+}
+
+/** What a session has spent so far, carried between runs of its workflow. */
+export interface Spent {
+  readonly tokens: number;
+  readonly cost: number;
+  // Time spent in turns, not session age. Idle time costs nothing.
+  readonly seconds: number;
+}
+
+// Runaway guard (a model looping on one tool, say). High enough that real work never reaches it.
+export const MAX_STEPS_PER_TURN = 200;
+
+// One workflow per turn of a live pi session. The turn runs in the pi process that owns it, so this
+// is a record and retry policy around it, not a way to move it.
+export const LOCAL_TURN_WORKFLOW = "piLocalTurn";
+
+export interface LocalTurnInput {
+  readonly sessionId: string;
+  // Identifies the live turn inside the process that owns it.
+  readonly turnId: string;
+  // That process's own queue. Only it can run this turn.
+  readonly taskQueue: string;
+  // Drive the turn a step at a time, so each tool call is its own unit of work.
+  readonly stepped?: boolean;
+}
+
+// Addressed by turn, not session file. The transcript is in that process's memory.
+export interface LocalStepInput {
+  readonly turnId: string;
+  readonly step: number;
+}
+
+export interface LocalToolCallInput extends LocalStepInput {
+  readonly call: DeferredToolCall;
+}
+
+export interface LocalSealInput extends LocalStepInput {
+  readonly calls: readonly DeferredToolCall[];
+  readonly interrupted?: boolean;
+}
+
+export interface LocalModelCallResult {
+  readonly calls: readonly DeferredToolCall[];
+  readonly sequential: boolean;
+  readonly ended: boolean;
+  // The user stopped the turn. Do not seal: the last step already closed, and sealing again ends
+  // the turn twice.
+  readonly interrupted?: boolean;
+}
