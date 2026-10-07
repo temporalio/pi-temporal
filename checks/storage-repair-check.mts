@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as pending from "../src/pending.js";
 import * as worktree from "../src/worktree.js";
 import { withSessionLock } from "../src/session-lock.js";
 
@@ -157,6 +158,21 @@ async function forgetWaits() {
   assert.deepEqual(await fs.readdir(`${file}.tree`), ["writers.lock"]);
 }
 
+// A tool Activity that timed out can still be running after its Workflow closed. Its claim must
+// survive `forget`, or it runs the tool for a session that is gone.
+async function forgetKeepsClaims() {
+  const file = session("forget-claims");
+  await seed("forget-claims-seed", file, "claimed\n");
+  assert.equal(await pending.noteDispatch(file, "turn-1", 1, "claimed"), true);
+  await pending.keepResult(file, "turn-1", 1, "claimed", {
+    result: { content: [], details: undefined },
+    isError: false,
+  } as never);
+  await worktree.forget(file);
+  assert.equal(await pending.readResult(file, "turn-1", 1, "claimed"), undefined);
+  assert.equal(await pending.noteDispatch(file, "turn-1", 1, "claimed"), false);
+}
+
 async function liveWriterRetirement() {
   const file = session("live-writer");
   await seed("live-writer-seed", file, "keep this directory\n");
@@ -271,6 +287,7 @@ const checks = {
   forgottenRetirement,
   adoptedAfterForget,
   forgetWaits,
+  forgetKeepsClaims,
   liveWriterRetirement,
   oldClosure,
   unreadableTreeState,

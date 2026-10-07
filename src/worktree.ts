@@ -30,6 +30,7 @@ import { constants } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import * as pending from "./pending.js";
 import { withSessionLock } from "./session-lock.js";
 
 const execFileAsync = promisify(execFile);
@@ -1138,7 +1139,9 @@ export async function forget(sessionFile: string, projectDir?: string): Promise<
       await rm(join(shareDir(sessionFile), name), { recursive: true, force: true });
     }
     if (projectDir) await rm(heldPath(projectDir, sessionFile), { force: true });
-    await rm(`${sessionFile}.pending`, { recursive: true, force: true });
+    // Results only. A timed-out tool Activity can outlive its Workflow, and its dispatch note is
+    // what stops it running the tool after the session is gone.
+    await pending.sweepResults(sessionFile);
   };
   if (projectDir) await withTreeLocks(projectDir, sessionFile, drop);
   else await withSessionLock(sharedLockPath(sessionFile), drop);

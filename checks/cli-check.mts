@@ -118,7 +118,10 @@ try {
     tree);
   check("a schedule with a guarded project is created", first.code === 0, first);
   // The template's tip names the captured tree, so a second capture would change it.
-  const tip = join(sessions, `schedule-${id}.jsonl.tree`, "tip.json");
+  const made = (await readdir(sessions)).find(
+    (name) => name.startsWith(`schedule-${id}-`) && name.endsWith(".jsonl.tree"),
+  );
+  const tip = join(sessions, made ?? "missing", "tip.json");
   const tipBefore = await readFile(tip, "utf8").catch(() => "");
   const before = (await readdir(sessions)).sort();
   await writeFile(join(project, "a.txt"), "second\n");
@@ -137,6 +140,14 @@ try {
   check("the existing template is untouched", tipBefore !== "" && tipAfter === tipBefore, {
     tipBefore,
     tipAfter,
+  });
+  // `unschedule` keeps the old template for queued firings. The id must still be usable again.
+  const dropped = await cli(["unschedule", id]);
+  const again = await cli(["schedule", "t", "--every=1h", `--id=${id}`, `--project=${project}`],
+    tree);
+  check("an unscheduled id can be scheduled again", dropped.code === 0 && again.code === 0, {
+    dropped,
+    again,
   });
 } finally {
   for (const name of [id, `${id}-bad`, `${id}-bare`]) {

@@ -163,8 +163,11 @@ async function schedule(args: string[]) {
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
   // Each firing's session id is this id plus the firing time, and the template is named after it
   // too. Refused here, before the schedule exists, since a firing would only fail later.
+  // `unschedule` keeps the template for firings already queued, so each creation gets its own.
+  // Otherwise the id could not be scheduled again.
+  const templateId = `schedule-${id}-${randomUUID().slice(0, 8)}`;
   const firing = `${id}-0000-00-00T00:00:00Z`;
-  const unsafe = sessionIdProblem(firing) ?? sessionIdProblem(`schedule-${id}`);
+  const unsafe = sessionIdProblem(firing) ?? sessionIdProblem(templateId);
   if (unsafe) throw new Error(`schedule id ${JSON.stringify(id)} can't be used: ${unsafe}`);
   // No client runs at firing time, so capture the project once as a template and each firing
   // copies it. Workers never seed a project from their own directory.
@@ -181,7 +184,7 @@ async function schedule(args: string[]) {
       );
     }
     await refuseProject(projectDir);
-    template = sessionFileFor(scheduled.sessionDir, `schedule-${id}`);
+    template = sessionFileFor(scheduled.sessionDir, templateId);
   }
 
   const { cfg, client, connection } = await connect();
