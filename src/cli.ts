@@ -5,6 +5,8 @@
 
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
+import { resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { connect, interrupt, submitPrompt } from "./client.js";
 import {
   clientProblems,
@@ -18,6 +20,7 @@ import * as worktree from "./worktree.js";
 import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
 import {
   QueryRejectedError,
+  ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   WorkflowNotFoundError,
 } from "@temporalio/client";
@@ -30,9 +33,7 @@ const say = (line: string) => process.stderr.write(line + "\n");
 // Machine-readable output goes to stdout, so `$(pi-temporal start ...)` captures only the id.
 const emit = (line: string) => process.stdout.write(line + "\n");
 
-import { resolve } from "node:path";
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
 // Queries are answered by workers, so a session whose workers are all down never answers. Bound it.
 const QUERY_MS = 3_000;
@@ -79,13 +80,40 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
     say("  the session already has its project");
     return;
   }
+  await refuseProject(projectDir);
   await worktree.capture(projectDir, file, { seed: true });
   say(`  sent the project from ${projectDir}`);
 }
 
-// One flag's value, from `--name=value`. `slice(1).join("=")` keeps a value with its own `=` whole.
-const flagOf = (args: string[], name: string) =>
-  args.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
+// The guard `/background` uses. From a home directory, `~/.ssh` and `~/.aws` would ship.
+async function refuseProject(projectDir: string) {
+  const refusal = await worktree.projectRefusal(projectDir);
+  if (refusal) throw new Error(`not sending ${projectDir} as the project: ${refusal}`);
+}
+
+/**
+ * Split a command's arguments into words and `--name=value` flags. An unknown flag or the
+ * `--name value` form is refused, so a flag's value is never taken for the task text.
+ */
+function parse(command: string, args: string[], known: readonly string[] = []) {
+  const flags = new Map<string, string>();
+  const words: string[] = [];
+  for (const arg of args) {
+    if (!arg.startsWith("--")) {
+      words.push(arg);
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const name = arg.slice(2, eq === -1 ? undefined : eq);
+    if (!known.includes(name)) {
+      const allowed = known.length ? known.map((k) => `--${k}=`).join(", ") : "none";
+      throw new Error(`${command} has no flag --${name} (it takes: ${allowed})`);
+    }
+    if (eq === -1) throw new Error(`write --${name}=<value>, with the =`);
+    flags.set(name, arg.slice(eq + 1));
+  }
+  return { word: words[0], flag: (name: string) => flags.get(name) };
+}
 
 /** Refuse to start a session the workers would refuse, before anything is written for it. */
 function refuseConflicts() {
@@ -94,12 +122,12 @@ function refuseConflicts() {
 }
 
 async function start(args: string[]) {
+  const { word: text, flag } = parse("start", args, ["session", "project"]);
   refuseConflicts();
-  const text = args.find((a) => !a.startsWith("--"));
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
-  const sessionId = flagOf(args, "session") ?? `task-${randomUUID().slice(0, 8)}`;
+  const sessionId = flag("session") ?? `task-${randomUUID().slice(0, 8)}`;
   // Seed before the prompt, or the first worker to run an activity would supply the project.
-  await seedProject(sessionId, flagOf(args, "project"));
+  await seedProject(sessionId, flag("project"));
   // Creates the session and delivers the prompt. Doesn't wait for the turn.
   await submitPrompt(sessionId, text);
   emit(sessionId);
@@ -108,61 +136,82 @@ async function start(args: string[]) {
 
 // A recurring task with no client. Each firing creates its own session.
 async function schedule(args: string[]) {
+  const { word: text, flag } = parse("schedule", args, ["every", "cron", "id", "project"]);
   refuseConflicts();
-  const text = args.find((a) => !a.startsWith("--"));
-  const every = flagOf(args, "every");
-  const cron = flagOf(args, "cron");
-  const id = flagOf(args, "id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
+  const every = flag("every");
+  const cron = flag("cron");
+  const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
   // No client runs at firing time, so capture the project once as a template and each firing
   // copies it. Workers never seed a project from their own directory.
   const scheduled = fromEnv();
+  let projectDir: string | undefined;
   let template: string | undefined;
   if (scheduled.shipTree) {
-    const projectDir = flagOf(args, "project") ?? process.env.PI_PROJECT_DIR;
+    projectDir = flag("project") ?? process.env.PI_PROJECT_DIR;
     if (!projectDir) {
       throw new Error(
         "the tree is on, so a schedule needs the project: " +
           'pi-temporal schedule "..." --every=1h --project=/path/to/repo',
       );
     }
+    await refuseProject(projectDir);
     template = sessionFileFor(scheduled.sessionDir, `schedule-${id}`);
-    await worktree.capture(projectDir, template, { seed: true });
-    // Nothing retires a template. Drop its claim, or later sessions in this directory are refused.
-    await worktree.unclaim(projectDir, template);
-    say(`  sent the project from ${projectDir}`);
   }
 
   const { cfg, client, connection } = await connect();
   try {
-    await client.schedule.create({
-      scheduleId: id,
-      spec: cron ? { cronExpressions: [cron] } : { intervals: [{ every: every! }] },
-      // Skip a firing while the last run is still going. Two agents on one repo collide.
-      policies: { overlap: ScheduleOverlapPolicy.SKIP },
-      action: {
-        type: "startWorkflow",
-        workflowType: WORKFLOW_TYPE,
-        taskQueue: cfg.taskQueue,
-        // Session-style id (Temporal appends the firing time), so `running` and `watch` see it.
-        workflowId: workflowId(id),
-        // Empty session id and file. Each firing derives its own from its workflow id.
-        args: [
-          "",
-          "",
-          {
-            idleTimeout: cfg.idleTimeout,
-            stepped: cfg.stepped,
-            toolTimeoutMinutes: cfg.toolTimeoutMinutes,
-            budget: cfg.budget,
-            sessionDir: cfg.sessionDir,
-            template,
-            initialPrompt: { promptId: `scheduled-${id}`, text },
-          },
-        ],
-      },
-    });
+    // Created paused, before the template is captured. A taken id or a bad spec fails here, so
+    // it can't overwrite another schedule's template or leave one behind.
+    const handle = await client.schedule
+      .create({
+        scheduleId: id,
+        spec: cron ? { cronExpressions: [cron] } : { intervals: [{ every: every! }] },
+        // Skip a firing while the last run is still going. Two agents on one repo collide.
+        policies: { overlap: ScheduleOverlapPolicy.SKIP },
+        state: { paused: true, note: "waiting for its project" },
+        action: {
+          type: "startWorkflow",
+          workflowType: WORKFLOW_TYPE,
+          taskQueue: cfg.taskQueue,
+          // Session-style id (Temporal appends the firing time), so `running` and `watch` see it.
+          workflowId: workflowId(id),
+          // Empty session id and file. Each firing derives its own from its workflow id.
+          args: [
+            "",
+            "",
+            {
+              idleTimeout: cfg.idleTimeout,
+              stepped: cfg.stepped,
+              toolTimeoutMinutes: cfg.toolTimeoutMinutes,
+              budget: cfg.budget,
+              sessionDir: cfg.sessionDir,
+              template,
+              initialPrompt: { promptId: `scheduled-${id}`, text },
+            },
+          ],
+        },
+      })
+      .catch((err) => {
+        if (err instanceof ScheduleAlreadyRunning) {
+          throw new Error(`a schedule ${id} already exists; pick another --id`);
+        }
+        throw err;
+      });
+    if (projectDir && template) {
+      try {
+        await worktree.capture(projectDir, template, { seed: true });
+        // Nothing retires a template. Drop its claim, or later sessions in this directory are
+        // refused.
+        await worktree.unclaim(projectDir, template);
+      } catch (err) {
+        await handle.delete().catch(() => {});
+        throw err;
+      }
+      say(`  sent the project from ${projectDir}`);
+    }
+    await handle.unpause("project sent");
     emit(id);
     say(`  every firing starts its own session; see them with: pi-temporal running`);
   } finally {
@@ -223,13 +272,28 @@ function render(entry: { message?: { role?: string; content?: unknown } }): stri
 }
 
 async function watch(args: string[]) {
-  const sessionId = args.find((a) => !a.startsWith("--"));
+  const { word: sessionId, flag } = parse("watch", args, ["timeout"]);
   if (!sessionId) throw new Error("watch wants a session id");
+  const limit = flag("timeout");
+  const seconds = limit === undefined ? undefined : Number(limit);
+  if (seconds !== undefined && !(seconds > 0)) {
+    throw new Error("--timeout wants a number of seconds, e.g. --timeout=600");
+  }
+  const deadline = seconds === undefined ? undefined : Date.now() + seconds * 1_000;
   const { cfg, client, connection } = await connect();
   const file = sessionFileFor(cfg.sessionDir, sessionId);
   let offset = 0;
   let carry = "";
+  // A read can end inside a multi-byte character. The decoder holds those bytes for the next one.
+  let decoder = new StringDecoder("utf8");
   let inode: number | undefined;
+  let seenFile = false;
+
+  const restart = () => {
+    offset = 0;
+    carry = "";
+    decoder = new StringDecoder("utf8");
+  };
 
   const drain = async () => {
     let info: Awaited<ReturnType<typeof stat>>;
@@ -238,32 +302,28 @@ async function watch(args: string[]) {
     } catch {
       return; // the first step has not written the file yet
     }
+    seenFile = true;
     const size = info.size;
     // Compaction rewrites the file, maybe at the same size or bigger, so track the inode too.
     // `inode` is recorded from the open handle, so a swap between `stat` and `open` isn't missed.
     if (inode !== undefined && info.ino !== inode) {
-      offset = 0;
-      carry = "";
+      restart();
     } else if (size < offset) {
       // Shorter than what we read, so it's a different file.
-      offset = 0;
-      carry = "";
+      restart();
     }
     if (size === offset) return;
     const handle = await open(file, "r");
     try {
       const opened = await handle.stat();
-      if (inode !== undefined && opened.ino !== inode) {
-        offset = 0;
-        carry = "";
-      }
+      if (inode !== undefined && opened.ino !== inode) restart();
       inode = opened.ino;
       const readable = opened.size - offset;
       if (readable <= 0) return;
       const buffer = Buffer.alloc(readable);
       await handle.read(buffer, 0, buffer.length, offset);
       offset = opened.size;
-      carry += buffer.toString("utf8");
+      carry += decoder.write(buffer);
       const lines = carry.split("\n");
       // A read can end mid-line. Keep the partial line for the next tick.
       carry = lines.pop() ?? "";
@@ -281,23 +341,39 @@ async function watch(args: string[]) {
     }
   };
 
+  let seenState = false;
+  let waiting = false;
   try {
     for (;;) {
       await drain();
+      if (deadline !== undefined && Date.now() > deadline) {
+        say(`  stopped watching after ${seconds}s; the session may still be going`);
+        process.exitCode = 1;
+        return;
+      }
       const reached = await turnStateOf(client, sessionId);
       // Likely a worker handover. The turn is still going, so keep following.
       if (reached.kind === "unreachable") {
+        if (!waiting) say("  waiting for Temporal or a worker to answer");
+        waiting = true;
         await sleep(POLL_MS);
         continue;
       }
+      waiting = false;
+      if (reached.kind === "state") seenState = true;
       // Exit when nothing is running or queued, without waiting out the workflow's idle timeout.
       const state = reached.kind === "state" ? reached.state : undefined;
       if (!state || (!state.running && state.queued === 0)) {
         await drain();
-        if (state?.finished) {
+        if (!seenState && !seenFile) {
+          say(`no such session: ${sessionId}`);
+        } else if (state?.finished) {
           const { outcome, error } = state.finished;
           say(`  ${outcome}${error ? `: ${error}` : ""}`);
+        } else if (!state) {
+          say("  the session is over; its outcome is no longer kept");
         }
+        if (state?.finished?.outcome !== "answered") process.exitCode = 1;
         return;
       }
       await sleep(POLL_MS);
@@ -315,13 +391,13 @@ async function main() {
     case "schedule":
       return schedule(rest);
     case "unschedule": {
-      const id = rest.find((a) => !a.startsWith("--"));
+      const id = parse(command, rest).word;
       if (!id) throw new Error("unschedule wants a schedule id");
       const { client, connection } = await connect();
       try {
         await client.schedule.getHandle(id).delete();
-        // A firing can be queued before any worker copies its project.
         say(`deleted ${id}`);
+        // A firing can be queued before any worker copies its project.
         say("  kept the project template for firings already queued or running");
       } finally {
         await connection.close();
@@ -329,11 +405,12 @@ async function main() {
       return;
     }
     case "running":
+      parse(command, rest);
       return running();
     case "watch":
       return watch(rest);
     case "stop": {
-      const sessionId = rest.find((a) => !a.startsWith("--"));
+      const sessionId = parse(command, rest).word;
       if (!sessionId) throw new Error("stop wants a session id");
       await interrupt(sessionId);
       say(`interrupted ${sessionId}`);
@@ -341,6 +418,7 @@ async function main() {
     }
     // Print the resolved configuration and any problems with it.
     case "doctor": {
+      parse(command, rest);
       const cfg = fromEnv();
       say("pi-temporal");
       for (const [name, value] of Object.entries(describe(cfg))) say(`  ${name}: ${value}`);
@@ -369,7 +447,7 @@ async function main() {
     // Drop a finished session's project bundles. Manual, since an idle session can be prompted
     // again and would restore from them. The transcript is kept.
     case "forget": {
-      const sessionId = rest.find((a) => !a.startsWith("--"));
+      const sessionId = parse(command, rest).word;
       if (!sessionId) throw new Error("forget wants a session id");
       const { client, connection } = await connect();
       // Only when the session is known to be gone. Unreachable is not finished.
@@ -381,7 +459,12 @@ async function main() {
             : `cannot tell whether ${sessionId} is running; not touching its files`,
         );
       }
-      await worktree.forget(sessionFileFor(fromEnv().sessionDir, sessionId));
+      const file = sessionFileFor(fromEnv().sessionDir, sessionId);
+      if (!(await worktree.established(file))) {
+        say(`${sessionId} kept no project files; nothing to drop`);
+        return;
+      }
+      await worktree.forget(file);
       say(`dropped what ${sessionId} kept for its project files`);
       say("  the transcript is untouched; a new turn would start from an empty project");
       return;
@@ -389,7 +472,7 @@ async function main() {
     case "release-tree": {
       // Clear the refusal a stranded tool left. We can't tell if that tool still runs, so the
       // operator decides.
-      const dir = rest.find((a) => !a.startsWith("--"));
+      const dir = parse(command, rest).word;
       if (!dir) throw new Error("release-tree wants a project directory");
       const forgotten = await worktree.clearWriters(resolve(dir));
       if (forgotten === 0) {
@@ -402,9 +485,9 @@ async function main() {
     }
     default:
       say("usage: pi-temporal <command> [args]");
-      say('  start "<task>" [--session=<id>]   hand a task to a worker and return');
+      say('  start "<task>" [--session=<id>] [--project=<dir>]   hand a task to a worker');
       say("  running                          what this deployment is running");
-      say("  watch <sessionId>                follow one until its turn ends");
+      say("  watch <sessionId> [--timeout=<s>] follow one until its turn ends");
       say("  stop <sessionId>                 interrupt the turn in flight");
       say("  forget <sessionId>               drop the project files a finished session kept");
       say("  release-tree <projectDir>        clear writers this host cannot account for");

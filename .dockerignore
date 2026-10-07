@@ -3,6 +3,9 @@
 node_modules
 .fork/pi/node_modules
 .fork/pi/**/node_modules
-.git
+**/.git
+.env*
+**/.env*
+demo/logs
 .omc
 *.log

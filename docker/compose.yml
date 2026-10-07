@@ -48,6 +48,14 @@ services:
     <<: *worker
     entrypoint: ["node", "--import", "tsx", "src/cli.ts"]
     command: ["running"]
+    # The workers' settings without the model key, which a client never uses.
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - PI_SESSION_DIR=/sessions
+      - PI_TEMPORAL_TASK_QUEUE=${PI_TEMPORAL_TASK_QUEUE:-pi-session}
+      - PI_TEMPORAL_STEPPED=1
+      - PI_TEMPORAL_SHIP_TREE=${PI_TEMPORAL_SHIP_TREE:-0}
+      - PI_PROJECT_DIR=/project
     # Its own project, since with the tree on the client is what sends it.
     volumes:
       - sessions:/sessions

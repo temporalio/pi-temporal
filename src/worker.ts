@@ -41,6 +41,13 @@ async function main() {
     if (freed > 0) console.log(`  handed back ${freed} directories held for finished sessions`);
   }
 
+  const apiKey = modelApiKey(process.env.PI_TEMPORAL_PROVIDER);
+  // Tools the agent runs inherit this process's env. They must not see the keys.
+  for (const name of ["PI_TEMPORAL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) {
+    delete process.env[name];
+    delete process.env[`${name}_FILE`];
+  }
+
   const { run } = await createSessionWorker({
     address: cfg.address,
     connect: connectionOptions(cfg),
@@ -49,7 +56,7 @@ async function main() {
     projectDir,
     provider: process.env.PI_TEMPORAL_PROVIDER,
     modelHint: process.env.PI_MODEL,
-    apiKey: modelApiKey(process.env.PI_TEMPORAL_PROVIDER),
+    apiKey,
     shipTree: cfg.shipTree,
   });
 

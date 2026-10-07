@@ -13,9 +13,13 @@ import { randomUUID } from "node:crypto";
 import {
   type Client,
   type Connection,
+  isGrpcServiceError,
   QueryRejectedError,
+  ServiceError,
+  WorkflowFailedError,
   WorkflowNotFoundError,
 } from "@temporalio/client";
+import { TransportError } from "@temporalio/worker";
 import {
   LOCAL_TURN_WORKFLOW,
   QUERIES,
@@ -40,12 +44,23 @@ import {
   fromEnv,
   modelApiKey,
   preflight,
+  sessionFileFor,
 } from "../src/config.js";
 
 const STATUS_KEY = "pi-temporal";
 const POLL_MS = 2000;
 // Shorter than the poll interval, so a worker that never answers cannot stack polls behind it.
 const QUERY_MS = 1500;
+// How long quitting pi waits for an embedded worker's in-flight tool. Past it the tool is
+// abandoned, and recovery reports its outcome unknown rather than running it again.
+const EMBEDDED_STOP = "5s";
+// A bound on a live turn's workflow, so a turn on a queue nobody polls can't wait forever. A day
+// is far past any real turn, so it never cuts one short.
+const TURN_TIMEOUT = "24h";
+
+// A failure to talk to Temporal at all, as opposed to an error from what we asked it to do.
+const unreachable = (err: unknown) =>
+  err instanceof TransportError || err instanceof ServiceError || isGrpcServiceError(err);
 
 type Env = Config & {
   readonly embeddedWorker: boolean;
@@ -85,13 +100,20 @@ export default function (pi: ExtensionAPI) {
   let polling = false;
 
   const connect = () => {
-    connecting ??= openClient(fromEnv());
-    return connecting;
+    if (connecting) return connecting;
+    const opening = openClient(fromEnv());
+    // Forget a failed attempt, so the next use tries again.
+    opening.catch(() => {
+      if (connecting === opening) connecting = undefined;
+    });
+    connecting = opening;
+    return opening;
   };
 
   // Building the workflow bundle takes a second, so start the worker on the first task.
   const startWorker = (ctx: ExtensionContext) => {
-    embedding ??= (async () => {
+    if (embedding) return embedding;
+    const starting: Promise<SessionWorker> = (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
         connect: connectionOptions(fromEnv()),
@@ -103,13 +125,27 @@ export default function (pi: ExtensionAPI) {
         modelHint: cfg.modelHint ?? ctx.model?.id,
         apiKey: modelApiKey(cfg.provider ?? ctx.model?.provider),
         shipTree: cfg.shipTree,
+        shutdownForceTime: EMBEDDED_STOP,
       });
-      worker.run().catch((err) => {
-        ctx.ui.notify(`background worker stopped: ${String(err)}`, "warning");
-      });
+      worker
+        .run()
+        .catch((err) => {
+          ctx.ui.notify(`background worker stopped: ${String(err)}`, "warning");
+        })
+        .finally(() => {
+          // Died on its own, not stopped by `session_shutdown`. A dead worker polls nothing, so
+          // forget it and the next task starts a new one.
+          if (embedding !== starting) return;
+          embedding = undefined;
+          worker.stop().catch(() => {});
+        });
       return worker;
     })();
-    return embedding;
+    starting.catch(() => {
+      if (embedding === starting) embedding = undefined;
+    });
+    embedding = starting;
+    return starting;
   };
 
   const describe = () =>
@@ -196,7 +232,8 @@ export default function (pi: ExtensionAPI) {
   let turnWorker: Promise<SessionWorker> | undefined;
 
   const startTurnWorker = () => {
-    turnWorker ??= (async () => {
+    if (turnWorker) return turnWorker;
+    const starting: Promise<SessionWorker> = (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
         connect: connectionOptions(fromEnv()),
@@ -204,13 +241,27 @@ export default function (pi: ExtensionAPI) {
         taskQueue: turnQueue,
         projectDir: process.cwd(),
         activities: makeLocalTurnActivities(liveTurns),
+        shutdownForceTime: EMBEDDED_STOP,
       });
-      worker.run().catch(() => {
-        // The failing turn reports it. Later turns fall back to running locally.
-      });
+      worker
+        .run()
+        .catch(() => {
+          // The failing turn reports it.
+        })
+        .finally(() => {
+          // Forget a dead worker, so the next turn starts one instead of waiting on a queue
+          // nobody polls.
+          if (turnWorker !== starting) return;
+          turnWorker = undefined;
+          worker.stop().catch(() => {});
+        });
       return worker;
     })();
-    return turnWorker;
+    starting.catch(() => {
+      if (turnWorker === starting) turnWorker = undefined;
+    });
+    turnWorker = starting;
+    return starting;
   };
 
   const runTurnDurably = async (turn: TurnExecutorContext) => {
@@ -223,9 +274,16 @@ export default function (pi: ExtensionAPI) {
       stepped: cfg.stepped,
     };
     let ran = false;
+    // Set once this process runs the turn itself. A late activity must not run it too.
+    let local = false;
+    // The step an activity is running now, so a lost client can wait for it to finish.
+    let inFlight: Promise<unknown> | undefined;
     const ranHere = <T>(body: () => Promise<T>) => {
+      if (local) return Promise.reject(new Error("this turn runs without Temporal"));
       ran = true;
-      return body();
+      const step = body();
+      inFlight = step;
+      return step;
     };
     liveTurns.set(turnId, {
       run: () => ranHere(() => turn.run()),
@@ -240,6 +298,11 @@ export default function (pi: ExtensionAPI) {
       },
     });
 
+    const terminate = (reason: string) =>
+      connect()
+        .then(({ client }) => client.workflow.getHandle(turnWorkflow).terminate(reason))
+        .catch(() => {});
+
     try {
       await startTurnWorker();
       const { client } = await connect();
@@ -247,22 +310,35 @@ export default function (pi: ExtensionAPI) {
         taskQueue: turnQueue,
         workflowId: turnWorkflow,
         args: [input],
+        workflowExecutionTimeout: TURN_TIMEOUT,
       });
     } catch (err) {
-      // The turn itself failed. That's pi's error to report, not ours to retry.
       if (ran) {
-        // Stop the workflow from driving more steps of a turn that's over here.
-        await connect()
-          .then(({ client }) => client.workflow.getHandle(turnWorkflow).terminate("turn failed"))
-          .catch(() => {});
-        throw err;
+        // Don't let the workflow drive more steps of a turn that's over here.
+        void terminate("turn ended in pi");
+        // The workflow failed, so the turn did. That's pi's error to report, not ours to retry.
+        if (err instanceof WorkflowFailedError) throw err;
+        // Lost the client mid-turn. The step in flight runs in this process, so let it finish
+        // rather than report a turn that may still be going as failed.
+        await inFlight?.catch(() => {});
+        throw new Error(
+          `Temporal became unreachable at ${cfg.address} mid-turn. The steps already recorded ` +
+            `are kept, but the turn did not finish.`,
+          { cause: err },
+        );
       }
-      // Temporal is unreachable. Run the turn as plain pi would, and warn, not fail.
+      // No step ran. Make sure none can, then run the turn as plain pi would, and warn.
+      local = true;
+      liveTurns.delete(turnId);
+      void terminate("turn ran without Temporal");
       await turn.run();
       // Warn once per session, not on every turn.
       if (!warnedNoTemporal) {
         warnedNoTemporal = true;
-        const where = `turns are not durable, Temporal is unreachable at ${cfg.address}`;
+        const why = err instanceof Error ? err.message : String(err);
+        const where = unreachable(err)
+          ? `turns are not durable, Temporal is unreachable at ${cfg.address}`
+          : `turns are not durable here: ${why}`;
         uiCtx?.ui.notify(where, "warning");
       }
     } finally {
@@ -302,12 +378,13 @@ export default function (pi: ExtensionAPI) {
         budget: cfg.budget,
       };
 
+      const sessionFile = sessionFileFor(cfg.sessionDir, task.sessionId);
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);
         // Ship the project from this directory. Workers never seed it, since the first activity
         // could land on any of them.
         if (cfg.shipTree) {
-          // Same guard as `start --project`. A home directory would ship `~/.ssh` and `~/.aws`.
+          // Same guard as `start` and `schedule`. A home directory would ship `~/.ssh`.
           const refusal = await worktree.projectRefusal(ctx.cwd);
           if (refusal) {
             ctx.ui.notify(
@@ -316,20 +393,24 @@ export default function (pi: ExtensionAPI) {
             );
             return;
           }
-          await worktree.capture(ctx.cwd, `${cfg.sessionDir}/${task.sessionId}.jsonl`, {
-            seed: true,
-          });
+          await worktree.capture(ctx.cwd, sessionFile, { seed: true });
         }
         const { client } = await connect();
         await client.workflow.signalWithStart(WORKFLOW_TYPE, {
           taskQueue: cfg.taskQueue,
           workflowId: workflowId(task.sessionId),
-          args: [task.sessionId, `${cfg.sessionDir}/${task.sessionId}.jsonl`, options],
+          args: [task.sessionId, sessionFile, options],
           signal: SIGNALS.submitPrompt,
           signalArgs: [prompt],
         });
       } catch (err) {
-        ctx.ui.notify(`could not reach Temporal at ${cfg.address}: ${String(err)}`, "error");
+        const why = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(
+          unreachable(err)
+            ? `could not reach Temporal at ${cfg.address}: ${why}`
+            : `could not start the background task: ${why}`,
+          "error",
+        );
         return;
       }
 
@@ -377,25 +458,18 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    if (turnWorker) {
-      const worker = await turnWorker;
-      turnWorker = undefined;
-      await worker.stop();
-    }
     if (watcher) {
       clearInterval(watcher);
       watcher = undefined;
     }
-    if (embedding) {
-      const worker = await embedding;
-      embedding = undefined;
-      // In-flight tasks aren't lost. The next worker to poll the queue picks them up.
-      await worker.stop();
-    }
-    if (connecting) {
-      const { connection } = await connecting;
-      connecting = undefined;
-      await connection.close();
-    }
+    const workers = [turnWorker, embedding];
+    turnWorker = undefined;
+    embedding = undefined;
+    // In-flight background tasks aren't lost. The next worker to poll the queue picks them up.
+    // A worker that failed to start or stop must not keep the rest from closing.
+    await Promise.allSettled(workers.map((worker) => worker?.then((w) => w.stop())));
+    const opened = connecting;
+    connecting = undefined;
+    await opened?.then(({ connection }) => connection.close()).catch(() => {});
   });
 }

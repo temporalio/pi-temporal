@@ -396,6 +396,31 @@ async function main() {
     .then(() => true, () => false);
   check("a finished session releases its directory", taken);
 
+  // A file ignored after it was captured stops shipping, though the shadow index still tracks it.
+  const ignoredLater = join(shared, "s10.jsonl");
+  const projectIgnA = join(root, "ign-a", "project");
+  const projectIgnB = join(root, "ign-b", "project");
+  await mkdir(projectIgnA, { recursive: true });
+  asHost(root, "ign-a");
+  await writeFile(join(projectIgnA, ".gitignore"), "node_modules\n");
+  await writeFile(join(projectIgnA, ".env"), "SECRET=old\n");
+  await worktree.capture(projectIgnA, ignoredLater, { seed: true });
+  asHost(root, "ign-b");
+  await worktree.ensure(projectIgnB, ignoredLater);
+  asHost(root, "ign-a");
+  await writeFile(join(projectIgnA, ".gitignore"), "node_modules\n.env\n");
+  await writeFile(join(projectIgnA, ".env"), "SECRET=new\n");
+  await worktree.capture(projectIgnA, ignoredLater);
+  asHost(root, "ign-b");
+  await worktree.ensure(projectIgnB, ignoredLater);
+  const leaked = await read(join(projectIgnB, ".env"));
+  const rules = await read(join(projectIgnB, ".gitignore"));
+  check(
+    "a file ignored after it was captured stops shipping",
+    leaked !== "SECRET=new\n" && rules.includes(".env"),
+    { leaked, rules },
+  );
+
   // A default project dir is refused if it is home or lacks a repo or ignore file.
   const bare = await mkdtemp(join(tmpdir(), "pi-bare-"));
   const ignoring = await mkdtemp(join(tmpdir(), "pi-ignoring-"));

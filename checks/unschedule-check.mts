@@ -41,6 +41,8 @@ let firing: string | undefined;
 try {
   await mkdir(project);
   await writeFile(join(project, "seed.txt"), "the project\n");
+  // `schedule --project` refuses a directory with no ignore rules, since everything else ships.
+  await writeFile(join(project, ".gitignore"), "");
   await cli(["schedule", "check the project", "--every=1h", `--id=${id}`, `--project=${project}`]);
   const scheduled = client.schedule.getHandle(id);
   await scheduled.trigger();
