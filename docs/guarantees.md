@@ -98,8 +98,8 @@ With `PI_TEMPORAL_SHIP_TREE=1`, a shadow git repository captures each step’s p
 bundle in `<session>.jsonl.tree/`. A host restores the latest tree before running work. The
 shadow repository is local to the host and leaves the project’s own `.git` unchanged.
 
-- Only a host at the current tree tip may publish the next snapshot. A host that’s behind saves its
-  unshipped work in `<session>.jsonl.tree/salvage/` as a bundle (`worktree-check`).
+- Only a host at the current tree tip may publish the next snapshot. A host that’s behind saves
+  its unshipped work in `<session>.jsonl.tree/salvage/` as a bundle (`worktree-check`).
 - The client establishes the project through `start --project=` or `/background`. A
   Worker never adopts its own directory, since the first Activity lands on whichever Worker is
   free (`worktree-check`).
@@ -107,17 +107,17 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
   another Worker. If a started call’s Worker stops answering, the step is closed without it and
   the turn continues with the next step elsewhere. The closure is written to the shared
   directory, so anything the old host publishes for that step afterwards is refused
-  (`lost-host-check`, `migration-rejoin-check`). The closure stays until `forget` removes the
-  session’s tree store. A timed-out attempt has no lifetime bound, so later turns can’t make its
-  closure safe to drop.
+  (`lost-host-check`, `migration-rejoin-check`). A step the user stops is closed to its host
+  the same way. The closure stays until `forget` removes the session’s tree store. A timed-out
+  attempt has no lifetime bound, so later turns can’t make its closure safe to drop.
 - A directory is refused while a call that outlived its Activity may still write it. A marker
   records the call’s process. The host clears it only after checking the process and its process
   group, plus the cgroup on Linux. It also checks for processes with the exported name, working
-  directory, or open files in the directory. A reused PID doesn’t count as the original process. A directory the session
-  built from empty can be moved aside and rebuilt. That separates writes through inherited
-  working directories or open handles. A command that uses an absolute path can still reach the
-  replacement directory. `release-tree` clears a directory by hand (`quarantine-check`,
-  `quarantine-routing-check`, `docker/restart-check.sh`).
+  directory, or open files in the directory. A reused PID doesn’t count as the original process.
+  A directory the session built from empty can be moved aside and rebuilt. That separates writes
+  through inherited working directories or open handles. A command that uses an absolute path
+  can still reach the replacement directory. `release-tree` clears a directory by hand
+  (`quarantine-check`, `quarantine-routing-check`, `docker/restart-check.sh`).
 - One session owns each directory. It hands the directory back when it goes idle
   (`worktree-check`, `storage-repair-check`). It keeps the directory while a writer marker is
   live, even when the files match the last snapshot, since a tool can write after its turn ends.
@@ -133,6 +133,8 @@ session’s tree store, salvage included.
 - A process death between `turn_end`’s entries and the `pi.turn-end-dispatched` entry. No check
   pins that window.
 - Live-mode results that were in memory when the process died.
+- A tool still running on a Worker inside `pi` when you quit. `pi` waits a few seconds, then
+  abandons it, and its outcome is reported unknown.
 
 ## Running the checks
 

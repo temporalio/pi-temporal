@@ -43,8 +43,10 @@ $COMPOSE up -d temporal worker-a >/dev/null 2>&1 || { echo "stack failed to star
 hostA=$($COMPOSE exec -T worker-a hostname 2>/dev/null | tr -d '\r')
 [ -n "$hostA" ] && ok "worker A is up ($hostA)" || { bad "worker A came up"; exit 1; }
 
-# Pre-existing content, seeded on the client, since the client is what sends the project.
-$COMPOSE run --rm -T --entrypoint sh client -c 'echo seeded > /project/seed.txt' >/dev/null 2>&1
+# Pre-existing content, seeded on the client, since the client is what sends the project. The
+# client ships only a directory that a `.gitignore` or `.git` guards.
+$COMPOSE run --rm -T --entrypoint sh client \
+  -c 'echo seeded > /project/seed.txt && : > /project/.gitignore' >/dev/null 2>&1
 
 sid=$($COMPOSE run --rm -T client start --project=/project \
   "Use the bash tool to run exactly: echo CARRIED > /project/note.txt. Then reply DONE." \
@@ -52,7 +54,7 @@ sid=$($COMPOSE run --rm -T client start --project=/project \
 [ -n "$sid" ] && ok "a client started the session ($sid)" || { bad "no session"; exit 1; }
 
 # Wait for the turn, then confirm the file is on host A.
-$COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
+$COMPOSE run --rm -T client watch --timeout=600 "$sid" >/dev/null 2>&1
 wrote=$($COMPOSE exec -T worker-a sh -c 'cat /project/note.txt 2>&1' 2>/dev/null | tr -d '\r')
 case "$wrote" in
   CARRIED*) ok "worker A wrote the file" ;;
@@ -85,7 +87,7 @@ task="Use the bash tool to run exactly: cat /project/note.txt /project/seed.txt.
 task+="Report what it printed."
 $COMPOSE run --rm -T client start --project=/project "$task" \
   --session="$sid" >/dev/null 2>&1
-$COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
+$COMPOSE run --rm -T client watch --timeout=600 "$sid" >/dev/null 2>&1
 
 # Check B's disk, not the transcript, which still holds turn 1's output.
 landed=$($COMPOSE exec -T worker-b sh -c 'cat /project/note.txt 2>&1' 2>/dev/null | tr -d '\r')
@@ -105,15 +107,15 @@ sleep 8
 $COMPOSE run --rm -T client start --project=/project \
   "Use the bash tool to run exactly: echo SPREAD > /project/spread.txt. Then reply DONE." \
   --session="$sid" >/dev/null 2>&1
-$COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
+$COMPOSE run --rm -T client watch --timeout=600 "$sid" >/dev/null 2>&1
 $COMPOSE run --rm -T client start --project=/project \
   "Use the bash tool to run exactly: cat /project/spread.txt. Report what it printed." \
   --session="$sid" >/dev/null 2>&1
-$COMPOSE run --rm -T client watch "$sid" >/dev/null 2>&1
+$COMPOSE run --rm -T client watch --timeout=600 "$sid" >/dev/null 2>&1
 
 # Assert what the reading host saw. Checking both hosts' disks would flake, since nothing forces
 # a turn's activities to spread.
-read_back=$($COMPOSE run --rm -T client watch "$sid" 2>&1 | tr -d '\r')
+read_back=$($COMPOSE run --rm -T client watch --timeout=600 "$sid" 2>&1 | tr -d '\r')
 case "$read_back" in
   *"tool result: SPREAD"*)
     ok "with both hosts polling, the one that read it saw the other's work" ;;
