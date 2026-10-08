@@ -2,10 +2,11 @@
 // session record, and never lowers what the record already says. Needs neither a server nor a
 // model key.
 import assert from "node:assert/strict";
-import { mkdtemp, symlink } from "node:fs/promises";
+import { chmod, mkdtemp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { ApplicationFailure } from "@temporalio/common";
 import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 
@@ -54,12 +55,22 @@ assert.equal(latest()?.seconds, 5);
 console.log("PASS and never lowers what the record says");
 
 // A file that can't be read is not a missing one. The Activity fails, so Temporal retries it.
-// A link to itself, so `access` fails with ELOOP rather than ENOENT.
-const unreadable = join(dir, "loop.jsonl");
-await symlink(unreadable, unreadable);
-const failed = await retireSession({ sessionFile: unreadable, turn: "t1", sessionSeconds: 5 }).then(
+// A directory this user can't search, so the file system answers EACCES rather than ENOENT.
+await chmod(dir, 0o600);
+const failed = await retireSession({ sessionFile: file, turn: "t1", sessionSeconds: 5 }).then(
   () => "",
   (err: NodeJS.ErrnoException) => err.code ?? String(err),
 );
-assert.equal(failed, "ELOOP");
+await chmod(dir, 0o700);
+assert.equal(failed, "EACCES");
 console.log("PASS a session file that can't be read fails the retirement instead of skipping it");
+
+// A link is refused for good. It's no file of this session, and a retry would find it again.
+const loop = join(dir, "loop.jsonl");
+await symlink(loop, loop);
+const linked = await retireSession({ sessionFile: loop, turn: "t1", sessionSeconds: 5 }).then(
+  () => undefined,
+  (err: unknown) => err,
+);
+assert.ok(linked instanceof ApplicationFailure && linked.nonRetryable, String(linked));
+console.log("PASS a session file that is a link is refused without a retry");

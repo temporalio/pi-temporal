@@ -138,18 +138,19 @@ export function makeCoreActivities(options: CoreActivityOptions) {
     if (!/^[^/\\]+\.jsonl$/.test(basename(path))) return false;
     try {
       if (realpathSync(dirname(path)) !== root) return false;
-      // The session and what the core keeps beside it must be real files in the root. A link
-      // there would send its writes elsewhere. Input can't make one, but anything that writes the
-      // root can, as a tool on any host of a shared session directory. The check runs before the
-      // Activity does, so a link made after it still gets through. Only the agent's own open could
-      // close that gap, and making one needs that write access already.
-      const at = join(root, basename(path));
-      return SIBLINGS.every(
-        (suffix) => !lstatSync(at + suffix, { throwIfNoEntry: false })?.isSymbolicLink(),
-      );
     } catch {
       return false;
     }
+    // The session and what the core keeps beside it must be real files in the root. A link
+    // there would send its writes elsewhere. Input can't make one, but anything that writes the
+    // root can, as a tool on any host of a shared session directory. The check runs before the
+    // Activity does, so a link made after it still gets through. Only the agent's own open could
+    // close that gap, and making one needs that write access already.
+    // Any other error, as from a lost mount, goes up as is, so the attempt fails and is retried.
+    const at = join(root, basename(path));
+    return SIBLINGS.every(
+      (suffix) => !lstatSync(at + suffix, { throwIfNoEntry: false })?.isSymbolicLink(),
+    );
   };
   const inRoot = (path: string | undefined, what: string) => {
     if (path === undefined || direct(path)) return;
