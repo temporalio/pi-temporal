@@ -1,6 +1,6 @@
-// Checks that the session write guard fences off a writer that lost its lock. SIGSTOPs worker A
-// inside a model call, lets worker B reclaim the lock and finish the turn, then SIGCONTs A.
-// Asserts A's late append is refused and the file stays exactly as B left it.
+// Checks that the session write guard fences off a writer that was superseded. SIGSTOPs worker A
+// inside a model call, lets worker B take over with a later attempt and finish the turn, then
+// SIGCONTs A. Asserts A's late append is refused and the file stays exactly as B left it.
 //
 // Uses `faux-worker.mts` processes. Needs a Temporal server, no model key, and a minute or two.
 

@@ -1,4 +1,4 @@
-// Checks that a timed-out pinned attempt cannot publish over work shipped by another host. The
+// Checks that a timed-out host-queue attempt cannot publish over work shipped by another host. The
 // old attempt keeps running after its timeout. Asserts the step is not migrated and gets one
 // recovery seal instead.
 
@@ -6,8 +6,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeSteppedStep } from "../src/l2-step.js";
-import * as worktree from "../src/worktree.js";
+import { makeSteppedStep } from "../src/stepped-step.js";
+import * as worktree from "../src/tree/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-migration-rejoin-"));
 const oldData = process.env.PI_TEMPORAL_DATA;
@@ -57,7 +57,7 @@ try {
         return { done: true, retryAttempt: 0, finalText: "" };
       },
     },
-    pinnedTo: () => ({
+    onHost: () => ({
       runToolCall: async ({ call }) => {
         if (call.id !== "late") throw unclaimed;
         // A Temporal timeout settles the promise without stopping this body.
@@ -74,9 +74,11 @@ try {
     nonCancellable: async (body) => body(),
   });
 
-  await assert.rejects(step({
+  // The lost host's step is recorded and the turn goes on.
+  const carried = await step({
     sessionId: "session", sessionFile, promptId: "turn", text: "task", step: 1, retryAttempt: 0,
-  }), (error) => error === timeout);
+  });
+  assert.equal(carried.done, false);
   assert.equal(sharedCalls, 0, "a started attempt must not overlap a migrated batch");
   assert.equal(
     recoverySeals,

@@ -13,7 +13,7 @@ import {
   TEMPORAL_CREDENTIAL_VARS,
 } from "./config.js";
 import { createSessionWorker } from "./session-worker.js";
-import * as worktree from "./worktree.js";
+import * as worktree from "./tree/worktree.js";
 
 async function main() {
   const cfg = fromEnv();

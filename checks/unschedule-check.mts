@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
 import { makeActivities } from "../src/activities.js";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-unschedule-"));
 const project = join(root, "project");

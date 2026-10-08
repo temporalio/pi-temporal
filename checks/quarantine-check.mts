@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { ApplicationFailure } from "@temporalio/common";
 import { makeActivities } from "../src/activities.js";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const run = promisify(execFile);

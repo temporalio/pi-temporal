@@ -1,5 +1,7 @@
-// One writer at a time for a session file. Pi's session file is a tree, so two writers branch it
-// rather than corrupt it. Two attempts of the same activity can overlap after a stalled heartbeat.
+// One writer at a time for a project's tree store and for a host's project directory. Unlike the
+// session file, these are also written by clients and by hosts outside any Workflow, so there is
+// no Workflow to order them, and a lease stands in. Two attempts of the same activity can overlap
+// after a stalled heartbeat.
 //
 // A lease, not a fence. Callers must re-check ownership right before each write. The lock is a
 // directory of claims named by epoch. Taking over is an exclusive create of epoch N+1, and the
@@ -22,7 +24,7 @@ const MARGIN_MS = 10_000;
 
 // Needs an exclusive create that really excludes and coherent listings and mtimes. Checked on local
 // disk and one NFSv4 mount. NFSv3 and SMB are untested.
-const lockDir = (sessionFile: string) => `${sessionFile}.lock`;
+const lockDir = (path: string) => `${path}.lock`;
 // Epoch only, so two contenders for the same epoch compete on one path. The token goes inside.
 const claimName = (epoch: number) => String(epoch).padStart(8, "0");
 
@@ -67,14 +69,14 @@ async function scanClaims(dir: string): Promise<Claim[]> {
  * `ownedNow()` uses the last confirmed timestamp for synchronous append paths. Acquisition
  * timeout permits a later retry, not proof of liveness.
  */
-export async function withSessionLock<T>(
-  sessionFile: string,
+export async function withLease<T>(
+  path: string,
   body: (owned: () => Promise<boolean>, ownedNow: () => boolean) => Promise<T>,
   waitMs = 60_000,
   // Test hook: stall between reading claims and taking the next epoch, to reproduce the race.
   claimPauseMs = 0,
 ): Promise<T> {
-  const dir = lockDir(sessionFile);
+  const dir = lockDir(path);
   const token = randomUUID();
   const deadline = Date.now() + waitMs;
   let mine!: { readonly epoch: number; readonly name: string; readonly confirmedAt: number };

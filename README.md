@@ -44,8 +44,10 @@ cd /path/to/your/project
 /path/to/pi-temporal/scripts/run-pi.sh    # needs OPENAI_API_KEY or OPENAI_API_KEY_FILE
 ```
 
-Each live turn gets a `piLocalTurn` Workflow. Kill `pi` during a tool call, reopen it with
-`run-pi.sh -c`, and Pi records an unknown outcome for an interrupted call with no saved result.
+Each live turn gets a `piLocalTurn` Workflow, which gives it a record in Temporal and retries.
+The turn runs in `pi`'s own memory, so it can't move to another process. Kill `pi` during a tool
+call, reopen it with `run-pi.sh -c`, and Pi records an unknown outcome for an interrupted call
+with no saved result.
 
 Type `/background Use the bash tool to write hello into note.txt, then reply DONE.`
 The command returns while a Worker runs the turn. `/background-status` lists the tasks you're
@@ -122,7 +124,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_TEMPORAL_BUDGET_SESSION_TOKENS`, `_SECONDS` | tokens and wall clock per session | none |
 | `PI_SESSION_IDLE_TIMEOUT` | how long an idle session Workflow waits | `5 minutes` |
 | `PI_TEMPORAL_DATA` | host directory for shadow repos and markers | `~/.pi-temporal` |
-| `PI_TEMPORAL_DURABLE_TURNS` | `0` turns off the Workflow behind live turns | on |
+| `PI_TEMPORAL_LIVE_TURNS` | `0` runs live turns as plain pi, with no Workflow | on |
 | `PI_TEMPORAL_EMBEDDED_WORKER` | `0` when a standalone Worker (`npm run worker`) owns the queue | on |
 
 The hard deadline stops the Workflow from waiting for the call. An external command may keep

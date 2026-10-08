@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {

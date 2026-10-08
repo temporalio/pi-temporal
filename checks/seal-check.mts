@@ -59,12 +59,16 @@ interface Entry {
   id?: string;
   parentId?: string | null;
   customType?: string;
-  message?: { role?: string };
+  message?: { role?: string; content?: { text?: string }[] };
 }
 const entriesOf = (file: string): Entry[] => lines(file).map((line) => JSON.parse(line));
 const count = (entries: Entry[], match: (e: Entry) => boolean) => entries.filter(match).length;
 const custom = (type: string) => (e: Entry) => e.type === "custom" && e.customType === type;
 const role = (r: string) => (e: Entry) => e.type === "message" && e.message?.role === r;
+const resultTexts = (entries: Entry[]) =>
+  entries
+    .filter(role("toolResult"))
+    .map((e) => (e.message?.content ?? []).map((b) => b.text ?? "").join(""));
 /** One writer leaves a chain; two leave a branch, where two entries name the same parent. */
 const linear = (entries: Entry[]) =>
   entries.slice(2).every((e, i) => e.parentId === entries[i + 1].id);
@@ -248,8 +252,8 @@ async function main() {
       check("the session is one chain", linear(entries), shape);
     }
 
-    // A stop in whole-step mode lands inside `runStep`. The running call finishes, the next one
-    // never starts, and the seal records only what there is.
+    // A stop in whole-step mode lands inside `runStep`. The running call is stopped and reports it,
+    // the next one never starts, and the seal records both.
     {
       const s = scenario("whole-stop");
       dirs.push(s.dir);
@@ -277,14 +281,15 @@ async function main() {
       const entries = entriesOf(s.file);
       const shape = entries.map((e) => e.customType ?? e.message?.role ?? e.type);
       check(
-        "the call that had started finished, and the next one never started",
-        lines(files(s.dir).probesStarted).length === 1 && lines(files(s.dir).probes).length === 1,
+        "the call that had started was stopped, and the next one never started",
+        lines(files(s.dir).probesStarted).length === 1 && lines(files(s.dir).probes).length === 0,
         { started: lines(files(s.dir).probesStarted), finished: lines(files(s.dir).probes) },
       );
+      const texts = resultTexts(entries);
       check(
-        "the seal recorded both calls, the one that never ran as an unknown outcome",
-        count(entries, role("toolResult")) === 2,
-        shape,
+        "the seal recorded the stopped call's own report, and the other as not run",
+        texts.length === 2 && /was stopped/.test(texts[0]),
+        texts,
       );
       check(
         "and nothing ran after it: no second model call, no agent_before_settle",
@@ -292,6 +297,35 @@ async function main() {
         { modelCalls: lines(files(s.dir).modelCalls), settled: lines(files(s.dir).settled) },
       );
       check("the session is one chain", linear(entries), shape);
+    }
+
+    // In stepped mode the stop cancels the tool's own Activity. The Workflow waits for the tool to
+    // stop and report, so the seal records that report rather than an unknown outcome.
+    {
+      const s = scenario("stepped-stop");
+      dirs.push(s.dir);
+      writeFileSync(files(s.dir).slowProbe, "");
+      startWorker(s.queue, s.dir);
+      const { handle, finished } = await turn(s, "run one");
+      await until(
+        "the call to start",
+        () => lines(files(s.dir).probesStarted).length > 0,
+        60_000,
+      );
+      const stoppedAt = Date.now();
+      await handle.signal(SIGNALS.interrupt);
+      const answer = await finished();
+      const took = Date.now() - stoppedAt;
+      check("a stopped stepped turn reports the stop", answer?.outcome === "interrupted", answer);
+      check("without waiting for the tool to run out", took < 7_000, { took });
+      const texts = resultTexts(entriesOf(s.file));
+      check(
+        "the seal recorded the tool's own report of the stop",
+        lines(files(s.dir).probes).length === 0 &&
+          texts.length === 1 &&
+          /was stopped/.test(texts[0]),
+        texts,
+      );
     }
   } finally {
     for (const child of workers) child.kill("SIGKILL");

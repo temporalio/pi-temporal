@@ -74,7 +74,8 @@ try {
   );
   console.log("PASS a failed dispatch write blocks the effect");
 
-  // The workflow moves a pinned step only on `FAILED_BEFORE_CLAIM`. A claimed call must not say it.
+  // The workflow moves a step off its host queue only on `FAILED_BEFORE_CLAIM`. A claimed call must
+  // not say it.
   const cannotOpen = makeActivities({ projectDir: root }, {
     openSession: async () => {
       throw new Error("cannot open the session");
@@ -88,7 +89,7 @@ try {
   await assert.rejects(cannotOpen.runToolCall(input), (err: unknown) => !beforeClaim(err));
   console.log("PASS a call an earlier attempt claimed does not");
 
-  // A host refusing the project comes before the claim, so it also lets the pinned step move.
+  // A host refusing the project comes before the claim, so it also lets the host-queue step move.
   const refusing = makeActivities({ projectDir: root }, {
     openSession: async () => {
       throw ApplicationFailure.create({ message: "refused", type: "WorktreeQuarantined" });

@@ -25,6 +25,10 @@ Worker mode uses one `runStep` Activity per step by default. Live mode runs the 
 `runLocalTurn` Activity. With `PI_TEMPORAL_STEPPED=1`, the model call and seal each use an Activity,
 and every tool call gets its own Activity.
 
+Each Worker also polls a host queue of its own, a Task Queue only it listens on. A stepped step's
+tool calls and seal go to the host queue of the Worker that made the model call, since they use
+that host's project directory. Work nobody started there moves to the shared Task Queue.
+
 ## The rules
 
 The transcript decides what runs next. The Workflow counts steps and stops a turn at its step
@@ -41,23 +45,35 @@ finds only the claim reports an unknown outcome, instead of running a `git push`
 have landed. Claims outlive result cleanup, so a stalled attempt that wakes up late can’t be
 admitted again.
 
-A Worker may append to the transcript only while it holds the session lease. Every append goes
-through `setWriteGuard`. The lease assumes exclusive create and coherent reads on the shared
-directory. Its 50-second validity and 60-second reclaim windows allow for clock differences but
-don’t prove a bound. The guard stops the transcript write. It doesn’t stop a tool’s external
-effects, which is what the claim is for.
+A Worker may append to the transcript only while it holds the newest fence. The Workflow numbers
+every Activity that writes the transcript, and each attempt adds its own number, so a later run,
+Activity, or attempt sorts higher. A unit claims its number with an exclusive create in
+`<session>.jsonl.fence/`, and its write guard refuses every append once a higher number is there.
+A retry takes over at once, since Temporal already decided the earlier attempt is dead. No clocks
+or timers are involved, beyond a new run starting later than the old one by the server's clock.
+Tool calls never write the transcript. The guard stops the transcript write. It doesn’t stop a
+tool’s external effects, which is what the claim is for.
 
-The last released epoch stays on disk with an expired timestamp, so epochs only grow. A claim
-counts only while no newer epoch exists, so a contender that paused and recreated an old epoch
-backs off. A failed renewal doesn’t extend write permission. A failed read of a lease, a claim, a
-kept result, or a tree record doesn’t admit a writer.
+The fence is checked, not enforced by storage. An attempt that stalls between its check and its
+append can still land that one append. Opening a session can also repair a torn last line before
+any guard runs, and a tool call opens it with no claim, so a stalled tool attempt that opens late
+can write that one repair. It needs exclusive create and a directory listing that
+shows new files at once. On NFS, mount with `actimeo=0` (at least `acdirmin=0,acdirmax=0`).
 
-The lock directories outlive the session, `forget` included. They are `<session>.jsonl.lock`,
-`<session>.jsonl.tree/writers.lock`, and the host-local `trees/<hash>/tree.lock`. Each keeps one
+Tree shipping (`src/tree/`) keeps a lease, since clients and hosts write tree stores and project
+directories outside any Workflow. Its 50-second validity and 60-second reclaim windows allow for
+clock differences but don’t prove a bound. The last released epoch stays on disk with an expired
+timestamp, so epochs only grow. A claim counts only while no newer epoch exists, so a contender
+that paused and recreated an old epoch backs off. A failed renewal doesn’t extend write
+permission. A failed read of a lease, a claim, a kept result, or a tree record doesn’t admit a
+writer.
+
+The lock directories outlive the session, `forget` included. They are
+`<session>.jsonl.tree/writers.lock` and the host-local `trees/<hash>/tree.lock`. Each keeps one
 expired claim. Don’t delete them in cleanup scripts, or an epoch can start again from one.
 
 Stepped Worker tool calls have a 30-minute timeout per attempt by default.
-`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it, for host-pinned calls too. A host-pinned call’s
+`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it, for calls on a host queue too. A host-queue call’s
 total also has room for its queue wait. A timed-out call with a dispatch claim isn’t repeated,
 because its effects may already have happened.
 
@@ -72,12 +88,12 @@ model response.
 | Process dies between steps | Sealed entries stay. Reopening recovers. | Completed Activities replay. The retry reads the transcript. | `step-loop-check`, `detached-check` |
 | Process dies mid-tool | Unsealed results are lost. Unanswered calls report unknown. | A recovery seal records what it has, a claim without a result reports unknown, and the turn goes on elsewhere. | `pending-check`, `lost-host-check`, `detached-check` |
 | A seal dies after its writes | Not applicable | The retry on another Worker doesn’t write twice or re-run the turn-end hook. | `seal-check`, `interrupted-seal-check` |
-| Two attempts overlap | The agent admits one unit at a time. | The lease and write guard refuse a stale transcript write. They don’t fence a tool’s effects. | `session-lock-check`, `lock-gap-check`, `stall-check`, `fence-check` |
+| Two attempts overlap | The agent admits one unit at a time. | The fence and write guard refuse a stale transcript write. They don’t fence a tool’s effects. | `fence-check`, `lease-check`, `lock-gap-check`, `stall-check` |
 | A stale dispatch wakes after cleanup | No claims in this mode. | The claim is still there, so it isn’t admitted. | `stale-dispatch-check`, `dispatch-check` |
-| The user stops a turn | In-memory results are sealed if the process lives. | The unit that started finishes, the next doesn’t start, and the step is sealed. | `local-turn-check`, `seal-check`, `l2-step-check` |
+| The user stops a turn | In-memory results are sealed if the process lives. | A running tool or model call is stopped and reports it, the next unit doesn’t start, and the step is sealed with what each tool reported. | `local-turn-check`, `seal-check`, `stepped-step-check` |
 | A turn overspends | No bound. | Soft budgets stop at a boundary. The hard deadline cancels waiting. External commands may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
-| History grows | Step ceiling only. | Continue-as-New between turns. One huge turn can still hit limits. | `rollover-check` |
-| A deploy changes what a step schedules | Not applicable | Old histories replay under `patched()`. | `replay-check` |
+| History grows | Step ceiling only. | Continue-As-New between turns. One huge turn can still hit limits. | `continue-as-new-check` |
+| A deploy changes what a step schedules | Not applicable | Running sessions break on replay. Gate the change with `patched()`, or ship it as a new Worker Deployment Version. | `replay-check` |
 
 The model receives the unknown outcome and can inspect the effect before deciding what to do.
 There’s no general resolver for arbitrary commands. A later model request is a new dispatch,
@@ -85,12 +101,15 @@ so the model can still choose to repeat an action.
 
 ## Following a session
 
-`watch` and `running` query the Workflow and tail the session file. A query returns the current
-state or reports that the run is gone. If the query can’t reach a Worker, the follower keeps
-waiting through the restart. It doesn’t treat an unreachable run as finished.
+A prompt is an Update-with-start. The session refuses an empty prompt and runs a resent one once,
+by its prompt id. If no Worker accepts the Update within 10 seconds, the prompt goes as a Signal,
+which the server keeps until a Worker comes.
 
-A closed run isn’t read as a live turn. A session Workflow can stay open between turns, so the
-follower uses the reported turn state to decide when a turn has ended.
+`watch` tails the session file and waits on a `waitForQuiet` Update, which returns once nothing
+is running or queued. If no Worker can answer, the follower keeps waiting through the restart. It
+doesn’t treat an unreachable run as finished. A run that continues as new answers that it moved,
+and the follower asks the new run. `running` lists sessions with one List call and reads each
+one’s state from its memo.
 
 ## Moving the project
 

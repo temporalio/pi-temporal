@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fromEnv, modelApiKey } from "../src/config.js";
+import { connectionOptions, dropFromEnv, fromEnv, modelApiKey, preflight } from "../src/config.js";
 
 const dir = await mkdtemp(join(tmpdir(), "pi-config-"));
 const keyFile = join(dir, "key");
@@ -25,3 +25,13 @@ assert.equal(modelApiKey("openai"), "from-file");
 process.env.OPENAI_API_KEY = "direct";
 assert.equal(modelApiKey("openai"), "direct");
 console.log("PASS an empty key falls back to its file");
+
+// Half an mTLS pair would connect without the certificate. The variables are dropped once read, so
+// the refusal must not depend on them still being there.
+process.env.PI_TEMPORAL_TLS_CERT = keyFile;
+delete process.env.PI_TEMPORAL_TLS_KEY;
+const half = fromEnv();
+dropFromEnv(["PI_TEMPORAL_TLS_CERT"]);
+assert.throws(() => connectionOptions(half), /come as a pair/);
+assert.ok(preflight(half).some((problem) => /come as a pair/.test(problem)));
+console.log("PASS half an mTLS pair never connects");

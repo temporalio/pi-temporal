@@ -8,6 +8,7 @@
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
 import {
+  ActivityCancellationType,
   ActivityFailure,
   ApplicationFailure,
   CancellationScope,
@@ -15,7 +16,7 @@ import {
   log,
   proxyActivities,
 } from "@temporalio/workflow";
-import { dispatchStepCalls } from "./l2-step.js";
+import { dispatchStepCalls } from "./stepped-step.js";
 import { MAX_STEPS_PER_TURN, TURN_STOPPED } from "./protocol.js";
 import type {
   LocalModelCallResult,
@@ -49,6 +50,8 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
     // session resumes the turn.
     scheduleToStartTimeout: "1 minute",
     retry: { maximumAttempts: 3 },
+    // A stop waits for the running unit to stop and report, so its result is recorded.
+    cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
   } as const;
 
   // One set of options for every unit. The seal can run a provider retry and a compaction, so it

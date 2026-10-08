@@ -4,8 +4,18 @@
 export const WORKFLOW_TYPE = "piSession";
 export const WORKFLOW_ID_PREFIX = "pi-session-";
 // A tool call that failed before any attempt claimed it, so the tool never started and the
-// workflow may move a pinned step.
+// workflow may move a host-queue step.
 export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
+/** The Workflow's half of a fence: its run, and the Activity it is about to schedule. */
+export const fencePrefix = (runStartMs: number, seq: number) =>
+  `${String(runStartMs).padStart(13, "0")}.${String(seq).padStart(8, "0")}`;
+
+// The memo key a session keeps its state under, `{ state: "running" | "idle", queued }`.
+export const SESSION_MEMO = "piSession";
+
+// A tool call that failed once its claim was taken. Not retried, since every retry would find the
+// claim and only report an unknown outcome. History shows the failure, and the seal records it.
+export const FAILED_AFTER_CLAIM = "FailedAfterClaim";
 // A live tool call that failed because the user stopped the turn.
 export const TURN_STOPPED = "TurnStopped";
 
@@ -42,6 +52,28 @@ export const QUERIES = {
   turnState: "turnState",
 } as const;
 
+export const UPDATES = {
+  // Queue a prompt. Rejected when it's empty or the session already has it.
+  submit: "submit",
+  // Resolves once nothing is running or queued, or when the run hands over to a new one.
+  waitForQuiet: "waitForQuiet",
+} as const;
+
+// The failure type `submit` rejects a prompt with when the session already has it. A client that
+// retried after a lost answer reads it as accepted.
+export const DUPLICATE_PROMPT = "DuplicatePrompt";
+
+export interface Submitted {
+  // Prompts ahead of this one, the running turn included.
+  readonly ahead: number;
+}
+
+export interface Quiet {
+  // The run moved to a new one through Continue-As-New. Ask the session again.
+  readonly moved?: boolean;
+  readonly finished?: TurnState["finished"];
+}
+
 // What the session is doing, for outside watchers. The conversation itself is in the session file.
 export interface TurnState {
   // Prompts accepted but not started.
@@ -68,6 +100,8 @@ export interface PromptInput {
 }
 
 export interface RunStepInput extends PromptInput {
+  // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
+  readonly fence?: string;
   // Failed attempts of this step so far. The workflow keeps the count because the session is
   // rebuilt per activity and compaction can rewrite the transcript.
   readonly retryAttempt?: number;
@@ -103,10 +137,13 @@ export interface RunStepResult {
   readonly finalText: string;
   // This step's spend, for the turn budget.
   readonly spent?: Spend;
-  // Session total read off the record, so it survives rollovers, idle restarts, and other clients.
+  // Session total read off the record, so it survives Continue-As-New, idle restarts, and other
+  // clients.
   readonly total?: Spend;
   // The session's turn time so far, as the session record keeps it.
   readonly sessionSeconds?: number;
+  // The host queue of the Worker that ran this step's tools, when it has one.
+  readonly hostQueue?: string;
 }
 
 export interface SessionTurnOptions {
@@ -121,17 +158,23 @@ export interface SessionTurnOptions {
   readonly sessionDir?: string;
   // A project store copied into each scheduled session before its first activity.
   readonly template?: string;
-  // Queue carried across a rollover. It is the whole control state.
+  // Queue carried across Continue-As-New. It is the whole control state.
   readonly queued?: readonly PromptInput[];
-  // Spend carried across a rollover.
+  // Spend carried across Continue-As-New.
   readonly spent?: Spent;
-  // Last turn result carried across a rollover, so a client polling `turnState` still sees it.
+  // Last turn result carried across Continue-As-New, so a client polling `turnState` still sees it.
   readonly finished?: TurnState["finished"];
+  // Prompt ids the session has taken, newest last, so a resent prompt isn't run twice. Carried
+  // across Continue-As-New.
+  readonly seenPrompts?: readonly string[];
+  // Host queues of the Workers that held this session's project, carried across Continue-As-New.
+  // Each one is asked to hand its directory back when the session goes idle.
+  readonly hostQueues?: readonly string[];
   // Operator spend bound per turn. Off by default, since a bound that ends real work is a policy
   // call. `MAX_STEPS_PER_TURN` is a separate runaway guard.
   readonly budget?: TurnBudget;
-  // Roll over at this many history events, in addition to the server's suggestion. Also lets
-  // checks reach the rollover path.
+  // Continue-As-New at this many history events, in addition to the server's suggestion. Also lets
+  // checks reach that path.
   readonly maxHistory?: number;
   // Bound on one tool call in stepped mode. A call that crosses it is not re-run, because its
   // dispatch note says it started.
@@ -156,8 +199,8 @@ export interface ModelCallResult {
   // This worker's own queue. The rest of the step runs there, on the host that holds the project
   // directory. Absent when the worker has none, and the step uses the shared queue.
   //
-  // Only a dispatch nobody started may move off it, and only after every pinned sibling settled.
-  // A started attempt may still have a tool writing that directory.
+  // Only a dispatch nobody started may move off it, and only after every sibling on the host queue
+  // settled. A started attempt may still have a tool writing that directory.
   readonly queue?: string;
   // The model call's spend. A compacting seal reports its own.
   readonly spent?: Spend;
@@ -187,7 +230,20 @@ export interface ToolCallResult {
   readonly outcome: ToolCallOutcome;
 }
 
+/** What an idle session leaves behind when its run exits. */
+export interface RetireInput {
+  readonly sessionFile: string;
+  // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
+  readonly fence?: string;
+  // The last turn and the session's time after it, as the Workflow counted. Absent when no turn
+  // ran in this run or the one it continued from.
+  readonly turn?: string;
+  readonly sessionSeconds?: number;
+}
+
 export interface SealStepInput {
+  // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
+  readonly fence?: string;
   readonly sessionId: string;
   readonly sessionFile: string;
   // Which turn's kept results to read. See `ToolCallInput`.
@@ -221,7 +277,7 @@ export interface TurnBudget {
   // Opt-in.
   readonly hardSeconds?: number;
   // The same bounds for the whole session. Measured against the session record where the host
-  // reports it, otherwise the workflow's own count carried across rollovers.
+  // reports it, otherwise the workflow's own count carried across Continue-As-New.
   readonly sessionSeconds?: number;
   readonly sessionTokens?: number;
 }
