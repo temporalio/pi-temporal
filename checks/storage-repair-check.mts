@@ -158,6 +158,26 @@ async function forgetWaits() {
   assert.deepEqual(await fs.readdir(`${file}.tree`), ["writers.lock"]);
 }
 
+// A copy that stopped after its first tip must be finished by the next try, not taken as done.
+async function partialAdopt() {
+  const template = session("partial-template");
+  const file = session("partial-adopted");
+  await seed("partial-seed", template, "first\n");
+  await fs.writeFile(join(project("partial-seed"), "note.txt"), "second\n");
+  await worktree.capture(project("partial-seed"), template);
+  const from = `${template}.tree`;
+  const first = JSON.parse(await read(join(from, "tips", "00000001.json"))) as { bundle: string };
+  await fs.mkdir(join(`${file}.tree`, "tips"), { recursive: true });
+  await fs.copyFile(join(from, first.bundle), join(`${file}.tree`, first.bundle));
+  const tip = join("tips", "00000001.json");
+  await fs.copyFile(join(from, tip), join(`${file}.tree`, tip));
+  assert.equal(await worktree.adopt(template, file), true);
+  assert.equal((await worktree.tipOf(file))?.seq, 2);
+  asHost("partial-worker");
+  await worktree.ensure(project("partial-worker"), file);
+  assert.equal(await read(join(project("partial-worker"), "note.txt")), "second\n");
+}
+
 // A tool Activity that timed out can still be running after its Workflow closed. Its claim must
 // survive `forget`, or it runs the tool for a session that is gone.
 async function forgetKeepsClaims() {
@@ -211,7 +231,7 @@ async function unreadableTreeState() {
   const file = session("unreadable-tree");
   await seed("unreadable-tree-seed", file, "keep the tip\n");
   const dir = project("unreadable-tree-seed");
-  const tip = join(`${file}.tree`, "tip.json");
+  const tip = join(`${file}.tree`, "tips", "00000001.json");
   const saved = await fs.readFile(tip);
   await fs.writeFile(tip, "{ not json");
   await fs.writeFile(join(dir, "late.txt"), "not authorized\n");
@@ -288,6 +308,7 @@ const checks = {
   adoptedAfterForget,
   forgetWaits,
   forgetKeepsClaims,
+  partialAdopt,
   liveWriterRetirement,
   oldClosure,
   unreadableTreeState,

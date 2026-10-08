@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
+import * as worktree from "../src/worktree.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
@@ -121,8 +122,8 @@ try {
   const made = (await readdir(sessions)).find(
     (name) => name.startsWith(`schedule-${id}-`) && name.endsWith(".jsonl.tree"),
   );
-  const tip = join(sessions, made ?? "missing", "tip.json");
-  const tipBefore = await readFile(tip, "utf8").catch(() => "");
+  const template = join(sessions, (made ?? "missing").replace(/\.tree$/, ""));
+  const tipBefore = JSON.stringify((await worktree.tipOf(template)) ?? null);
   const before = (await readdir(sessions)).sort();
   await writeFile(join(project, "a.txt"), "second\n");
   const taken = await cli(["schedule", "t", "--every=1h", `--id=${id}`, `--project=${project}`],
@@ -136,8 +137,8 @@ try {
     before,
     after,
   });
-  const tipAfter = await readFile(tip, "utf8").catch(() => "");
-  check("the existing template is untouched", tipBefore !== "" && tipAfter === tipBefore, {
+  const tipAfter = JSON.stringify((await worktree.tipOf(template)) ?? null);
+  check("the existing template is untouched", tipBefore !== "null" && tipAfter === tipBefore, {
     tipBefore,
     tipAfter,
   });

@@ -100,6 +100,9 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
 
 - Only a host at the current tree tip may publish the next snapshot. A host that’s behind saves
   its unshipped work in `<session>.jsonl.tree/salvage/` as a bundle (`worktree-check`).
+- Each snapshot number gets one tip, created once and never replaced. A writer that stalls after
+  its lease check and wakes up after another host took over gets an error. It can't take the
+  session back to its older tree (`stale-tip-check`).
 - The client establishes the project through `start --project=` or `/background`. A
   Worker never adopts its own directory, since the first Activity lands on whichever Worker is
   free (`worktree-check`).
