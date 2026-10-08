@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 480" width="1280" height="480" role="img" aria-labelledby="title desc">
+  <title id="title">pi-temporal: agent turns that outlive their Worker</title>
+  <desc id="desc">One turn of a coding agent on Temporal. Worker A is killed while a tool runs. After the heartbeat timeout, Worker B seals the step with an unknown outcome instead of running the tool again. The model asks for the tool again, and the turn finishes on Worker C. The session Workflow records every step.</desc>
+  <defs>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#465A78" opacity="0.35"/>
+    </pattern>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .sans { font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .mono { font-family: "Noto Sans Mono", "SFMono-Regular", Menlo, Consolas, monospace; }
+      .lane { stroke: #465A78; stroke-width: 1; stroke-dasharray: 2 6; }
+      .box { fill: #1E2033; stroke: #C7D7FE; stroke-width: 1.2; }
+      .ok { fill: #1E2033; stroke: #59FDA0; stroke-width: 1.2; }
+      .label { fill: #F8FAFC; font-size: 13px; }
+      .lanelabel { fill: #7C8FB1; font-size: 13px; }
+      .note { fill: #7C8FB1; font-size: 12px; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="480" fill="#161723"/>
+  <rect width="1280" height="480" fill="url(#dots)"/>
+
+  <!-- Header -->
+  <text x="56" y="70" class="mono" fill="#59FDA0" font-size="13" letter-spacing="2">PI-TEMPORAL</text>
+  <text x="56" y="118" class="sans" fill="#FFFFFF" font-size="40" font-weight="300">Agent turns that <tspan fill="#59FDA0">outlive</tspan> their Worker</text>
+  <text x="56" y="152" class="sans" fill="#C7D7FE" font-size="17" font-weight="300">The Pi coding agent on Temporal, and a template for putting any coding agent there.</text>
+
+  <!-- Wordmark -->
+  <g transform="translate(1112, 64) scale(0.034) translate(-600, -600)">
+    <path fill="#FFFFFF" d="M651.14,517.35C642.02,449.03,618.94,392,583.49,392s-58.53,57.03-67.65,125.35c-68.32,9.12-125.35,32.2-125.35,67.65s57.04,58.53,125.35,67.65c9.12,68.31,32.2,125.35,67.65,125.35s58.53-57.04,67.65-125.35c68.32-9.12,125.35-32.2,125.35-67.65S719.45,526.47,651.14,517.35z M513.61,632.75c-65.43-9.45-103.590-31.08-103.59-47.75s38.16-38.3,103.59-47.75c-1.44,15.75-2.190,31.83-2.19,47.75C511.42,600.92,512.17,617.01,513.61,632.75z M583.49,411.53c16.67,0,38.3,38.16,47.75,103.59c-15.74-1.44-31.83-2.19-47.75-2.19s-32.01,0.75-47.75,2.19C545.19,449.69,566.82,411.53,583.49,411.53z M653.37,632.75c-3.22,0.47-16.43,2.02-19.77,2.35c-0.33,3.35-1.89,16.55-2.35,19.77c-9.45,65.43-31.08,103.59-47.75,103.59s-38.3-38.16-47.75-103.59c-0.46-3.22-2.02-16.43-2.35-19.77c-1.52-15.51-2.44-32.17-2.44-50.1s0.92-34.59,2.44-50.11c15.51-1.52,32.17-2.44,50.1-2.44s34.59,0.92,50.1,2.44c3.35,0.33,16.55,1.89,19.770,2.35c65.43,9.45,103.6,31.09,103.6,47.75S718.8,623.3,653.37,632.75z"/>
+  </g>
+  <text x="1136" y="70" class="sans" fill="#FFFFFF" font-size="18" font-weight="400">temporal</text>
+
+  <!-- Lane labels -->
+  <text x="56" y="219" class="mono" fill="#59FDA0" font-size="13">session Workflow</text>
+  <text x="56" y="279" class="mono lanelabel">Worker A</text>
+  <text x="56" y="335" class="mono lanelabel">Worker B</text>
+  <text x="56" y="391" class="mono lanelabel">Worker C</text>
+
+  <!-- Lanes -->
+  <line x1="200" y1="275" x2="1224" y2="275" class="lane"/>
+  <line x1="200" y1="331" x2="1224" y2="331" class="lane"/>
+  <line x1="200" y1="387" x2="1224" y2="387" class="lane"/>
+
+  <!-- The Workflow: one line through the whole turn -->
+  <line x1="200" y1="215" x2="1180" y2="215" stroke="#59FDA0" stroke-width="2" filter="url(#glow)"/>
+  <g fill="#59FDA0">
+    <circle cx="212" cy="215" r="4"/>
+    <circle cx="332" cy="215" r="4"/>
+    <circle cx="560" cy="215" r="4"/>
+    <circle cx="742" cy="215" r="4"/>
+    <circle cx="862" cy="215" r="4"/>
+    <circle cx="1002" cy="215" r="4"/>
+  </g>
+  <text x="446" y="203" class="mono note" text-anchor="middle">heartbeat timeout</text>
+
+  <!-- Worker A: model call, then a tool cut off with its Worker -->
+  <line x1="212" y1="219" x2="212" y2="261" stroke="#465A78" stroke-width="1"/>
+  <rect x="212" y="261" width="108" height="28" rx="6" class="box"/>
+  <text x="266" y="280" class="mono label" text-anchor="middle">model call</text>
+  <line x1="332" y1="219" x2="332" y2="261" stroke="#465A78" stroke-width="1"/>
+  <path d="M332 261 h96 l-6 7 l8 7 l-8 7 l6 7 h-96 a6 6 0 0 1 -6 -6 v-16 a6 6 0 0 1 6 -6 z" fill="#1E2033" stroke="#ED360E" stroke-width="1.2" transform="translate(6 0)"/>
+  <text x="384" y="280" class="mono label" text-anchor="middle">npm test</text>
+  <g stroke="#ED360E" stroke-width="2.5" stroke-linecap="round">
+    <line x1="452" y1="267" x2="466" y2="281"/>
+    <line x1="466" y1="267" x2="452" y2="281"/>
+  </g>
+  <text x="478" y="280" class="mono" fill="#ED360E" font-size="12">killed</text>
+
+  <!-- Worker B: seals the step without running the tool again, then asks the model -->
+  <line x1="560" y1="219" x2="560" y2="317" stroke="#465A78" stroke-width="1"/>
+  <rect x="560" y="317" width="170" height="28" rx="6" class="box"/>
+  <text x="645" y="336" class="mono label" text-anchor="middle">seal: unknown</text>
+  <line x1="742" y1="219" x2="742" y2="317" stroke="#465A78" stroke-width="1"/>
+  <rect x="742" y="317" width="108" height="28" rx="6" class="box"/>
+  <text x="796" y="336" class="mono label" text-anchor="middle">model call</text>
+
+  <!-- Worker C: the model asked for the tool again, and the turn answers -->
+  <line x1="862" y1="219" x2="862" y2="373" stroke="#465A78" stroke-width="1"/>
+  <rect x="862" y="373" width="128" height="28" rx="6" class="box"/>
+  <text x="926" y="392" class="mono label" text-anchor="middle">npm test</text>
+  <line x1="1002" y1="219" x2="1002" y2="373" stroke="#465A78" stroke-width="1"/>
+  <rect x="1002" y="373" width="122" height="28" rx="6" class="ok"/>
+  <text x="1063" y="392" class="mono label" text-anchor="middle">answer</text>
+  <g stroke="#59FDA0" stroke-width="2.5" stroke-linecap="round" fill="none">
+    <polyline points="1140,386 1147,393 1161,379"/>
+  </g>
+
+  <!-- Caption -->
+  <text x="56" y="446" class="sans" fill="#7C8FB1" font-size="15" font-weight="300">A tool cut off with its Worker never runs again in secret. The model hears its outcome is unknown and decides what to do next.</text>
+</svg>
