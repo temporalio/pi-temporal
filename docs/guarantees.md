@@ -100,6 +100,10 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
 
 - Only a host at the current tree tip may publish the next snapshot. A host that’s behind saves
   its unshipped work in `<session>.jsonl.tree/salvage/` as a bundle (`worktree-check`).
+- Each snapshot number gets one tip, created once and never replaced. A writer that stalls after
+  its lease check and wakes up after another host took over gets an error. It can't take the
+  session back to its older tree. `forget` starts a new set of tips, so such a writer can't bring
+  a forgotten session back either (`stale-tip-check`).
 - The client establishes the project through `start --project=` or `/background`. A
   Worker never adopts its own directory, since the first Activity lands on whichever Worker is
   free (`worktree-check`).
@@ -114,6 +118,9 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
   records the call’s process. The host clears it only after checking the process and its process
   group, plus the cgroup on Linux. It also checks for processes with the exported name, working
   directory, or open files in the directory. A reused PID doesn’t count as the original process.
+  A live call touches its marker every 10 seconds. A marker from another PID namespace, e.g.
+  before a container restart, counts as live until it goes quiet for 40 seconds. Children that
+  outlive such a call are not seen from the new namespace.
   A directory the session built from empty can be moved aside and rebuilt. That separates writes
   through inherited working directories or open handles. A command that uses an absolute path
   can still reach the replacement directory. `release-tree` clears a directory by hand

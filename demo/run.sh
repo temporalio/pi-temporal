@@ -51,7 +51,8 @@ command -v python3 >/dev/null || die "python3 is needed to read Temporal's histo
 
 case "$provider" in
   anthropic) key_var=ANTHROPIC_API_KEY ;;
-  *) key_var=OPENAI_API_KEY ;;
+  openai) key_var=OPENAI_API_KEY ;;
+  *) die "PI_TEMPORAL_PROVIDER must be openai or anthropic, not $provider" ;;
 esac
 file_var="${key_var}_FILE"
 if [ -z "${!key_var:-}" ]; then

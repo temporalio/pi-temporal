@@ -11,7 +11,12 @@ cd "$root"
 port="${TEMPORAL_PORT:-7233}"
 export TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:$port}"
 export PI_TEMPORAL_PROVIDER="${PI_TEMPORAL_PROVIDER:-openai}"
-export PI_MODEL="${PI_MODEL:-gpt-4o-mini}"
+case "$PI_TEMPORAL_PROVIDER" in
+  openai) key_var=OPENAI_API_KEY; default_model=gpt-4o-mini ;;
+  anthropic) key_var=ANTHROPIC_API_KEY; default_model=haiku ;;
+  *) echo "PI_TEMPORAL_PROVIDER must be openai or anthropic" >&2; exit 1 ;;
+esac
+export PI_MODEL="${PI_MODEL:-$default_model}"
 
 # Ours to delete only if we made it.
 made_project=""
@@ -20,9 +25,10 @@ if [ -z "${PI_PROJECT_DIR:-}" ]; then
   export PI_PROJECT_DIR="$made_project"
 fi
 
-# The worker reads `OPENAI_API_KEY_FILE` itself, so the key isn't copied into this env.
-if [ -z "${OPENAI_API_KEY:-}" ] && ! [ -f "${OPENAI_API_KEY_FILE:-}" ]; then
-  echo "set OPENAI_API_KEY, or OPENAI_API_KEY_FILE to a file holding one" >&2
+# The worker reads the key file itself, so the key isn't copied into this env.
+key_file_var="${key_var}_FILE"
+if [ -z "${!key_var:-}" ] && ! [ -f "${!key_file_var:-}" ]; then
+  echo "set $key_var, or $key_file_var to a file holding one" >&2
   exit 1
 fi
 

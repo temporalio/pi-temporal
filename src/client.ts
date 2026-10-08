@@ -2,7 +2,7 @@
 // signal-with-start: the first starts the per-session workflow, later ones join the running one.
 
 import { randomUUID } from "node:crypto";
-import { Client, Connection } from "@temporalio/client";
+import { Client, Connection, WorkflowNotFoundError } from "@temporalio/client";
 import { type Config, connectionOptions, fromEnv, sessionFileFor } from "./config.js";
 import { WORKFLOW_TYPE, workflowId } from "./protocol.js";
 import type { PromptInput, SessionTurnOptions } from "./protocol.js";
@@ -46,6 +46,22 @@ export async function submitPrompt(sessionId: string, text: string, promptId = r
     await connection.close();
   }
   return promptId;
+}
+
+/**
+ * Whether a session's Workflow exists. Undefined when nobody can say, such as when the server is
+ * unreachable. Only a definite false proves a start never landed.
+ */
+export async function sessionExists(
+  client: Client,
+  sessionId: string,
+): Promise<boolean | undefined> {
+  try {
+    await client.workflow.getHandle(workflowId(sessionId)).describe();
+    return true;
+  } catch (err) {
+    return err instanceof WorkflowNotFoundError ? false : undefined;
+  }
 }
 
 export async function interrupt(sessionId: string) {

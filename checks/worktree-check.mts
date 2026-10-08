@@ -5,7 +5,7 @@
 // Usage: npx tsx checks/worktree-check.mts
 
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import * as worktree from "../src/worktree.js";
@@ -157,25 +157,50 @@ async function main() {
   const kept = await readdir(join(`${sessionFile}.tree`, "salvage")).catch(() => [] as string[]);
   check("and the work it stranded is set aside", kept.length > 0, kept);
 
-  // A crash after renaming a bundle but before updating the tip leaves an orphan bundle. Every host
-  // computes the same next number, so refusing it would wedge the session everywhere.
+  // A crash after renaming a bundle but before claiming its tip leaves a bundle nothing names.
+  // Every host computes the same next number, so it must not wedge the session.
   const orphaned = join(shared, "s6.jsonl");
   const projectF = join(root, "f", "project");
+  const projectG = join(root, "g", "project");
   await mkdir(projectF, { recursive: true });
+  await mkdir(projectG, { recursive: true });
   asHost(root, "f");
   await writeFile(join(projectF, "one.txt"), "first\n");
   await worktree.capture(projectF, orphaned, { seed: true });
-  const tipBefore = await read(join(`${orphaned}.tree`, "tip.json"));
-  const notePath = (await heldNotePath(root, "f"))!;
-  const noteBefore = await read(notePath);
+  await writeFile(join(`${orphaned}.tree`, "00000002-dead.bundle"), "not a bundle");
+  await writeFile(join(`${orphaned}.tree`, "00000002.bundle"), "not a bundle either");
   await writeFile(join(projectF, "two.txt"), "second\n");
-  await worktree.capture(projectF, orphaned);
-  // Roll back tip and note to simulate that crash.
-  await writeFile(join(`${orphaned}.tree`, "tip.json"), tipBefore);
-  await writeFile(notePath, noteBefore);
-  await writeFile(join(projectF, "three.txt"), "third\n");
   const carriedOn = await worktree.capture(projectF, orphaned).then(() => true, () => false);
   check("a bundle nothing names does not wedge the session", carriedOn);
+  asHost(root, "g");
+  const restored = await worktree.ensure(projectG, orphaned).then(
+    async () => await read(join(projectG, "two.txt")),
+    (err: unknown) => String(err),
+  );
+  check("and a new host restores past it", restored === "second\n", restored);
+
+  // A store from before tips were one file each: a single `tip.json` and bundles named by number.
+  const legacy = join(shared, "legacy.jsonl");
+  const projectH = join(root, "h", "project");
+  const projectI = join(root, "i", "project");
+  await mkdir(projectH, { recursive: true });
+  await mkdir(projectI, { recursive: true });
+  asHost(root, "h");
+  await writeFile(join(projectH, "one.txt"), "first\n");
+  await worktree.capture(projectH, legacy, { seed: true });
+  const store = `${legacy}.tree`;
+  const { bundle, ...first } = JSON.parse(await read(join(store, "tips", "00000001.json")));
+  await rename(join(store, bundle), join(store, "00000001.bundle"));
+  await writeFile(join(store, "tip.json"), JSON.stringify(first));
+  await rm(join(store, "tips"), { recursive: true });
+  await writeFile(join(projectH, "two.txt"), "second\n");
+  await worktree.capture(projectH, legacy);
+  asHost(root, "i");
+  const continued = await worktree.ensure(projectI, legacy).then(
+    async () => (await read(join(projectI, "one.txt"))) + (await read(join(projectI, "two.txt"))),
+    (err: unknown) => String(err),
+  );
+  check("an older store carries on in the new layout", continued === "first\nsecond\n", continued);
 
   // Only a client seed may establish the project. Otherwise a worker's empty directory could become
   // the project and the real one would be refused forever.

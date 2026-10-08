@@ -109,12 +109,12 @@ type Block = { type?: string; id?: string };
 
 const blocksOf = (content: unknown) => (Array.isArray(content) ? (content as Block[]) : []);
 
-const recordedInTranscript = (messages: Msg[], callId: string) =>
-  messages.some(
-    (m) =>
-      m.role === "assistant" &&
-      blocksOf(m.content).some((b) => b.type === "toolCall" && b.id === callId),
-  );
+// Only the latest response. A provider can reuse a call id, and an older call with the same id is
+// not this step's call.
+const recordedInTranscript = (messages: Msg[], callId: string) => {
+  const latest = [...messages].reverse().find((m) => m.role === "assistant");
+  return blocksOf(latest?.content).some((b) => b.type === "toolCall" && b.id === callId);
+};
 
 /** The calls nothing answered yet, which is what prepareStep would settle. */
 const danglingCallIds = (messages: Msg[]) =>
@@ -188,19 +188,57 @@ export function makeActivities(
     }
   };
 
+  // The files are set aside either way, since they're the only record of what the tool did. A
+  // refusal by design (behind the tip, step closed) doesn't fail the activity. Anything else does
+  // when `retryable`, because the seal is the last capture before another worker reads the tip.
+  // A tool call's capture never fails the call: its result is kept, and the seal ships again.
   const shipTree = async (
     sessionFile: string,
     of: { readonly current?: worktree.Writer; readonly fence?: worktree.Fence } = {},
+    retryable = false,
   ) => {
     if (!opts.shipTree) return;
-    // Don't fail the step. The result is recorded and a retry would not re-run the tool. Set the
-    // files aside instead, since they are the only record of what the tool did.
     await worktree.capture(opts.projectDir, sessionFile, of).catch(async (err) => {
       console.error(`could not ship the project tree: ${String(err)}`);
       await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
         console.error(`and could not set it aside either: ${String(keepErr)}`);
       });
+      if (retryable && !worktree.isRefusal(err)) throw err;
     });
+  };
+
+  // The session's turn time lives in its record, like its token count, so a run woken after an
+  // idle exit still counts the turns before it. The Workflow's own count only spans one run.
+  const SESSION_SECONDS_ENTRY = "pi-temporal.session-seconds";
+  type Record = {
+    getBranch(): { type: string; customType?: string; data?: unknown }[];
+    appendCustomEntry(customType: string, data: unknown): string;
+  };
+  // Optional, because the checks' fake sessions keep no record. A real session always has one.
+  const managerOf = (session: AgentSession) =>
+    (session as unknown as { sessionManager?: Record }).sessionManager;
+  // The session's time before `turn`, from the latest total another turn wrote. This turn's own
+  // entries are skipped, so a step that runs again can't count the turn twice.
+  const secondsBefore = (session: AgentSession, turn: string): number | undefined => {
+    const branch = managerOf(session)?.getBranch() ?? [];
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
+      if (entry.type !== "custom" || entry.customType !== SESSION_SECONDS_ENTRY) continue;
+      const data = entry.data as { turn?: unknown; seconds?: unknown } | undefined;
+      if (data?.turn === turn) continue;
+      return typeof data?.seconds === "number" ? data.seconds : undefined;
+    }
+    return undefined;
+  };
+  // Every step writes the total so far, so a turn that's stopped, runs out of budget, or fails
+  // still counts up to its last step. Under the session lease, like any other append.
+  const recordSeconds = (session: AgentSession, turn: string, seconds: number | undefined) => {
+    if (seconds === undefined) return;
+    managerOf(session)?.appendCustomEntry(SESSION_SECONDS_ENTRY, { turn, seconds });
+  };
+  const withSeconds = (session: AgentSession, turn: string) => {
+    const seconds = secondsBefore(session, turn);
+    return seconds === undefined ? {} : { sessionSeconds: seconds };
   };
 
   // Session-wide billing, including compacted history, so the delta across one activity is its
@@ -317,6 +355,8 @@ export function makeActivities(
   }
 
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
+    // The step's own time goes into the session's, since the step that ends a turn records it.
+    const stepStartedAt = Date.now();
     // Tree shipping needs stepped mode's fences. Retrying can't fix a config mismatch.
     if (opts.shipTree) {
       throw ApplicationFailure.nonRetryable(
@@ -372,6 +412,11 @@ export function makeActivities(
           );
           const { done } = sealed;
           await session.waitForIdle();
+          const secondsSoFar = withSeconds(session, input.promptId);
+          if (input.sessionSeconds !== undefined) {
+            const seconds = input.sessionSeconds + (Date.now() - stepStartedAt) / 1000;
+            recordSeconds(session, input.promptId, seconds);
+          }
           const messages = session.state.messages as Msg[];
           const spent = spentSince(before, session);
           await shipTree(input.sessionFile);
@@ -384,6 +429,7 @@ export function makeActivities(
             finalText: done ? lastAssistantText(messages) : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
+            ...secondsSoFar,
           };
         } finally {
           session.dispose();
@@ -427,6 +473,7 @@ export function makeActivities(
             ...(opts.stepQueue === undefined ? {} : { queue: opts.stepQueue }),
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
+            ...withSeconds(session, input.promptId),
           };
         } finally {
           session.dispose();
@@ -509,7 +556,7 @@ export function makeActivities(
         // directory, since a timed-out attempt may still be running.
         if (opts.shipTree) await worktree.beginWrite(opts.projectDir, writer);
         const outcome = await session.runToolCall(input.call.id).finally(async () => {
-          if (opts.shipTree) await worktree.endWrite(opts.projectDir, input.call.id);
+          if (opts.shipTree) await worktree.endWrite(opts.projectDir, writer);
         });
         if (!outcome) return { outcome: "already-settled" };
 
@@ -581,11 +628,17 @@ export function makeActivities(
           });
           const { done } = sealed;
           await session.waitForIdle();
+          const secondsSoFar = withSeconds(session, input.turn);
+          recordSeconds(session, input.turn, input.sessionSeconds);
           // Kept results stay until the next step sweeps them, so a retried seal can read them.
           const answer = lastAssistantText(session.state.messages as Msg[]);
           // Ship after the seal, so the tree matches the transcript.
           if (!input.interrupted) {
-            await shipTree(input.sessionFile, { fence: { turn: input.turn, step: input.step } });
+            await shipTree(
+              input.sessionFile,
+              { fence: { turn: input.turn, step: input.step } },
+              true,
+            );
           }
           const spent = spentSince(before, session);
           const total = billed(session);
@@ -596,6 +649,7 @@ export function makeActivities(
             finalText: done ? answer : "",
             ...(spent ? { spent } : {}),
             ...(total ? { total } : {}),
+            ...secondsSoFar,
           };
         } finally {
           session.dispose();
@@ -610,10 +664,8 @@ export function makeActivities(
    * session. Also records the session as over, so other hosts can release theirs. */
   async function retireSession(input: { readonly sessionFile: string }): Promise<void> {
     if (!opts.shipTree) return;
-    const freed = await worktree.retire(opts.projectDir, input.sessionFile).catch((err) => {
-      console.warn(`could not hand back ${opts.projectDir}: ${String(err)}`);
-      return false;
-    });
+    // Thrown, so Temporal retries. The Workflow gives up quietly once retries run out.
+    const freed = await worktree.retire(opts.projectDir, input.sessionFile);
     if (freed) console.log(`handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
   }
 

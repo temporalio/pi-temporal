@@ -15,6 +15,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   access,
+  link,
   mkdir,
   readFile,
   readdir,
@@ -23,12 +24,14 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import * as pending from "./pending.js";
 import { withSessionLock } from "./session-lock.js";
 
 const execFileAsync = promisify(execFile);
@@ -45,6 +48,8 @@ interface Held {
   readonly tree: string;
   // The highest bundle this host has taken in, so a restore unbundles only newer ones.
   readonly seq?: number;
+  // Which store generation `seq` counts in. Numbers start again after `forget`. Absent means 0.
+  readonly generation?: number;
   // True only when this host built the directory from an empty one. Only those may be emptied
   // again: an adopted directory may hold ignored files nothing else has a copy of. Absent means no.
   readonly built?: boolean;
@@ -53,24 +58,104 @@ interface Held {
   readonly directory?: string;
 }
 
-// The newest state in the shared directory. `seq` is the order bundles must be unbundled in.
+// One published state. `seq` is the order bundles must be unbundled in.
 interface Tip {
   readonly tree: string;
   readonly commit: string;
   readonly seq: number;
+  // The bundle this state was published in. Absent in stores written before bundle names were
+  // unique, where it is `<seq>.bundle`.
+  readonly bundle?: string;
 }
 
+// Every tip is its own file, created once and never replaced. A lease check can't stop a stalled
+// holder's late write, but an exclusive create can. The late writer gets an error instead of
+// taking the session back to its older tree.
 const shareDir = (sessionFile: string) => `${sessionFile}.tree`;
-const tipPath = (sessionFile: string) => join(shareDir(sessionFile), "tip.json");
+// `forget` starts a new generation, with its own tips. A writer that stalled across it can only
+// add a tip to the generation it read, which nothing reads any more.
+const tipsDir = (sessionFile: string, generation: number) =>
+  join(shareDir(sessionFile), generation === 0 ? "tips" : `tips.${generation}`);
 // Zero-padded because the restore sorts these names lexically.
-const bundleName = (seq: number) => `${String(seq).padStart(8, "0")}.bundle`;
+const padded = (seq: number) => String(seq).padStart(8, "0");
+const tipFile = (sessionFile: string, generation: number, seq: number) =>
+  join(tipsDir(sessionFile, generation), `${padded(seq)}.json`);
+// The single tip of an older store. Read when there are no per-step tips yet.
+const legacyTipPath = (sessionFile: string) => join(shareDir(sessionFile), "tip.json");
+const legacyBundle = (seq: number) => `${padded(seq)}.bundle`;
+const bundleOf = (tip: Tip) => tip.bundle ?? legacyBundle(tip.seq);
+
+const generationOf = async (sessionFile: string) =>
+  (await readJson<{ generation?: number }>(forgottenPath(sessionFile)))?.generation ?? 0;
+
+const tipNames = async (sessionFile: string, generation: number) =>
+  (await listDir(tipsDir(sessionFile, generation)))
+    .filter((name) => /^\d{8}\.json$/.test(name))
+    .sort();
+
+/** The newest tip, or undefined when nothing was shipped. Exported for the checks. */
+export async function tipOf(sessionFile: string, generation?: number): Promise<Tip | undefined> {
+  generation ??= await generationOf(sessionFile);
+  // Compaction can drop the newest name between the listing and the read, so list again.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const newest = (await tipNames(sessionFile, generation)).at(-1);
+    if (!newest) {
+      return generation === 0 ? await readJson<Tip>(legacyTipPath(sessionFile)) : undefined;
+    }
+    const tip = await readJson<Tip>(join(tipsDir(sessionFile, generation), newest));
+    if (tip) return tip;
+  }
+  throw new Error(`the tips of ${sessionFile} keep changing while being read`);
+}
+
+// A restart bundle stands on its own, and compaction drops everything below it. A tip below the
+// newest restart is from a writer that stalled across the compaction, and its bundle needs
+// commits that are gone.
+const isRestart = (seq: number) => seq % COMPACT_EVERY === 0;
+
+const hasTip = async (sessionFile: string, generation: number) =>
+  (await tipNames(sessionFile, generation)).length > 0 ||
+  (generation === 0 &&
+    (await stat(legacyTipPath(sessionFile)).then(
+    () => true,
+    (err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") return false;
+        throw err;
+      },
+    )));
+
+/**
+ * Name `tip` as the session's state, unless a tip with its number exists. Written whole, then
+ * linked into place, so a reader never sees half of it and only one writer gets each number.
+ */
+async function claimTip(sessionFile: string, generation: number, tip: Tip): Promise<boolean> {
+  const path = tipFile(sessionFile, generation, tip.seq);
+  await mkdir(dirname(path), { recursive: true });
+  const scratch = `${path}.${scratchToken()}.writing`;
+  await writeFile(scratch, JSON.stringify(tip), "utf8");
+  try {
+    await link(scratch, path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    // Over NFS a resent link can report EEXIST for a link that landed, so look at what is there.
+    const there = await readJson<Tip>(path).catch(() => undefined);
+    return there !== undefined && bundleOf(there) === bundleOf(tip);
+  } finally {
+    // Never fail a claim that landed over its scratch file.
+    await rm(scratch, { force: true }).catch(() => {});
+  }
+}
 
 // Host-local, one shadow repository per project path.
 const treesRoot = () =>
   join(process.env.PI_TEMPORAL_DATA ?? join(homedir(), ".pi-temporal"), "trees");
 
+// Keyed and run by the absolute path. A relative one would name a different host directory per
+// cwd, and git, which runs in the directory and also names it as the work tree, would nest it.
 function hostDir(projectDir: string) {
-  return join(treesRoot(), createHash("sha256").update(projectDir).digest("hex").slice(0, 16));
+  const key = resolve(projectDir);
+  return join(treesRoot(), createHash("sha256").update(key).digest("hex").slice(0, 16));
 }
 
 const gitDir = (projectDir: string) => join(hostDir(projectDir), "git");
@@ -86,10 +171,7 @@ const forgottenPath = (sessionFile: string) => `${shareDir(sessionFile)}.forgott
 const isRetired = async (sessionFile: string) =>
   (await readJson<unknown>(retiredPath(sessionFile))) !== undefined ||
   ((await readJson<unknown>(forgottenPath(sessionFile))) !== undefined &&
-    await stat(tipPath(sessionFile)).then(
-      () => false,
-      (err: NodeJS.ErrnoException) => err.code === "ENOENT",
-    ));
+    !(await hasTip(sessionFile, await generationOf(sessionFile))));
 // A session doing work is not retired, whatever a marker from its last idle period says.
 const revive = (sessionFile: string) => rm(retiredPath(sessionFile), { force: true });
 // Two locks. The host-local one guards the directory and the shadow repository's index. The shared
@@ -97,16 +179,25 @@ const revive = (sessionFile: string) => rm(retiredPath(sessionFile), { force: tr
 const treeLockPath = (projectDir: string) => join(hostDir(projectDir), "tree");
 const sharedLockPath = (sessionFile: string) => join(shareDir(sessionFile), "writers");
 
-// Always in this order, to avoid deadlock. `owned` lets `capture` recheck the shared lease before
-// each write, since a stalled holder's lease can be reclaimed.
+// Always in this order, to avoid deadlock. A stalled holder can lose either lease, the directory's
+// or the session's tree store, so `owned` answers for both, and the body asks before each write.
 const withTreeLocks = <T>(
   projectDir: string,
   sessionFile: string,
   body: (owned: () => Promise<boolean>) => Promise<T>,
 ) =>
-  withSessionLock(treeLockPath(projectDir), () =>
-    withSessionLock(sharedLockPath(sessionFile), (owned) => body(owned)),
+  withSessionLock(treeLockPath(projectDir), (directoryOwned) =>
+    withSessionLock(sharedLockPath(sessionFile), (storeOwned) =>
+      body(async () => (await directoryOwned()) && (await storeOwned())),
+    ),
   );
+
+/** Throws once either tree lease is gone, so a stalled holder's late write can't land. */
+const stillHolding = async (owned: () => Promise<boolean>, what: string, where: string) => {
+  if (!(await owned())) {
+    throw new Error(`lost a tree lease before ${what}: another writer has ${where}`);
+  }
+};
 
 async function readJson<T>(path: string): Promise<T | undefined> {
   try {
@@ -153,11 +244,11 @@ const git = (projectDir: string, args: string[], input?: string) => {
     "git",
     ["--git-dir", gitDir(projectDir), "-c", "core.autocrlf=false", ...args],
     {
-      cwd: projectDir,
+      cwd: resolve(projectDir),
       maxBuffer: 64 * 1024 * 1024,
       env: {
         ...gitEnv(),
-        GIT_WORK_TREE: projectDir,
+        GIT_WORK_TREE: resolve(projectDir),
         // Fixed identity, so a capture doesn't depend on who runs it.
         GIT_AUTHOR_NAME: "pi-temporal",
         GIT_AUTHOR_EMAIL: "pi-temporal@localhost",
@@ -195,11 +286,15 @@ class WrongTree extends Error {}
 // is gone (see `insideBecause`). If it can't, `release-tree` clears it. Another host can still
 // serve the session meanwhile.
 const writersDir = (projectDir: string) => join(hostDir(projectDir), "writers");
-const writerPath = (projectDir: string, callId: string) =>
-  join(
+// Keyed by turn, step, and call. A call id is unique only within one response, and a later step
+// that reused it would otherwise overwrite, then clear, the marker of a tool that's still running.
+const writerPath = (projectDir: string, writer: Writer) => {
+  const key = `${writer.turn}\0${writer.step}\0${writer.callId}`;
+  return join(
     writersDir(projectDir),
-    `${createHash("sha256").update(callId).digest("hex").slice(0, 16)}.json`,
+    `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.json`,
   );
+};
 
 /** What a tool call is, for telling this step's writers from an earlier turn's. */
 export interface Writer {
@@ -223,8 +318,16 @@ export interface WriterNote extends Writer {
   readonly pidStartedAt?: string;
   // Containers can share a hostname but not pids, so a start time is only comparable in one ns.
   readonly pidNs?: string;
+  // How often a live writer touches its marker. The only sign of life a reader in another pid
+  // namespace can see, e.g. after a container restart.
+  readonly refreshMs?: number;
   readonly started: string;
 }
+
+const REFRESH_MS = 10_000;
+// Missed refreshes before a marker from another pid namespace counts as left behind.
+const QUIET_AFTER = 4;
+const refreshing = new Map<string, NodeJS.Timeout>();
 
 // In the environment so a tool's children inherit it and a scan can find them later. Fresh per
 // process, and set at load before anything is spawned.
@@ -427,7 +530,8 @@ async function samePids(note: WriterNote): Promise<boolean> {
 /** Mark a tool call as about to write this directory. `endWrite` clears it. */
 export async function beginWrite(projectDir: string, writer: Writer): Promise<void> {
   await mkdir(writersDir(projectDir), { recursive: true });
-  await writeJson(writerPath(projectDir, writer.callId), {
+  const path = writerPath(projectDir, writer);
+  await writeJson(path, {
     ...writer,
     host: hostname(),
     pid: process.pid,
@@ -437,12 +541,19 @@ export async function beginWrite(projectDir: string, writer: Writer): Promise<vo
     bootAt: bootAt(),
     ...((await startedAt()) === undefined ? {} : { pidStartedAt: await startedAt() }),
     ...((await pidNs()) === undefined ? {} : { pidNs: await pidNs() }),
+    refreshMs: REFRESH_MS,
     started: new Date().toISOString(),
   } satisfies WriterNote);
+  clearInterval(refreshing.get(path));
+  const touch = () => void utimes(path, new Date(), new Date()).catch(() => {});
+  refreshing.set(path, setInterval(touch, REFRESH_MS).unref());
 }
 
-export async function endWrite(projectDir: string, callId: string): Promise<void> {
-  await rm(writerPath(projectDir, callId), { force: true });
+export async function endWrite(projectDir: string, writer: Writer): Promise<void> {
+  const path = writerPath(projectDir, writer);
+  clearInterval(refreshing.get(path));
+  refreshing.delete(path);
+  await rm(path, { force: true });
 }
 
 /**
@@ -455,6 +566,8 @@ export function insideBecause(
   live: LiveHere | undefined,
   // Start time of whatever holds the pid now, when comparable with the marker's.
   pidStartedNow?: string,
+  // Set only when the writer was in another pid namespace: how long since its marker was touched.
+  quietMs?: number,
 ): string | undefined {
   // Two hosts sharing one data directory can't see each other's processes.
   if (note.host !== hostname()) return `it was written on ${note.host}, and this is ${hostname()}`;
@@ -467,7 +580,15 @@ export function insideBecause(
     note.pidStartedAt !== undefined &&
     pidStartedNow !== undefined &&
     pidStartedNow !== note.pidStartedAt;
-  if (running(note.pid) && !reused) return `pid ${note.pid} is still running`;
+  if (quietMs !== undefined && note.refreshMs !== undefined) {
+    // Its pid names nothing here, so ask whether its writer still touches the marker.
+    if (quietMs < note.refreshMs * QUIET_AFTER) {
+      const ago = Math.round(quietMs / 1000);
+      return `it ran in another pid namespace and touched its marker ${ago}s ago`;
+    }
+  } else if (running(note.pid) && !reused) {
+    return `pid ${note.pid} is still running`;
+  }
   // The writer is gone. Ask about what its children carry and where they stand, not about pids.
   if (live === undefined) return "this host could not be asked what is running on it";
   // Catches daemonized children, which leave the group but keep the environment.
@@ -499,9 +620,12 @@ async function writersHere(projectDir: string): Promise<(WriterNote & { because:
     const path = join(writersDir(projectDir), name);
     const note = await readJson<WriterNote>(path);
     if (!note) continue;
-    const comparable = note.pidStartedAt !== undefined && (await samePids(note));
-    const startedNow = comparable ? await startTimeOf(note.pid) : undefined;
-    const because = insideBecause(note, live, startedNow);
+    const same = await samePids(note);
+    const startedNow =
+      same && note.pidStartedAt !== undefined ? await startTimeOf(note.pid) : undefined;
+    const touched = same ? undefined : await stat(path).then((s) => s.mtimeMs, () => undefined);
+    const quiet = touched === undefined ? undefined : Math.max(0, Date.now() - touched);
+    const because = insideBecause(note, live, startedNow, quiet);
     if (because !== undefined) found.push({ ...note, because });
     else await rm(path, { force: true });
   }
@@ -510,6 +634,9 @@ async function writersHere(projectDir: string): Promise<(WriterNote & { because:
 
 /** Thrown when a directory is refused because a writer from an earlier step never came back. */
 export class Quarantined extends Error {}
+
+/** A refusal by design, as opposed to a failure that a retry can fix. */
+export const isRefusal = (err: unknown) => err instanceof WrongTree || err instanceof Quarantined;
 
 /**
  * Refuse a directory a writer from another step may still be inside. The current step's own
@@ -655,12 +782,27 @@ async function treeHere(projectDir: string) {
 
 // Unbundles what this host has not taken in, in order, since each names the previous as a
 // prerequisite. git accepts a bundle whose commits are already here, so any failure is real.
-async function ingest(projectDir: string, sessionFile: string, from = 0) {
+// Only bundles a tip names. One no tip names is from a writer that lost its race or died.
+async function ingest(projectDir: string, sessionFile: string, generation: number, from = 0) {
   await ensureShadow(projectDir);
-  const names = (await listDir(shareDir(sessionFile)))
-    .filter((name) => name.endsWith(".bundle"))
-    .filter((name) => Number.parseInt(name, 10) > from)
-    .sort();
+  const chosen = new Map<number, string>();
+  // An older store names its bundles by number alone, and only those up to its tip are real.
+  const legacy = generation === 0 ? await readJson<Tip>(legacyTipPath(sessionFile)) : undefined;
+  for (const name of await listDir(shareDir(sessionFile))) {
+    const seq = Number.parseInt(name, 10);
+    if (/^\d{8}\.bundle$/.test(name) && seq <= (legacy?.seq ?? 0)) chosen.set(seq, name);
+  }
+  const numbered = (await tipNames(sessionFile, generation)).map((n) => Number.parseInt(n, 10));
+  const floor = Math.max(0, ...numbered.filter(isRestart));
+  for (const seq of numbered) {
+    if (seq <= from || seq < floor) continue;
+    const tip = await readJson<Tip>(tipFile(sessionFile, generation, seq));
+    if (tip) chosen.set(tip.seq, bundleOf(tip));
+  }
+  const names = [...chosen]
+    .filter(([seq]) => seq > from && seq >= floor)
+    .sort(([a], [b]) => a - b)
+    .map(([, name]) => name);
   for (const name of names) {
     await git(projectDir, ["bundle", "unbundle", join(shareDir(sessionFile), name)]).catch(
       (err: Error) => {
@@ -673,15 +815,24 @@ async function ingest(projectDir: string, sessionFile: string, from = 0) {
 // Every this many captures, a self-contained bundle restarts the chain and older ones are dropped.
 const COMPACT_EVERY = 40;
 
-// Only bundles. `salvage/` and the tip stay.
-async function dropBundlesBefore(dir: string, seq: number) {
-  const names = (await readdir(dir).catch(() => [] as string[])).filter((name) =>
-    name.endsWith(".bundle"),
-  );
-  for (const name of names) {
-    if (Number.parseInt(name, 10) < seq) await rm(join(dir, name), { force: true });
+// Bundles and tips older than a restart bundle, which stands on its own. `salvage/` stays.
+async function dropBefore(sessionFile: string, generation: number, seq: number) {
+  const dir = shareDir(sessionFile);
+  for (const name of await listDir(dir)) {
+    if (name.endsWith(".bundle") && Number.parseInt(name, 10) < seq) {
+      await rm(join(dir, name), { force: true });
+    }
   }
+  for (const name of await tipNames(sessionFile, generation)) {
+    if (Number.parseInt(name, 10) >= seq) continue;
+    await rm(join(tipsDir(sessionFile, generation), name), { force: true });
+  }
+  await rm(legacyTipPath(sessionFile), { force: true });
 }
+
+// Where a restore starts. A note from an older generation counts from the start of this one.
+const takenIn = (held: Held | undefined, generation: number) =>
+  (held?.generation ?? 0) === generation ? (held?.seq ?? 0) : 0;
 
 // Commits the directory and publishes it. The caller has already checked it may.
 async function publish(
@@ -691,16 +842,18 @@ async function publish(
   tree: string,
   built: boolean | undefined,
   owned: () => Promise<boolean>,
+  // Read with `tip`, so a `forget` in between can't put this tip in the new generation.
+  generation: number,
 ) {
-  // A stalled holder's lease can be reclaimed, and its late writes would clobber the new holder's
-  // bundle or tip. Checked before each write. Not atomic, so this only narrows the window.
+  // A stalled holder's lease can be reclaimed. This check stops most of its late writes, and the
+  // exclusive tip claim stops the rest.
   const stillHeld = async (what: string) => {
     if (await owned()) return;
     throw new Error(`lost the tree-store lease before ${what}: another writer has ${sessionFile}`);
   };
   const seq = (tip?.seq ?? 0) + 1;
   // A restart bundle is a root commit with the whole tree, so older bundles can be dropped.
-  const restart = seq % COMPACT_EVERY === 0;
+  const restart = isRestart(seq);
   const parent = tip && !restart ? ["-p", tip.commit] : [];
   const commit = (
     await git(projectDir, ["commit-tree", tree, ...parent, "-m", `pi-temporal ${tree.slice(0, 8)}`])
@@ -710,44 +863,39 @@ async function publish(
 
   const dir = shareDir(sessionFile);
   await mkdir(dir, { recursive: true });
-  // The number is taken. If the tip is at or past it, another writer got ahead, so refuse.
-  // Otherwise a writer died before naming its bundle as the tip. Drop that orphan, or every host
-  // wedges on it. The shared lease is what makes this safe.
-  if ((await readdir(dir).catch(() => [] as string[])).includes(bundleName(seq))) {
-    const now = await readJson<Tip>(tipPath(sessionFile));
-    if ((now?.seq ?? 0) >= seq) {
-      throw new WrongTree(
-        `not shipping ${projectDir}: the session is already at bundle ${now?.seq ?? seq}`,
-      );
-    }
-    console.warn(
-      `dropping bundle ${seq} for ${sessionFile}: nothing names it and the tip is behind it`,
+  // Taken already, so another writer got ahead. Checked first to skip the work. The claim below
+  // is what decides.
+  if (await stat(tipFile(sessionFile, generation, seq)).then(() => true, () => false)) {
+    throw new WrongTree(
+      `not shipping ${projectDir}: the session is already past bundle ${seq - 1}`,
     );
-    await rm(join(dir, bundleName(seq)), { force: true });
   }
+  // Unique per writer, so no writer replaces or deletes a bundle a tip may name.
+  const bundle = `${padded(seq)}-${scratchToken()}.bundle`;
   // Scratch name and rename, so no host unbundles a half-written file.
-  const scratch = join(dir, `${bundleName(seq)}.${scratchToken()}.writing`);
+  const scratch = join(dir, `${bundle}.${scratchToken()}.writing`);
   const incremental = tip && !restart ? ["--not", tip.commit] : [];
   await git(projectDir, ["bundle", "create", scratch, ref, ...incremental]);
-  await stillHeld("renaming its bundle into place");
-  await rename(scratch, join(dir, bundleName(seq)));
-
-  // Scratch first and the check right before the rename, so a lease lost meanwhile has only the
-  // rename left to race.
-  const tipScratch = `${tipPath(sessionFile)}.${scratchToken()}.writing`;
-  await writeFile(tipScratch, JSON.stringify({ tree, commit, seq } satisfies Tip), "utf8");
-  await stillHeld("naming the tip").catch(async (err: unknown) => {
-    await rm(tipScratch, { force: true });
-    throw err;
-  });
-  await rename(tipScratch, tipPath(sessionFile));
-  await rm(forgottenPath(sessionFile), { force: true });
+  await rename(scratch, join(dir, bundle));
+  // The lease check spares a writer that already lost it the claim. The claim is what stops a
+  // writer that loses it after the check.
+  const claimed = await stillHeld("naming the tip")
+    .then(() => claimTip(sessionFile, generation, { tree, commit, seq, bundle }))
+    .catch(async (err: unknown) => {
+      await rm(join(dir, bundle), { force: true });
+      throw err;
+    });
+  if (!claimed) {
+    await rm(join(dir, bundle), { force: true });
+    throw new WrongTree(`not shipping ${projectDir}: another writer published bundle ${seq} first`);
+  }
   // Only after the tip names the new bundle, or a crash leaves the session unrestorable.
-  if (restart) await dropBundlesBefore(dir, seq);
+  if (restart) await dropBefore(sessionFile, generation, seq);
   // `built` is carried over, never set here. Only a restore into an empty directory may set it.
   await writeJson(heldPath(projectDir, sessionFile), {
     tree,
     seq,
+    generation,
     built,
     session: sessionFile,
     directory: projectDir,
@@ -858,7 +1006,10 @@ export async function capture(
           `without this host, and what it produced is kept rather than published`,
       );
     }
-    const tip = await readJson<Tip>(tipPath(sessionFile));
+    // The generation first. Read after the tip, a `forget` in between would pair the old tip
+    // with the new generation.
+    const generation = await generationOf(sessionFile);
+    const tip = await tipOf(sessionFile, generation);
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
 
     if (!tip) {
@@ -877,10 +1028,12 @@ export async function capture(
     // After the refusals, so a capture that is refused leaves a retired session retired.
     await revive(sessionFile);
 
+    // The shadow index is a local write too, so it waits for the leases as well.
+    await stillHolding(owned, "capturing", projectDir);
     const tree = await treeHere(projectDir);
     if (tip?.tree === tree) return;
-    if (tip) await ingest(projectDir, sessionFile, held?.seq ?? 0);
-    await publish(projectDir, sessionFile, tip, tree, held?.built, owned);
+    if (tip) await ingest(projectDir, sessionFile, generation, takenIn(held, generation));
+    await publish(projectDir, sessionFile, tip, tree, held?.built, owned, generation);
   });
 }
 
@@ -893,7 +1046,7 @@ export async function ensure(
   sessionFile: string,
   current?: Writer,
 ): Promise<void> {
-  await withTreeLocks(projectDir, sessionFile, async () => {
+  await withTreeLocks(projectDir, sessionFile, async (owned) => {
     // Before any restore, or a stray writer's next capture would look current. Moving the
     // directory aside keeps a writer's relative paths away from the new one. Absolute paths still
     // reach it, so the move narrows the risk and doesn't close it.
@@ -908,7 +1061,8 @@ export async function ensure(
       );
     });
     // Read inside the lock, or a concurrent capture could move the tip under us.
-    const tip = await readJson<Tip>(tipPath(sessionFile));
+    const generation = await generationOf(sessionFile);
+    const tip = await tipOf(sessionFile, generation);
 
     // Before the tip check, so a session with nothing shipped can't run in another's directory.
     if (await heldByOthers(projectDir, sessionFile)) {
@@ -932,6 +1086,8 @@ export async function ensure(
     await revive(sessionFile);
     if (held?.tree === tip.tree) return;
 
+    // The writes start here, and the lock may have been taken over while the reads above waited.
+    await stillHolding(owned, "restoring", projectDir);
     if (held) {
       // Behind the tip with unshipped edits (a worker died before shipping). Publishing them would
       // revert the tip on every host, so set them aside and move to the tip.
@@ -940,15 +1096,17 @@ export async function ensure(
     }
 
     await mkdir(projectDir, { recursive: true });
-    await ingest(projectDir, sessionFile, held?.seq ?? 0);
+    await ingest(projectDir, sessionFile, generation, takenIn(held, generation));
 
-    // `-u --reset` also removes files the newer tree dropped.
+    // `-u --reset` also removes files the newer tree dropped. Last check before the files change.
+    await stillHolding(owned, "checking out the tip", projectDir);
     await git(projectDir, ["read-tree", "-u", "--reset", tip.tree]);
     // `!held` only gets here for an empty directory, so this host built it. Otherwise carry the
     // note's value as is, so an adopted checkout never becomes releasable.
     await writeJson(heldPath(projectDir, sessionFile), {
       tree: tip.tree,
       seq: tip.seq,
+      generation,
       built: held ? held.built : true,
       session: sessionFile,
       directory: projectDir,
@@ -994,23 +1152,33 @@ export async function retire(projectDir: string, sessionFile: string): Promise<b
  */
 export async function adopt(template: string, sessionFile: string): Promise<boolean> {
   return await withSessionLock(sharedLockPath(sessionFile), async () => {
-    if (await established(sessionFile)) return false;
-    const tip = await readJson<Tip>(tipPath(template));
+    const generation = await generationOf(sessionFile);
+    const fromGeneration = await generationOf(template);
+    const tip = await tipOf(template, fromGeneration);
+    // Done once the session is at the template's tip. A copy that stopped part way is finished.
+    const here = await tipOf(sessionFile, generation);
+    if (here && (!tip || here.seq >= tip.seq)) return false;
     if (!tip) throw new WrongTree(`no project was sent for ${template}`);
     const from = shareDir(template);
     const to = shareDir(sessionFile);
     await mkdir(to, { recursive: true });
-    for (const name of (await readdir(from).catch(() => [] as string[])).filter((n) =>
-      n.endsWith(".bundle"),
-    )) {
+    // Strict, so a template that can't be read isn't copied as one with no bundles.
+    for (const name of (await listDir(from)).filter((n) => n.endsWith(".bundle"))) {
       // Scratch name, so no host unbundles a half-copied file.
       const scratch = join(to, `${name}.${scratchToken()}.writing`);
       await writeFile(scratch, await readFile(join(from, name)));
       await rename(scratch, join(to, name));
     }
-    // Last, so a partial copy never leaves a tip naming a missing bundle.
-    await writeJson(tipPath(sessionFile), tip);
-    await rm(forgottenPath(sessionFile), { force: true });
+    // Last and oldest first, so a partial copy never leaves a tip naming a missing bundle, and
+    // the newest tip shows up only once every older one is there.
+    const tips: Tip[] = [];
+    for (const name of await tipNames(template, fromGeneration)) {
+      const older = await readJson<Tip>(join(tipsDir(template, fromGeneration), name));
+      if (older && older.seq < tip.seq) tips.push(older);
+    }
+    for (const each of [...tips, tip]) {
+      await claimTip(sessionFile, generation, { ...each, bundle: bundleOf(each) });
+    }
     return true;
   });
 }
@@ -1062,7 +1230,7 @@ export async function sweep(): Promise<number> {
  * again, since its copy is older than the tip.
  */
 export const established = async (sessionFile: string) =>
-  (await readJson<Tip>(tipPath(sessionFile))) !== undefined;
+  (await tipOf(sessionFile)) !== undefined;
 
 /**
  * Salvage this host's directory without touching the tip, for a caller that could not ship.
@@ -1078,14 +1246,18 @@ export async function setAside(projectDir: string, sessionFile: string): Promise
  */
 export async function forget(sessionFile: string, projectDir?: string): Promise<void> {
   const drop = async () => {
-    await writeJson(forgottenPath(sessionFile), { at: new Date().toISOString() });
+    // Kept for good. It names the generation every later reader and writer uses.
+    const generation = (await generationOf(sessionFile)) + 1;
+    await writeJson(forgottenPath(sessionFile), { at: new Date().toISOString(), generation });
     for (const name of await readdir(shareDir(sessionFile))) {
       // Keep the held lock, or another writer gets in mid-delete.
       if (name === "writers.lock") continue;
       await rm(join(shareDir(sessionFile), name), { recursive: true, force: true });
     }
     if (projectDir) await rm(heldPath(projectDir, sessionFile), { force: true });
-    await rm(`${sessionFile}.pending`, { recursive: true, force: true });
+    // Results only. A timed-out tool Activity can outlive its Workflow, and its dispatch note is
+    // what stops it running the tool after the session is gone.
+    await pending.sweepResults(sessionFile);
   };
   if (projectDir) await withTreeLocks(projectDir, sessionFile, drop);
   else await withSessionLock(sharedLockPath(sessionFile), drop);

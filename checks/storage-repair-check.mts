@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as pending from "../src/pending.js";
 import * as worktree from "../src/worktree.js";
 import { withSessionLock } from "../src/session-lock.js";
 
@@ -113,19 +114,7 @@ async function adoptedAfterForget() {
   const file = session("adopted");
   await seed("adopt-seed", template, "live session\n");
   await worktree.forget(file);
-  const marker = `${file}.tree.forgotten.json`;
-  const originalRm = fs.rm;
-  fs.rm = async (path, opts) => {
-    if (path === marker) throw new Error("injected failure after establishment");
-    return originalRm(path, opts);
-  };
-  syncBuiltinESMExports();
-  try {
-    await assert.rejects(worktree.adopt(template, file), /injected failure/);
-  } finally {
-    fs.rm = originalRm;
-    syncBuiltinESMExports();
-  }
+  assert.equal(await worktree.adopt(template, file), true);
   assert.equal(await worktree.established(file), true);
   asHost("adopt-worker");
   await worktree.ensure(project("adopt-worker"), file);
@@ -157,6 +146,41 @@ async function forgetWaits() {
   assert.deepEqual(await fs.readdir(`${file}.tree`), ["writers.lock"]);
 }
 
+// A copy that stopped after its first tip must be finished by the next try, not taken as done.
+async function partialAdopt() {
+  const template = session("partial-template");
+  const file = session("partial-adopted");
+  await seed("partial-seed", template, "first\n");
+  await fs.writeFile(join(project("partial-seed"), "note.txt"), "second\n");
+  await worktree.capture(project("partial-seed"), template);
+  const from = `${template}.tree`;
+  const first = JSON.parse(await read(join(from, "tips", "00000001.json"))) as { bundle: string };
+  await fs.mkdir(join(`${file}.tree`, "tips"), { recursive: true });
+  await fs.copyFile(join(from, first.bundle), join(`${file}.tree`, first.bundle));
+  const tip = join("tips", "00000001.json");
+  await fs.copyFile(join(from, tip), join(`${file}.tree`, tip));
+  assert.equal(await worktree.adopt(template, file), true);
+  assert.equal((await worktree.tipOf(file))?.seq, 2);
+  asHost("partial-worker");
+  await worktree.ensure(project("partial-worker"), file);
+  assert.equal(await read(join(project("partial-worker"), "note.txt")), "second\n");
+}
+
+// A tool Activity that timed out can still be running after its Workflow closed. Its claim must
+// survive `forget`, or it runs the tool for a session that is gone.
+async function forgetKeepsClaims() {
+  const file = session("forget-claims");
+  await seed("forget-claims-seed", file, "claimed\n");
+  assert.equal(await pending.noteDispatch(file, "turn-1", 1, "claimed"), true);
+  await pending.keepResult(file, "turn-1", 1, "claimed", {
+    result: { content: [], details: undefined },
+    isError: false,
+  } as never);
+  await worktree.forget(file);
+  assert.equal(await pending.readResult(file, "turn-1", 1, "claimed"), undefined);
+  assert.equal(await pending.noteDispatch(file, "turn-1", 1, "claimed"), false);
+}
+
 async function liveWriterRetirement() {
   const file = session("live-writer");
   await seed("live-writer-seed", file, "keep this directory\n");
@@ -169,7 +193,7 @@ async function liveWriterRetirement() {
     assert.equal(await worktree.sweep(), 0);
     assert.equal(await read(join(dir, "note.txt")), "keep this directory\n");
   } finally {
-    await worktree.endWrite(dir, "live");
+    await worktree.endWrite(dir, { turn: "prompt", step: 1, callId: "live" });
   }
   assert.equal(await worktree.sweep(), 1, "retirement can release a directory after its tool ends");
 }
@@ -195,7 +219,7 @@ async function unreadableTreeState() {
   const file = session("unreadable-tree");
   await seed("unreadable-tree-seed", file, "keep the tip\n");
   const dir = project("unreadable-tree-seed");
-  const tip = join(`${file}.tree`, "tip.json");
+  const tip = join(`${file}.tree`, "tips", "00000001.json");
   const saved = await fs.readFile(tip);
   await fs.writeFile(tip, "{ not json");
   await fs.writeFile(join(dir, "late.txt"), "not authorized\n");
@@ -271,6 +295,8 @@ const checks = {
   forgottenRetirement,
   adoptedAfterForget,
   forgetWaits,
+  forgetKeepsClaims,
+  partialAdopt,
   liveWriterRetirement,
   oldClosure,
   unreadableTreeState,

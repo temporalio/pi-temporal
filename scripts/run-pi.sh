@@ -23,16 +23,22 @@ export TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:$port}"
 
 # Pinned so tests don't depend on the TUI's selected model. The key must match the provider.
 export PI_TEMPORAL_PROVIDER="${PI_TEMPORAL_PROVIDER:-openai}"
-export PI_MODEL="${PI_MODEL:-gpt-4o-mini}"
+case "$PI_TEMPORAL_PROVIDER" in
+  openai) key_var=OPENAI_API_KEY; default_model=gpt-4o-mini ;;
+  anthropic) key_var=ANTHROPIC_API_KEY; default_model=haiku ;;
+  *) echo "PI_TEMPORAL_PROVIDER must be openai or anthropic" >&2; exit 1 ;;
+esac
+export PI_MODEL="${PI_MODEL:-$default_model}"
 
-if [ -z "${OPENAI_API_KEY:-}" ]; then
-  key_file="${OPENAI_API_KEY_FILE:-}"
+# pi reads the key from the environment, not from a file.
+if [ -z "${!key_var:-}" ]; then
+  key_file_var="${key_var}_FILE"
+  key_file="${!key_file_var:-}"
   [ -n "$key_file" ] && [ -f "$key_file" ] || {
-    echo "set OPENAI_API_KEY, or OPENAI_API_KEY_FILE to a file holding one" >&2
+    echo "set $key_var, or $key_file_var to a file holding one" >&2
     exit 1
   }
-  OPENAI_API_KEY="$(tr -d '[:space:]' < "$key_file")"
-  export OPENAI_API_KEY
+  export "$key_var=$(tr -d '[:space:]' < "$key_file")"
 fi
 
 exec node "$cli" -e "$root/extensions/temporal.ts" "$@"

@@ -27,6 +27,7 @@ import {
   MAX_STEPS_PER_TURN,
   QUERIES,
   SIGNALS,
+  sessionIdProblem,
   WORKFLOW_ID_PREFIX,
 } from "./protocol.js";
 import type {
@@ -151,6 +152,14 @@ export async function piSession(
       `session ${id} was started with no session file and no sessionDir`,
     );
   }
+  // A schedule id is the user's and becomes the file name here. Only an unsafe one reaches the
+  // patch, so runs with safe ids record nothing new.
+  const problem = sessionFile ? undefined : sessionIdProblem(id);
+  if (problem && patched("a-session-id-names-one-file")) {
+    throw ApplicationFailure.nonRetryable(
+      `session id ${JSON.stringify(id)} can't be used: ${problem}`,
+    );
+  }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   // Set per turn, since it reads that turn's spend. The step driver is built once.
@@ -249,6 +258,10 @@ export async function piSession(
     let cost = 0;
     // Session total from the record, as of the last step that reported it. Session bounds use it.
     let recorded: Spend | undefined;
+    // The session's turn time as its record keeps it. A run started after an idle exit has no
+    // `spent` from the run before, so the record is what carries the earlier turns.
+    let recordedSeconds: number | undefined;
+    const sessionSecondsBefore = () => Math.max(spent.seconds, recordedSeconds ?? 0);
     // True when the turn's own deadline cancelled it, not the user.
     let deadline = false;
     // Cancelled in `finally`. A scope's timers die only when the scope is cancelled, so without
@@ -289,7 +302,8 @@ export async function piSession(
             (b.seconds !== undefined && turnSeconds > b.seconds) ||
             (b.sessionTokens !== undefined &&
               (recorded?.tokens ?? spent.tokens + tokens) > b.sessionTokens) ||
-            (b.sessionSeconds !== undefined && spent.seconds + turnSeconds > b.sessionSeconds)
+            (b.sessionSeconds !== undefined &&
+              sessionSecondsBefore() + turnSeconds > b.sessionSeconds)
           );
         };
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
@@ -300,6 +314,7 @@ export async function piSession(
             step,
             retryAttempt,
             overflowRecoveryAttempted,
+            sessionSeconds: sessionSecondsBefore() + (Date.now() - startedAt) / 1000,
             ...prompt,
           };
           const result = await runTurnStep(input);
@@ -310,6 +325,7 @@ export async function piSession(
           tokens += result.spent?.tokens ?? 0;
           cost += result.spent?.cost ?? 0;
           recorded = result.total ?? recorded;
+          recordedSeconds = result.sessionSeconds ?? recordedSeconds;
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;
@@ -360,7 +376,7 @@ export async function piSession(
       // Counted here so failed and interrupted turns still count. The provider billed them.
       spent.tokens += tokens;
       spent.cost += cost;
-      spent.seconds += (Date.now() - startedAt) / 1000;
+      spent.seconds = sessionSecondsBefore() + (Date.now() - startedAt) / 1000;
       finished = { promptId: prompt.promptId, outcome, finalText, error, spent: { ...spent } };
     }
   }

@@ -30,6 +30,9 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 const steps = new Map<string, number>();
 // Billed totals per session file. Like the session file, this outlives a workflow run.
 const recorded = new Map<string, number>();
+// Turn time per session file, as the activities keep it. Each step writes its turn's total, and a
+// read skips the asking turn's own entries.
+const recordedSeconds = new Map<string, { turn: string; seconds: number }[]>();
 let tokensPerStep = 0;
 let secondsPerStep = 0;
 let answerAfter = Number.POSITIVE_INFINITY;
@@ -44,7 +47,14 @@ const activities = {
     while (Date.now() < gateUntil) await sleep(100);
     const billed = (recorded.get(input.sessionFile) ?? 0) + tokensPerStep;
     recorded.set(input.sessionFile, billed);
+    const entries = recordedSeconds.get(input.sessionFile) ?? [];
+    const secondsBefore = entries.filter((e) => e.turn !== input.promptId).at(-1)?.seconds;
+    if (input.sessionSeconds !== undefined) {
+      entries.push({ turn: input.promptId, seconds: input.sessionSeconds + secondsPerStep });
+      recordedSeconds.set(input.sessionFile, entries);
+    }
     return {
+      ...(secondsBefore === undefined ? {} : { sessionSeconds: secondsBefore }),
       done: taken >= answerAfter,
       retryAttempt: 0,
       finalText: taken >= answerAfter ? "answered" : "",
@@ -164,6 +174,42 @@ async function main() {
       "and a later run of that session is bounded by what the record says it spent",
       secondRun.finished?.outcome === "budget",
       secondRun.finished,
+    );
+
+    // The same for time. A run woken after an idle exit has no count of its own, so the earlier
+    // turns' time must come back from the record.
+    answerAfter = 2;
+    tokensPerStep = 0;
+    secondsPerStep = 1;
+    const slow = `${queue}-woken-slow-session`;
+    const slowFirst = await turn({ sessionSeconds: 2.5 }, slow, `${slow}-run-1`);
+    check(
+      "a turn of a fresh session inside its time answers",
+      slowFirst.finished?.outcome === "answered",
+      slowFirst.finished,
+    );
+    const slowSecond = await turn({ sessionSeconds: 2.5 }, slow, `${slow}-run-2`);
+    check(
+      "and a later run is bounded by the time the record says the session took",
+      slowSecond.finished?.outcome === "budget" && slowSecond.taken === 1,
+      slowSecond,
+    );
+
+    // A turn that never answered still took time. Its steps wrote it as they went.
+    answerAfter = Number.POSITIVE_INFINITY;
+    const stopped = `${queue}-woken-stopped-session`;
+    const stoppedFirst = await turn({ seconds: 2, sessionSeconds: 100 }, stopped, `${stopped}-1`);
+    check(
+      "a turn stopped by its own time bound",
+      stoppedFirst.finished?.outcome === "budget",
+      stoppedFirst.finished,
+    );
+    answerAfter = 2;
+    const stoppedSecond = await turn({ sessionSeconds: 2.5 }, stopped, `${stopped}-2`);
+    check(
+      "still counts toward the session in a later run",
+      stoppedSecond.finished?.outcome === "budget" && stoppedSecond.taken === 1,
+      stoppedSecond,
     );
 
     // `hardSeconds` is the only bound that interrupts a running step, like a user stop.
