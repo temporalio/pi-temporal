@@ -171,14 +171,14 @@ async function partialAdopt() {
 async function forgetKeepsClaims() {
   const file = session("forget-claims");
   await seed("forget-claims-seed", file, "claimed\n");
-  assert.equal(await pending.noteDispatch(file, "turn-1", 1, "claimed"), true);
+  assert.equal(await pending.claimDispatch(file, "turn-1", 1, "claimed"), true);
   await pending.keepResult(file, "turn-1", 1, "claimed", {
     result: { content: [], details: undefined },
     isError: false,
   } as never);
   await worktree.forget(file);
   assert.equal(await pending.readResult(file, "turn-1", 1, "claimed"), undefined);
-  assert.equal(await pending.noteDispatch(file, "turn-1", 1, "claimed"), false);
+  assert.equal(await pending.claimDispatch(file, "turn-1", 1, "claimed"), false);
 }
 
 async function liveWriterRetirement() {

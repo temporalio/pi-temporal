@@ -30,7 +30,7 @@ import { FAILED_AFTER_CLAIM, FAILED_BEFORE_CLAIM, fencePrefix } from "./protocol
 import { SHIP_TREE_NEEDS_STEPS } from "./config.js";
 import * as pending from "./pending.js";
 import * as worktree from "./tree/worktree.js";
-import { claimFence, fenceToken } from "./fence.js";
+import { takeFence, fenceToken } from "./fence.js";
 import { textOf } from "./messages.js";
 
 // Retry delay after a host refuses the project directory. Short, so the work finds a free host.
@@ -166,7 +166,7 @@ const noDispatchStarted = async (
 ) => {
   if (callIds.length === 0) return false;
   for (const callId of callIds) {
-    if (await pending.wasDispatched(file, turn, step, callId)) return false;
+    if (await pending.dispatchClaimed(file, turn, step, callId)) return false;
   }
   return true;
 };
@@ -228,7 +228,7 @@ export function makeActivities(
     }
     const fallback = attempt === undefined ? fencePrefix(Date.now(), 0) : fencePrefix(0, 0);
     const token = fenceToken(prefix ?? fallback, attempt ?? 1);
-    return await body(await claimFence(sessionFile, token));
+    return await body(await takeFence(sessionFile, token));
   };
 
   // The files are set aside either way, since they're the only record of what the tool did. A
@@ -278,7 +278,7 @@ export function makeActivities(
     return undefined;
   };
   // Every step writes the total so far, so a turn that's stopped, runs out of budget, or fails
-  // still counts up to its last step. Under the session lease, like any other append.
+  // still counts up to its last step. Fenced, like any other append.
   const recordSeconds = (session: AgentSession, turn: string, seconds: number | undefined) => {
     if (seconds === undefined) return;
     managerOf(session)?.appendCustomEntry(SESSION_SECONDS_ENTRY, { turn, seconds });
@@ -356,7 +356,7 @@ export function makeActivities(
   };
 
   /** Record the prompt, or settle what an earlier attempt left. Returns the answer when nothing is
-   * left to run. Only stepped mode has dispatch notes to tell interrupted calls from unstarted. */
+   * left to run. Only stepped mode has dispatch claims to tell interrupted calls from unstarted. */
   async function readyForStep(
     session: AgentSession,
     input: RunStepInput,
@@ -531,14 +531,14 @@ export function makeActivities(
     }
   }
 
-  // Typed only when no attempt left a dispatch note. An earlier attempt may still run the tool.
+  // Typed only when no attempt left a dispatch claim. An earlier attempt may still run the tool.
   const beforeClaim = async (err: unknown, input: ToolCallInput): Promise<unknown> => {
     // A refusal comes from `bringTree`, which always runs before the claim. Typed like any other
     // failure before the claim, so a host-queue step moves to a free host.
     const refused = err instanceof ApplicationFailure && err.type === "WorktreeQuarantined";
     if (err instanceof ApplicationFailure && !refused) return err;
     const { sessionFile, turn, step, call } = input;
-    const noted = await pending.wasDispatched(sessionFile, turn, step, call.id).catch(() => true);
+    const noted = await pending.dispatchClaimed(sessionFile, turn, step, call.id).catch(() => true);
     if (noted) return err;
     return ApplicationFailure.create({
       message: err instanceof Error ? err.message : String(err),
@@ -585,7 +585,7 @@ export function makeActivities(
         const { turn, step, call } = input;
         // A stopped turn's seal may be about to take this claim. Don't race it.
         if (stopRequested()) throw Context.current().cancellationSignal.reason;
-        if (!(await pending.noteDispatch(input.sessionFile, turn, step, call.id))) {
+        if (!(await pending.claimDispatch(input.sessionFile, turn, step, call.id))) {
           // An earlier dispatch started this tool, so it may have taken effect. Report unknown
           // rather than re-run a push or delete.
           // The first attempt may still return. The seal supplies unknown if no result arrives.
@@ -657,7 +657,7 @@ export function makeActivities(
             // No kept result. Take the claim, so a late attempt can't run the tool after the
             // step closed. If the seal gets it, nothing started the call. Otherwise it's unknown,
             // since providers reject unanswered calls.
-            const unstarted = await pending.noteDispatch(input.sessionFile, turn, step, call.id);
+            const unstarted = await pending.claimDispatch(input.sessionFile, turn, step, call.id);
             results.push(unstarted ? notRunOutcome(call) : unknownToolCallOutcome(call));
           }
 

@@ -75,7 +75,7 @@ for (const { failure, atSeal } of [
           const result = unknownToolCallOutcome(input.call);
           result.message.content = [{ type: "text", text: "finished tool output" }];
           result.message.isError = false;
-          await pending.noteDispatch(file, input.turn, 1, input.call.id);
+          await pending.claimDispatch(file, input.turn, 1, input.call.id);
           await pending.keepResult(file, input.turn, 1, input.call.id, result);
           finished();
           return { outcome: "settled" };

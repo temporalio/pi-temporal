@@ -47,7 +47,7 @@ admitted again.
 
 A Worker may append to the transcript only while it holds the newest fence. The Workflow numbers
 every Activity that writes the transcript, and each attempt adds its own number, so a later run,
-Activity, or attempt sorts higher. A unit claims its number with an exclusive create in
+Activity, or attempt sorts higher. A unit takes its token with an exclusive create in
 `<session>.jsonl.fence/`, and its write guard refuses every append once a higher number is there.
 A retry takes over at once, since Temporal already decided the earlier attempt is dead. No clocks
 or timers are involved, beyond a new run starting later than the old one by the server's clock.
@@ -56,21 +56,21 @@ tool’s external effects, which is what the claim is for.
 
 The fence is checked, not enforced by storage. An attempt that stalls between its check and its
 append can still land that one append. Opening a session can also repair a torn last line before
-any guard runs, and a tool call opens it with no claim, so a stalled tool attempt that opens late
-can write that one repair. It needs exclusive create and a directory listing that
+any guard runs, and a tool call opens it with no fence token, so a stalled tool attempt that opens
+late can write that one repair. The fence needs exclusive create and a directory listing that
 shows new files at once. On NFS, mount with `actimeo=0` (at least `acdirmin=0,acdirmax=0`).
 
 Tree shipping (`src/tree/`) keeps a lease, since clients and hosts write tree stores and project
 directories outside any Workflow. Its 50-second validity and 60-second reclaim windows allow for
 clock differences but don’t prove a bound. The last released epoch stays on disk with an expired
-timestamp, so epochs only grow. A claim counts only while no newer epoch exists, so a contender
+timestamp, so epochs only grow. An epoch counts only while no newer one exists, so a contender
 that paused and recreated an old epoch backs off. A failed renewal doesn’t extend write
-permission. A failed read of a lease, a claim, a kept result, or a tree record doesn’t admit a
-writer.
+permission. A failed read of a lease, a dispatch claim, a kept result, or a tree record doesn’t
+admit a writer.
 
 The lock directories outlive the session, `forget` included. They are
 `<session>.jsonl.tree/writers.lock` and the host-local `trees/<hash>/tree.lock`. Each keeps one
-expired claim. Don’t delete them in cleanup scripts, or an epoch can start again from one.
+expired epoch. Don’t delete them in cleanup scripts, or an epoch can start again from one.
 
 Stepped Worker tool calls have a 30-minute timeout per attempt by default.
 `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it, for calls on a host queue too. A host-queue call’s

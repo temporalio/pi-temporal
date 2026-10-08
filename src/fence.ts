@@ -1,6 +1,6 @@
 // Orders the writers of one session file. Temporal already knows which attempt of which Activity
 // is current, so the Workflow numbers every Activity it schedules, and each attempt adds its own
-// number. A unit claims its number beside the file and stops writing once a higher one is there.
+// number. A unit takes its token beside the file and stops writing once a higher one is there.
 // A retry takes over at once. No clocks, timers, or stale windows are involved.
 //
 // The number is `<run start ms>.<Activity seq>.<attempt>`, so a later run, a later Activity of a
@@ -30,15 +30,15 @@ const newestOf = (names: readonly string[]) =>
   names.filter((name) => TOKEN.test(name)).sort().at(-1);
 
 /**
- * Claim `token` for writing `sessionFile`. Throws `SUPERSEDED` when a higher one is already there.
+ * Take `token` for writing `sessionFile`. Throws `SUPERSEDED` when a higher one is already there.
  * Returns the write guard, which throws once a higher one appears. Synchronous, since Pi asks it
  * right before each append.
  */
-export async function claimFence(sessionFile: string, token: string): Promise<() => void> {
+export async function takeFence(sessionFile: string, token: string): Promise<() => void> {
   if (!TOKEN.test(token)) throw new Error(`not a fence: ${token}`);
   const dir = dirOf(sessionFile);
   await mkdir(dir, { recursive: true });
-  // A second claim of the same token is the same attempt, so it's not a conflict.
+  // Taking the same token twice is the same attempt, so it's not a conflict.
   await writeFile(join(dir, token), "", { flag: "wx" }).catch((err: NodeJS.ErrnoException) => {
     if (err.code !== "EEXIST") throw err;
   });
