@@ -94,10 +94,12 @@ function wrap(session: PiSession): AgentSession {
     hasPrompt: (promptId) => promptRecorded(session, promptId),
     recordPrompt: (promptId, text) => session.recordPrompt(`${text}${marker(promptId)}`),
     async modelCall(signal) {
+      // A unit already stopped asks the model nothing. Pi clears a stop when a call starts, so an
+      // abort sent before the call would be lost and the call billed anyway.
+      if (signal?.aborted) throw signal.reason ?? new Error("the model call was stopped");
       // Aborted like a user stop. Pi records an aborted response, and the turn ends as stopped.
       const stop = () => void session.abort().catch(() => {});
-      if (signal?.aborted) stop();
-      else signal?.addEventListener("abort", stop, { once: true });
+      signal?.addEventListener("abort", stop, { once: true });
       try {
         const outcome = await session.modelCall();
         return {

@@ -437,17 +437,29 @@ async function liveHere(projectDir: string): Promise<LiveHere | undefined> {
       if (held !== undefined) workers.add(held);
       named.set(pid, held);
     }
-    // Ask for every cwd at once. `lsof +D` would stat the whole tree.
-    const cwds = await execFileAsync("lsof", ["-a", "-d", "cwd", "-Fpn"], asked).catch(
-      () => undefined,
+    // Every open file of every process, at once, like the `/proc` scan on Linux: a process can
+    // hold a file open after it left the directory and its group. `lsof +D` would stat the whole
+    // tree instead. A scan that fails can't say the directory is free, so it throws.
+    const open = await execFileAsync("lsof", ["-n", "-P", "-Fpfn"], asked).catch(
+      (err: { stdout?: string; code?: number }) => {
+        // lsof exits 1 when some files couldn't be read, but still lists the rest.
+        if (err.code === 1 && err.stdout) return { stdout: err.stdout };
+        throw err;
+      },
     );
     let at: number | undefined;
-    for (const line of cwds?.stdout.split("\n") ?? []) {
+    let fd = "";
+    for (const line of open.stdout.split("\n")) {
       if (line.startsWith("p")) at = Number.parseInt(line.slice(1), 10);
+      if (line.startsWith("f")) fd = line.slice(1);
       if (!line.startsWith("n") || at === undefined || at === process.pid) continue;
-      if (inside(line.slice(1)) && !ours(named.get(at))) {
-        holding.push({ pid: at, how: "its working directory is in it" });
-      }
+      const path = line.slice(1);
+      if (!inside(path) || ours(named.get(at))) continue;
+      if (holding.some((h) => h.pid === at)) continue;
+      holding.push({
+        pid: at,
+        how: fd === "cwd" ? "its working directory is in it" : `it holds ${path} open`,
+      });
     }
     return {
       groups,
@@ -773,10 +785,27 @@ export async function clearWriters(projectDir: string): Promise<number> {
 // The checkout's own `.git/info/exclude`. The snapshot uses a repository of its own, so without
 // this the checkout's local ignore rules would not apply and its ignored files would ship.
 async function checkoutExcludes(projectDir: string): Promise<string[]> {
-  const path = join(resolve(projectDir), ".git", "info", "exclude");
+  const path = await checkoutExcludePath(projectDir);
+  if (path === undefined) return [];
   return (await access(path).then(() => true, () => false))
     ? ["-c", `core.excludesFile=${path}`]
     : [];
+}
+
+// Where the checkout keeps its own exclude file. Git answers, since a linked worktree or a
+// submodule has a `.git` file that points elsewhere. Undefined when the directory isn't a
+// checkout at all.
+async function checkoutExcludePath(projectDir: string): Promise<string | undefined> {
+  const dir = resolve(projectDir);
+  const exists = await access(join(dir, ".git")).then(() => true, () => false);
+  if (!exists) return undefined;
+  // A `.git` that git doesn't take for a checkout counts as none, so its rules don't apply.
+  const asked = await execFileAsync(
+    "git",
+    ["-C", dir, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+    { env: gitEnv() },
+  ).catch(() => undefined);
+  return asked?.stdout.trim() || undefined;
 }
 
 async function treeHere(projectDir: string) {
@@ -829,18 +858,26 @@ async function ingest(projectDir: string, sessionFile: string, generation: numbe
 const COMPACT_EVERY = 40;
 
 // Bundles and tips older than a restart bundle, which stands on its own. `salvage/` stays.
+// Only this generation's. Every generation's bundles share one directory, and a writer that stalled
+// across a `forget` would otherwise delete the new generation's bundles by their numbers. A bundle
+// no tip names, from a writer that lost its race, stays. Nothing reads it.
 async function dropBefore(sessionFile: string, generation: number, seq: number) {
   const dir = shareDir(sessionFile);
-  for (const name of await listDir(dir)) {
-    if (name.endsWith(".bundle") && Number.parseInt(name, 10) < seq) {
-      await rm(join(dir, name), { force: true });
-    }
-  }
   for (const name of await tipNames(sessionFile, generation)) {
     if (Number.parseInt(name, 10) >= seq) continue;
+    const tip = await readJson<Tip>(join(tipsDir(sessionFile, generation), name));
+    if (tip) await rm(join(dir, bundleOf(tip)), { force: true });
     await rm(join(tipsDir(sessionFile, generation), name), { force: true });
   }
-  await rm(legacyTipPath(sessionFile), { force: true });
+  // A store from before tips were one file each names its bundles by number alone.
+  if (generation === 0) {
+    for (const name of await listDir(dir)) {
+      if (/^\d{8}\.bundle$/.test(name) && Number.parseInt(name, 10) < seq) {
+        await rm(join(dir, name), { force: true });
+      }
+    }
+    await rm(legacyTipPath(sessionFile), { force: true });
+  }
 }
 
 // Where a restore starts. A note from an older generation counts from the start of this one.
@@ -996,8 +1033,16 @@ export async function projectRefusal(dir: string): Promise<string | undefined> {
   }
   const exists = (name: string) => access(join(resolved, name)).then(() => true, () => false);
   if (await exists(".gitignore")) return undefined;
-  // A checkout alone isn't enough. Its own ignore rules count only if there are some.
-  const local = await readFile(join(resolved, ".git", "info", "exclude"), "utf8").catch(() => "");
+  // A checkout alone isn't enough. Its own ignore rules count only if there are some. Only a
+  // missing file means no rules. Any other read error is thrown, not taken as permission.
+  const path = await checkoutExcludePath(resolved);
+  const local =
+    path === undefined
+      ? ""
+      : await readFile(path, "utf8").catch((err: NodeJS.ErrnoException) => {
+          if (err.code === "ENOENT") return "";
+          throw err;
+        });
   if (local.split("\n").some((line) => line.trim() !== "" && !line.trim().startsWith("#"))) {
     return undefined;
   }

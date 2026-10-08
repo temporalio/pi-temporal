@@ -219,6 +219,22 @@ async function main() {
   await ended({ child: standing, pid: standing.pid!, pgid: standing.pid! });
   check("and releases it when that process leaves", await usable());
 
+  // One that stands elsewhere but holds a file in the directory open is found by the open file.
+  await writeFile(join(project, "held.txt"), "held\n");
+  const opener = spawn(
+    process.execPath,
+    ["-e", `require("fs").openSync(${JSON.stringify(join(project, "held.txt"))}, "r");
+      setInterval(() => {}, 1000)`],
+    { detached: true, stdio: "ignore", cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" } },
+  );
+  kids.push(opener);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await editMarker({ ...stale, worker: "nothing-carries-this" });
+  check("a tool holding a file in the directory open keeps it refused", !(await usable()));
+  await ended({ child: opener, pid: opener.pid!, pgid: opener.pid! });
+  check("and releases it when that process exits", await usable());
+
   // The worker must export its name so real tools inherit it, not just write it in the marker.
   const inheriting = spawned();
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
