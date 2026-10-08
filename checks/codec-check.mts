@@ -75,7 +75,7 @@ const worker = await Worker.create({
   dataConverter,
   activities: {
     async runStep(input: RunStepInput): Promise<RunStepResult> {
-      // Tool and provider errors carry text from the task, so a failure's message must be sealed too.
+      // Tool and provider errors carry text from the task, so a failure's message is sealed too.
       if (input.text?.startsWith("fail ")) throw ApplicationFailure.nonRetryable(input.text);
       return { done: true, finalText: `${input.text} back` };
     },
@@ -93,7 +93,7 @@ try {
   console.log("PASS the client and the Worker read each other's encrypted payloads");
 
   const failing = `fail ${randomUUID()}`;
-  await sendPrompt(client, cfg, session, { promptId: randomUUID(), text: failing });
+  await sendPrompt(client, sessionStart(cfg, session), { promptId: randomUUID(), text: failing });
   const failed = await handle.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
   assert.equal(failed.finished?.outcome, "failed");
 
