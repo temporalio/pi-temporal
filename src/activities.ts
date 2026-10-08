@@ -26,7 +26,7 @@ import type {
   ToolCallInput,
   ToolCallResult,
 } from "./protocol.js";
-import { FAILED_BEFORE_CLAIM } from "./protocol.js";
+import { FAILED_AFTER_CLAIM, FAILED_BEFORE_CLAIM } from "./protocol.js";
 import { SHIP_TREE_NEEDS_STEPS } from "./config.js";
 import * as pending from "./pending.js";
 import * as worktree from "./worktree.js";
@@ -42,6 +42,16 @@ const stopRequested = () => {
     return Context.current().cancellationSignal.aborted;
   } catch {
     return false;
+  }
+};
+
+// The Activity logger, so each line carries its Workflow and Activity ids. Plain console when a
+// check calls an activity directly, with no Activity around it.
+const say = (level: "info" | "warn", message: string) => {
+  try {
+    Context.current().log[level](message);
+  } catch {
+    console[level](message);
   }
 };
 
@@ -200,9 +210,9 @@ export function makeActivities(
   ) => {
     if (!opts.shipTree) return;
     await worktree.capture(opts.projectDir, sessionFile, of).catch(async (err) => {
-      console.error(`could not ship the project tree: ${String(err)}`);
+      say("warn", `could not ship the project tree: ${String(err)}`);
       await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
-        console.error(`and could not set it aside either: ${String(keepErr)}`);
+        say("warn", `and could not set it aside either: ${String(keepErr)}`);
       });
       if (retryable && !worktree.isRefusal(err)) throw err;
     });
@@ -447,8 +457,8 @@ export function makeActivities(
 
   /** The model call of one step. The calls it reports are recorded and left for the workflow to
    * dispatch, one activity each. */
-  // With tree shipping and no pinned queue, parallel tools on different hosts would overwrite each
-  // other's captures, so they run in order. A pinned queue keeps them on one directory.
+  // With tree shipping and no host queue, parallel tools on different hosts would overwrite each
+  // other's captures, so they run in order. A host queue keeps them on one directory.
   const mustSerialize = (sequential: boolean) =>
     sequential || (opts.shipTree === true && opts.stepQueue === undefined);
 
@@ -492,7 +502,7 @@ export function makeActivities(
   // Typed only when no attempt left a dispatch note. An earlier attempt may still run the tool.
   const beforeClaim = async (err: unknown, input: ToolCallInput): Promise<unknown> => {
     // A refusal comes from `bringTree`, which always runs before the claim. Typed like any other
-    // failure before the claim, so a pinned step moves to a free host.
+    // failure before the claim, so a host-queue step moves to a free host.
     const refused = err instanceof ApplicationFailure && err.type === "WorktreeQuarantined";
     if (err instanceof ApplicationFailure && !refused) return err;
     const { sessionFile, turn, step, call } = input;
@@ -578,7 +588,7 @@ export function makeActivities(
         await withSessionLock(input.sessionFile, () =>
           shipTree(input.sessionFile, { current: writer, fence: { turn, step } }),
         ).catch((err: unknown) => {
-          console.error(`could not ship the project tree after ${call.id}: ${String(err)}`);
+          say("warn", `could not ship the project tree after ${call.id}: ${String(err)}`);
         });
         return { outcome: "settled" };
       } finally {
@@ -586,7 +596,12 @@ export function makeActivities(
       }
     } catch (err) {
       // A stop stays a stop. Typed as a failure, it would hide the cancellation.
-      throw claimed || stopRequested() ? err : await beforeClaim(err, input);
+      if (stopRequested()) throw err;
+      if (!claimed) throw await beforeClaim(err, input);
+      throw ApplicationFailure.nonRetryable(
+        `tool call ${input.call.id} failed after it started: ${String(err)}`,
+        FAILED_AFTER_CLAIM,
+      );
     } finally {
       stop();
     }
@@ -692,7 +707,7 @@ export function makeActivities(
     if (!opts.shipTree) return;
     // Thrown, so Temporal retries. The Workflow gives up quietly once retries run out.
     const freed = await worktree.retire(opts.projectDir, input.sessionFile);
-    if (freed) console.log(`handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
+    if (freed) say("info", `handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
   }
 
   /** Copy a template project into a scheduled session before its first step. A no-op once the
@@ -703,7 +718,7 @@ export function makeActivities(
   }): Promise<void> {
     if (!opts.shipTree) return;
     const copied = await worktree.adopt(input.template, input.sessionFile);
-    if (copied) console.log(`took the project from ${input.template} for ${input.sessionFile}`);
+    if (copied) say("info", `took the project from ${input.template} for ${input.sessionFile}`);
   }
 
   return { runStep, runModelCall, runToolCall, sealStep, retireSession, adoptProject };

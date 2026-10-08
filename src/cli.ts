@@ -17,7 +17,13 @@ import {
   sessionFileFor,
 } from "./config.js";
 import * as worktree from "./worktree.js";
-import { sessionIdProblem, WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
+import {
+  SESSION_MEMO,
+  sessionIdProblem,
+  WORKFLOW_TYPE,
+  WORKFLOW_ID_PREFIX,
+  workflowId,
+} from "./protocol.js";
 import {
   QueryRejectedError,
   ScheduleAlreadyRunning,
@@ -249,30 +255,19 @@ async function schedule(args: string[]) {
 async function running() {
   const { client, connection } = await connect();
   try {
-    const ids: string[] = [];
+    // One List call. Each session keeps its state in its memo, so no session is asked directly.
+    let any = false;
     for await (const wf of client.workflow.list({
       query: `WorkflowType = '${WORKFLOW_TYPE}' AND ExecutionStatus = 'Running'`,
     })) {
-      if (wf.workflowId.startsWith(WORKFLOW_ID_PREFIX)) {
-        ids.push(wf.workflowId.slice(WORKFLOW_ID_PREFIX.length));
-      }
+      if (!wf.workflowId.startsWith(WORKFLOW_ID_PREFIX)) continue;
+      any = true;
+      const id = wf.workflowId.slice(WORKFLOW_ID_PREFIX.length);
+      const shown = wf.memo?.[SESSION_MEMO] as { state?: string; queued?: number } | undefined;
+      const queued = shown?.queued ? `, ${shown.queued} queued` : "";
+      emit(`${id}  ${shown?.state ?? "starting"}${queued}`);
     }
-    if (ids.length === 0) {
-      say("nothing running");
-      return;
-    }
-    // Concurrent, so sessions with dead workers time out together, not one after another.
-    const rows = await Promise.all(
-      ids.map(async (id) => {
-        const reached = await turnStateOf(client, id);
-        if (reached.kind !== "state") return `${id}  ${reached.kind}`;
-        const { state } = reached;
-        if (state.running) return `${id}  step ${state.running.step}`;
-        if (state.queued) return `${id}  ${state.queued} queued`;
-        return `${id}  idle`;
-      }),
-    );
-    for (const row of rows) emit(row);
+    if (!any) say("nothing running");
   } finally {
     await connection.close();
   }

@@ -1,8 +1,8 @@
-// Checks that a long session continues-as-new and that no queued prompt is lost across it. Forces
-// rollover with a small `maxHistory` (production uses `continueAsNewSuggested`) and asserts every
-// accepted prompt is answered exactly once.
+// Checks that a long session continues as new and that no queued prompt is lost across it. Forces
+// Continue-As-New with a small `maxHistory` (production uses `continueAsNewSuggested`) and asserts
+// every accepted prompt is answered exactly once.
 //
-// Needs a Temporal server, no model key. Usage: tsx checks/rollover-check.mts
+// Needs a Temporal server, no model key. Usage: tsx checks/continue-as-new-check.mts
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -28,8 +28,8 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 const answered: string[] = [];
 
 async function main() {
-  const taskQueue = `pi-rollover-${randomUUID().slice(0, 8)}`;
-  const sessionId = `rollover-${randomUUID().slice(0, 8)}`;
+  const taskQueue = `pi-continue-as-new-${randomUUID().slice(0, 8)}`;
+  const sessionId = `continue-as-new-${randomUUID().slice(0, 8)}`;
   // A couple of turns cross this.
   const options: SessionTurnOptions = { idleTimeout: "10 seconds", maxHistory: 24 };
 
@@ -75,9 +75,9 @@ async function main() {
       if (now !== first) rolled = now;
       else await sleep(200);
     }
-    check("a session rolls over instead of growing without bound", rolled !== "", { first });
+    check("a session continues as new instead of growing without bound", rolled !== "", { first });
 
-    // Assert on every prompt, not just one sent after the rollover. Prompts queued when it fires
+    // Assert on every prompt, not just one sent after Continue-As-New. Prompts queued when it fires
     // are the ones a dropped queue would lose.
     await send("after");
     const wanted = ["one", "two", "three", "four", "five", "six", "after"];
@@ -101,8 +101,8 @@ async function main() {
 
   console.log(
     failures.length === 0
-      ? "\nrollover-check: OK"
-      : `\nrollover-check: ${failures.length} failed`,
+      ? "\ncontinue-as-new-check: OK"
+      : `\ncontinue-as-new-check: ${failures.length} failed`,
   );
   process.exit(failures.length === 0 ? 0 : 1);
 }

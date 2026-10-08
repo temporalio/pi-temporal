@@ -1,10 +1,10 @@
-// Checks the stepped step body (`src/l2-step.ts`) against fake activities, with no server. Asserts
-// every call reaches the seal, interrupts propagate, one failed tool does not end the turn, and
-// pinned work falls back to the shared queue only when it never started.
+// Checks the stepped step body (`src/stepped-step.ts`) against fake activities, with no server.
+// Asserts every call reaches the seal, interrupts propagate, one failed tool does not end the turn,
+// and host-queue work falls back to the shared queue only when it never started.
 //
-// Usage: npx tsx checks/l2-step-check.mts
+// Usage: npx tsx checks/stepped-step-check.mts
 
-import { makeSteppedStep } from "../src/l2-step.js";
+import { makeSteppedStep } from "../src/stepped-step.js";
 import type {
   DeferredToolCall,
   ModelCallResult,
@@ -195,11 +195,11 @@ async function main() {
     check("an unknown outcome still seals", run.seals.length === 1, run.seals);
   }
 
-  // A step's tools and seal are pinned to the worker that made the model call, so they share one
-  // directory. If nobody claims the pinned work, it falls back to the shared queue.
+  // A step's tools and seal go to the queue of the worker that made the model call, so they share
+  // one directory. If nobody claims the host-queue work, it falls back to the shared queue.
   {
-    const pinnedTools: ToolCallInput[] = [];
-    const pinnedSeals: SealStepInput[] = [];
+    const hostTools: ToolCallInput[] = [];
+    const hostSeals: SealStepInput[] = [];
     const sharedTools: ToolCallInput[] = [];
     const sharedSeals: SealStepInput[] = [];
     let refuse = false;
@@ -213,7 +213,7 @@ async function main() {
     const isUnclaimed = (err: unknown) =>
       (err as { cause?: { timeoutType?: string } })?.cause?.timeoutType === "SCHEDULE_TO_START";
 
-    const pinnedStep = (calls: DeferredToolCall[]) =>
+    const hostStep = (calls: DeferredToolCall[]) =>
       makeSteppedStep({
         activities: {
           runModelCall: async () => ({ calls, sequential: false, ended: false, queue: "mine" }),
@@ -228,15 +228,15 @@ async function main() {
         },
         isCancellation,
         isUnclaimed,
-        pinnedTo: (queue) => {
-          if (queue !== "mine") throw new Error(`pinned to ${queue}`);
+        onHost: (queue) => {
+          if (queue !== "mine") throw new Error(`routed to ${queue}`);
           return {
             runToolCall: async (input) => {
               if (refuse) {
                 refused++;
                 throw unclaimed();
               }
-              pinnedTools.push(input);
+              hostTools.push(input);
               return { outcome: "settled" };
             },
             sealStep: async (input) => {
@@ -244,7 +244,7 @@ async function main() {
                 refused++;
                 throw unclaimed();
               }
-              pinnedSeals.push(input);
+              hostSeals.push(input);
               return SEALED;
             },
           };
@@ -252,17 +252,17 @@ async function main() {
         nonCancellable: (fn) => fn(),
       });
 
-    await pinnedStep([call("a"), call("b")])(INPUT);
+    await hostStep([call("a"), call("b")])(INPUT);
     check(
       "a step's tools and seal go back to the worker that made the model call",
-      pinnedTools.length === 2 && pinnedSeals.length === 1 && sharedTools.length === 0,
-      { pinnedTools: pinnedTools.length, pinnedSeals: pinnedSeals.length },
+      hostTools.length === 2 && hostSeals.length === 1 && sharedTools.length === 0,
+      { hostTools: hostTools.length, hostSeals: hostSeals.length },
     );
 
     refuse = true;
-    await pinnedStep([call("c")])(INPUT);
+    await hostStep([call("c")])(INPUT);
     // Only schedule-to-start proves the work never started, so moving it cannot run a tool twice.
-    // After one refusal the seal skips the pinned queue.
+    // After one refusal the seal skips the host queue.
     check(
       "and move to the shared queue when nobody takes them",
       sharedTools.length === 1 && sharedSeals.length === 1 && refused === 1,
@@ -271,13 +271,13 @@ async function main() {
   }
 
   for (const outcome of ["completed", "failed", "cancelled"] as const) {
-    const pinnedFails = outcome !== "completed";
-    let finishPinned!: () => void;
-    const held = new Promise<void>((resolve) => { finishPinned = resolve; });
-    let pinnedStarted!: () => void;
-    const started = new Promise<void>((resolve) => { pinnedStarted = resolve; });
+    const hostFails = outcome !== "completed";
+    let finishHost!: () => void;
+    const held = new Promise<void>((resolve) => { finishHost = resolve; });
+    let hostStarted!: () => void;
+    const started = new Promise<void>((resolve) => { hostStarted = resolve; });
     let sharedStarted = false;
-    let pinnedActive = false;
+    let hostActive = false;
     let crossedHosts = false;
     const unavailable = new Error("unclaimed");
     const failed =
@@ -292,23 +292,23 @@ async function main() {
         }),
         runToolCall: async () => {
           sharedStarted = true;
-          crossedHosts ||= pinnedActive;
+          crossedHosts ||= hostActive;
           return { outcome: "settled" };
         },
         sealStep: async () => SEALED,
       },
-      pinnedTo: () => ({
+      onHost: () => ({
         runToolCall: async (input) => {
           if (input.call.id === "waiting") throw unavailable;
-          pinnedActive = true;
-          pinnedStarted();
+          hostActive = true;
+          hostStarted();
           try {
             await held;
-            if (pinnedFails) throw failed;
+            if (hostFails) throw failed;
             return { outcome: "settled" };
           } finally {
             // A real body may keep running past a server timeout. This fake one stops here.
-            pinnedActive = false;
+            hostActive = false;
           }
         },
         sealStep: async () => SEALED,
@@ -320,24 +320,27 @@ async function main() {
     const result = step(INPUT).then(() => undefined, (error: unknown) => error);
     await started;
     await new Promise((resolve) => setTimeout(resolve, 0));
-    check("an unclaimed sibling waits for the pinned batch", !sharedStarted, { outcome });
-    finishPinned();
+    check("an unclaimed sibling waits for the host-queue batch", !sharedStarted, { outcome });
+    finishHost();
     const error = await result;
-    check("fallback never overlaps a pinned tool", !crossedHosts, { outcome });
+    check("fallback never overlaps a host-queue tool", !crossedHosts, { outcome });
     check(
       outcome === "cancelled"
         ? "a cancelled sibling blocks queued fallback"
-        : pinnedFails
-          ? "an uncertain pinned attempt blocks migration"
-          : "fallback resumes after the pinned tool ships",
-      pinnedFails ? !sharedStarted && error === failed : sharedStarted && error === undefined,
+        : hostFails
+          ? "an uncertain host-queue attempt blocks migration, and the turn goes on"
+          : "fallback resumes after the host-queue tool ships",
+      // A stop reaches the turn. A lost host doesn't end it.
+      hostFails
+        ? !sharedStarted && error === (outcome === "cancelled" ? failed : undefined)
+        : sharedStarted && error === undefined,
       { sharedStarted, error: String(error), outcome },
     );
   }
 
   // A timeout cannot distinguish a dead worker from one whose tool still writes.
   {
-    const gone = new Error("the pinned attempt did not come back");
+    const gone = new Error("the host-queue attempt did not come back");
     let sharedTools = 0;
     let sharedSeals = 0;
     let recoverySeal = false;
@@ -359,7 +362,7 @@ async function main() {
           return SEALED;
         },
       },
-      pinnedTo: () => ({
+      onHost: () => ({
         runToolCall: async () => {
           throw gone;
         },
@@ -371,18 +374,18 @@ async function main() {
     });
     const result = await step(INPUT).then(() => undefined, (error: unknown) => error);
     check(
-      "an uncertain pinned attempt records results without shared tools",
+      "an uncertain host-queue attempt records results without shared tools",
       sharedTools === 0 && sharedSeals === 1 && recoverySeal,
       {
         sharedTools,
         sharedSeals,
       },
     );
-    check("and its failure reaches the turn", result === gone, String(result));
+    check("and the turn goes on past the lost host", result === undefined, String(result));
   }
 
   {
-    const failed = new Error("pinned attempt timed out");
+    const failed = new Error("host-queue attempt timed out");
     let normalSeals = 0;
     let recoverySeals = 0;
     const seal = async (input: SealStepInput) => {
@@ -401,15 +404,15 @@ async function main() {
         runToolCall: async () => ({ outcome: "settled" }),
         sealStep: seal,
       },
-      pinnedTo: () => ({ runToolCall: async () => { throw failed; }, sealStep: seal }),
+      onHost: () => ({ runToolCall: async () => { throw failed; }, sealStep: seal }),
       isCancellation,
       isUnclaimed: () => false,
       nonCancellable: (fn) => fn(),
     });
     const error = await step(INPUT).then(() => undefined, (error: unknown) => error);
     check(
-      "an uncertain pinned tool permits only a recovery seal",
-      normalSeals === 0 && recoverySeals === 1 && error === failed,
+      "an uncertain host-queue tool permits only a recovery seal",
+      normalSeals === 0 && recoverySeals === 1 && error === undefined,
       {
         normalSeals,
         recoverySeals,
@@ -441,7 +444,7 @@ async function main() {
           return SEALED;
         },
       },
-      pinnedTo: () => ({
+      onHost: () => ({
         runToolCall: async () => { throw unavailable; },
         sealStep: async () => { throw unavailable; },
       }),
@@ -465,7 +468,7 @@ async function main() {
   }
 
   const bad = failures.length;
-  console.log(bad === 0 ? "l2-step-check: OK" : `l2-step-check: ${bad} failed`);
+  console.log(bad === 0 ? "stepped-step-check: OK" : `stepped-step-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

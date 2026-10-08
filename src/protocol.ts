@@ -4,8 +4,14 @@
 export const WORKFLOW_TYPE = "piSession";
 export const WORKFLOW_ID_PREFIX = "pi-session-";
 // A tool call that failed before any attempt claimed it, so the tool never started and the
-// workflow may move a pinned step.
+// workflow may move a host-queue step.
 export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
+// The memo key a session keeps its state under, `{ state: "running" | "idle", queued }`.
+export const SESSION_MEMO = "piSession";
+
+// A tool call that failed once its claim was taken. Not retried, since every retry would find the
+// claim and only report an unknown outcome. History shows the failure, and the seal records it.
+export const FAILED_AFTER_CLAIM = "FailedAfterClaim";
 // A live tool call that failed because the user stopped the turn.
 export const TURN_STOPPED = "TurnStopped";
 
@@ -103,10 +109,13 @@ export interface RunStepResult {
   readonly finalText: string;
   // This step's spend, for the turn budget.
   readonly spent?: Spend;
-  // Session total read off the record, so it survives rollovers, idle restarts, and other clients.
+  // Session total read off the record, so it survives Continue-As-New, idle restarts, and other
+  // clients.
   readonly total?: Spend;
   // The session's turn time so far, as the session record keeps it.
   readonly sessionSeconds?: number;
+  // The host queue of the Worker that ran this step's tools, when it has one.
+  readonly hostQueue?: string;
 }
 
 export interface SessionTurnOptions {
@@ -121,17 +130,20 @@ export interface SessionTurnOptions {
   readonly sessionDir?: string;
   // A project store copied into each scheduled session before its first activity.
   readonly template?: string;
-  // Queue carried across a rollover. It is the whole control state.
+  // Queue carried across Continue-As-New. It is the whole control state.
   readonly queued?: readonly PromptInput[];
-  // Spend carried across a rollover.
+  // Spend carried across Continue-As-New.
   readonly spent?: Spent;
-  // Last turn result carried across a rollover, so a client polling `turnState` still sees it.
+  // Last turn result carried across Continue-As-New, so a client polling `turnState` still sees it.
   readonly finished?: TurnState["finished"];
+  // Host queues of the Workers that held this session's project, carried across Continue-As-New.
+  // Each one is asked to hand its directory back when the session goes idle.
+  readonly hostQueues?: readonly string[];
   // Operator spend bound per turn. Off by default, since a bound that ends real work is a policy
   // call. `MAX_STEPS_PER_TURN` is a separate runaway guard.
   readonly budget?: TurnBudget;
-  // Roll over at this many history events, in addition to the server's suggestion. Also lets
-  // checks reach the rollover path.
+  // Continue-As-New at this many history events, in addition to the server's suggestion. Also lets
+  // checks reach that path.
   readonly maxHistory?: number;
   // Bound on one tool call in stepped mode. A call that crosses it is not re-run, because its
   // dispatch note says it started.
@@ -156,8 +168,8 @@ export interface ModelCallResult {
   // This worker's own queue. The rest of the step runs there, on the host that holds the project
   // directory. Absent when the worker has none, and the step uses the shared queue.
   //
-  // Only a dispatch nobody started may move off it, and only after every pinned sibling settled.
-  // A started attempt may still have a tool writing that directory.
+  // Only a dispatch nobody started may move off it, and only after every sibling on the host queue
+  // settled. A started attempt may still have a tool writing that directory.
   readonly queue?: string;
   // The model call's spend. A compacting seal reports its own.
   readonly spent?: Spend;
@@ -191,7 +203,7 @@ export interface ToolCallResult {
 export interface RetireInput {
   readonly sessionFile: string;
   // The last turn and the session's time after it, as the Workflow counted. Absent when no turn
-  // ran in this run or the one it rolled over from.
+  // ran in this run or the one it continued from.
   readonly turn?: string;
   readonly sessionSeconds?: number;
 }
@@ -230,7 +242,7 @@ export interface TurnBudget {
   // Opt-in.
   readonly hardSeconds?: number;
   // The same bounds for the whole session. Measured against the session record where the host
-  // reports it, otherwise the workflow's own count carried across rollovers.
+  // reports it, otherwise the workflow's own count carried across Continue-As-New.
   readonly sessionSeconds?: number;
   readonly sessionTokens?: number;
 }

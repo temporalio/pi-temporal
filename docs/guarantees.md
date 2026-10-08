@@ -25,6 +25,10 @@ Worker mode uses one `runStep` Activity per step by default. Live mode runs the 
 `runLocalTurn` Activity. With `PI_TEMPORAL_STEPPED=1`, the model call and seal each use an Activity,
 and every tool call gets its own Activity.
 
+Each Worker also polls a host queue of its own, a Task Queue only it listens on. A stepped step's
+tool calls and seal go to the host queue of the Worker that made the model call, since they use
+that host's project directory. Work nobody started there moves to the shared Task Queue.
+
 ## The rules
 
 The transcript decides what runs next. The Workflow counts steps and stops a turn at its step
@@ -57,7 +61,7 @@ The lock directories outlive the session, `forget` included. They are `<session>
 expired claim. Don’t delete them in cleanup scripts, or an epoch can start again from one.
 
 Stepped Worker tool calls have a 30-minute timeout per attempt by default.
-`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it, for host-pinned calls too. A host-pinned call’s
+`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it, for calls on a host queue too. A host-queue call’s
 total also has room for its queue wait. A timed-out call with a dispatch claim isn’t repeated,
 because its effects may already have happened.
 
@@ -74,10 +78,10 @@ model response.
 | A seal dies after its writes | Not applicable | The retry on another Worker doesn’t write twice or re-run the turn-end hook. | `seal-check`, `interrupted-seal-check` |
 | Two attempts overlap | The agent admits one unit at a time. | The lease and write guard refuse a stale transcript write. They don’t fence a tool’s effects. | `session-lock-check`, `lock-gap-check`, `stall-check`, `fence-check` |
 | A stale dispatch wakes after cleanup | No claims in this mode. | The claim is still there, so it isn’t admitted. | `stale-dispatch-check`, `dispatch-check` |
-| The user stops a turn | In-memory results are sealed if the process lives. | The unit that started finishes, the next doesn’t start, and the step is sealed. | `local-turn-check`, `seal-check`, `l2-step-check` |
+| The user stops a turn | In-memory results are sealed if the process lives. | The unit that started finishes, the next doesn’t start, and the step is sealed. | `local-turn-check`, `seal-check`, `stepped-step-check` |
 | A turn overspends | No bound. | Soft budgets stop at a boundary. The hard deadline cancels waiting. External commands may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
-| History grows | Step ceiling only. | Continue-as-New between turns. One huge turn can still hit limits. | `rollover-check` |
-| A deploy changes what a step schedules | Not applicable | Old histories replay under `patched()`. | `replay-check` |
+| History grows | Step ceiling only. | Continue-As-New between turns. One huge turn can still hit limits. | `continue-as-new-check` |
+| A deploy changes what a step schedules | Not applicable | Running sessions break on replay. Gate the change with `patched()`, or ship it as a new Worker Deployment Version. | `replay-check` |
 
 The model receives the unknown outcome and can inspect the effect before deciding what to do.
 There’s no general resolver for arbitrary commands. A later model request is a new dispatch,

@@ -1,4 +1,4 @@
-// Checks that a step whose pinned host timed out can be closed without ending the turn. Leaves the
+// Checks that a step whose host timed out can be closed without ending the turn. Leaves the
 // tool body running after the timeout, then asserts the closing seal publishes nothing and the
 // abandoned tool's later capture is refused and kept under `salvage/`. The next step on another
 // host then moves the project as usual.
@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
 import { makeActivities } from "../src/activities.js";
-import { makeSteppedStep } from "../src/l2-step.js";
+import { makeSteppedStep } from "../src/stepped-step.js";
 import * as worktree from "../src/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-lost-host-"));
@@ -21,7 +21,7 @@ const a = join(root, "host-a");
 const b = join(root, "host-b");
 const sessionFile = join(root, "session.jsonl");
 const turn = "prompt";
-const failure = new Error("the pinned attempt timed out with the tool still running");
+const failure = new Error("the host-queue attempt timed out with the tool still running");
 const writer = { turn, step: 1, callId: "slow" };
 let finishAbandoned: (() => Promise<unknown>) | undefined;
 let seals = 0;
@@ -56,7 +56,7 @@ try {
         queue: "host-a",
       }),
     },
-    pinnedTo: () => ({
+    onHost: () => ({
       runToolCall: async () => {
         // Temporal gives up on the attempt but the body keeps going. Its remaining work runs later.
         await worktree.beginWrite(a, writer);
@@ -75,7 +75,6 @@ try {
     }),
     isCancellation: () => false,
     isUnclaimed: () => false,
-    resumesAfterLostHost: () => true,
     nonCancellable: async (body) => body(),
   });
 

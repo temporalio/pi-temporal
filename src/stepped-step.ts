@@ -30,14 +30,9 @@ export interface SteppedStepDeps {
   readonly isCancellation: (err: unknown) => boolean;
   // The same activities on the model-call worker's own queue. Tools write that host's project
   // directory, so they run there and can run concurrently.
-  readonly pinnedTo?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
-  // Migration requires evidence that no attempt started on the pinned queue.
+  readonly onHost?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
+  // Migration requires evidence that no attempt started on the host queue.
   readonly isUnclaimed?: (err: unknown) => boolean;
-  // Patch gate. True when a pinned call that failed after it started must not migrate. Older
-  // histories keep the old schedule so replay stays deterministic.
-  readonly refusesStartedFailures?: () => boolean;
-  // Patch gate. True for runs started after a lost host stopped ending the turn.
-  readonly resumesAfterLostHost?: () => boolean;
   // Run the seal even when the turn was cancelled, so finished calls keep their real results.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
   // Checked between sequential calls. A started call is never stopped, since the transcript needs
@@ -146,6 +141,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       const sessionSeconds = result.sessionSeconds ?? model.sessionSeconds;
       return {
         ...result,
+        ...(model.queue ? { hostQueue: model.queue } : {}),
         ...(spent ? { spent } : {}),
         ...(total ? { total } : {}),
         ...(sessionSeconds === undefined ? {} : { sessionSeconds }),
@@ -157,18 +153,18 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     }
 
     // The model-call worker's own queue, the host holding the project directory.
-    const pinned = model.queue && deps.pinnedTo ? deps.pinnedTo(model.queue) : undefined;
+    const host = model.queue && deps.onHost ? deps.onHost(model.queue) : undefined;
     let unclaimed = false;
     let unsafeFailure: unknown;
     let stopFailure: unknown;
-    const pinnedAttempts: Promise<void>[] = [];
+    const hostAttempts: Promise<void>[] = [];
     // After falling back, the shared queue runs one at a time. Two hosts at once would branch the
     // tree store.
     let shared: Promise<unknown> = Promise.resolve();
     const onShared = <T>(run: (on: SteppedActivities) => Promise<T>): Promise<T> => {
       const next = shared.then(async () => {
         // A sibling may have started even when this dispatch timed out in the queue.
-        await Promise.all(pinnedAttempts);
+        await Promise.all(hostAttempts);
         if (stopFailure !== undefined) throw stopFailure;
         if (unsafeFailure !== undefined) throw unsafeFailure;
         try {
@@ -186,16 +182,16 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     };
     // A timed-out body can keep writing. Only a dispatch that provably never started may move to
     // the shared queue, until workspaces are isolated.
-    const viaPinned = async <T>(
+    const viaHost = async <T>(
       run: (on: Pick<SteppedActivities, "runToolCall" | "sealStep">) => Promise<T>,
     ): Promise<T> => {
       if (stopFailure !== undefined) throw stopFailure;
       if (unsafeFailure !== undefined) throw unsafeFailure;
-      if (!pinned) return run(deps.activities);
+      if (!host) return run(deps.activities);
       if (unclaimed) return onShared(run);
-      const attempt = run(pinned);
+      const attempt = run(host);
       // The barrier waits for it to be over, not to succeed.
-      pinnedAttempts.push(attempt.then(() => undefined, () => undefined));
+      hostAttempts.push(attempt.then(() => undefined, () => undefined));
       try {
         return await attempt;
       } catch (err) {
@@ -203,13 +199,13 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
           stopFailure = err;
           throw err;
         }
-        if (deps.isUnclaimed?.(err) !== true && (deps.refusesStartedFailures?.() ?? true)) {
+        if (deps.isUnclaimed?.(err) !== true) {
           unsafeFailure = err;
           throw err;
         }
         unclaimed = true;
         deps.log?.(
-          "the pinned queue did not take the work; the rest of the step goes to the shared queue",
+          "the host queue did not take the work; the rest of the step goes to the shared queue",
           { step: input.step },
         );
         return onShared(run);
@@ -227,7 +223,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
           step: input.step,
           call,
         };
-        return viaPinned((on) => on.runToolCall(toolInput));
+        return viaHost((on) => on.runToolCall(toolInput));
       },
       {
         ...deps,
@@ -254,7 +250,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       };
       // A recovery seal must not move a project that an abandoned tool may still write.
       if (interrupted) return deps.activities.sealStep(sealed);
-      return viaPinned((on) => on.sealStep(sealed));
+      return viaHost((on) => on.sealStep(sealed));
     };
 
     const recover = async (failure: unknown): Promise<RunStepResult> => {
@@ -271,7 +267,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       });
       // Sealed and fenced off from the lost host, so the turn can continue. The model sees which
       // calls have unknown outcomes.
-      if (sealed && lost && (deps.resumesAfterLostHost?.() ?? false)) {
+      if (sealed && lost) {
         deps.log?.("the step lost its host; recorded what it had and carrying the turn on", {
           step: input.step,
         });

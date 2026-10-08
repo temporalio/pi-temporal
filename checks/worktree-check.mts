@@ -135,7 +135,7 @@ async function main() {
   const held = await read(join(projectB, "note.txt"));
   check("and nothing the other host shipped is reverted", held === "three\n", held);
 
-  // A pinned host the step moved away from may still try to publish. It must not revert the tip.
+  // A host the step moved away from may still try to publish. It must not revert the tip.
   asHost(root, "b");
   await writeFile(join(projectB, "note.txt"), "four\n");
   await worktree.capture(projectB, sessionFile);

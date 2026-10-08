@@ -1,5 +1,7 @@
-// The pi extension. Each turn runs as a workflow on an in-process worker, so a turn cut by a crash
-// finishes when the session reopens (PI_TEMPORAL_DURABLE_TURNS=0 turns this off).
+// The pi extension. Each live turn runs as a workflow on an in-process worker, which gives it a
+// record in Temporal and retries. The turn stays in this process, so it can't move to another one.
+// A turn cut by a crash finishes when the session reopens. PI_TEMPORAL_LIVE_TURNS=0 turns this
+// off.
 // `/background` hands a task to a worker-owned session that keeps going after pi exits.
 // The embedded worker needs the pi fork build. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet
 // worker owns the queue.
@@ -66,7 +68,7 @@ const unreachable = (err: unknown) =>
 
 type Env = Config & {
   readonly embeddedWorker: boolean;
-  readonly durableTurns: boolean;
+  readonly liveTurns: boolean;
   readonly provider?: string;
   readonly modelHint?: string;
 };
@@ -76,7 +78,7 @@ type Env = Config & {
 const env = (): Env => ({
   ...fromEnv(),
   embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
-  durableTurns: process.env.PI_TEMPORAL_DURABLE_TURNS !== "0",
+  liveTurns: process.env.PI_TEMPORAL_LIVE_TURNS !== "0",
   provider: process.env.PI_TEMPORAL_PROVIDER,
   modelHint: process.env.PI_MODEL,
 });
@@ -342,8 +344,8 @@ export default function (pi: ExtensionAPI) {
         warnedNoTemporal = true;
         const why = err instanceof Error ? err.message : String(err);
         const where = unreachable(err)
-          ? `turns are not durable, Temporal is unreachable at ${cfg.address}`
-          : `turns are not durable here: ${why}`;
+          ? `turns run without Temporal, it is unreachable at ${cfg.address}`
+          : `turns run without Temporal here: ${why}`;
         uiCtx?.ui.notify(where, "warning");
       }
     } finally {
@@ -351,7 +353,7 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  if (cfg.durableTurns) {
+  if (cfg.liveTurns) {
     pi.registerTurnExecutor(runTurnDurably, { resumeOnStart: true });
   }
 

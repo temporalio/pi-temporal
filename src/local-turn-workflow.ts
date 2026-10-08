@@ -15,7 +15,7 @@ import {
   log,
   proxyActivities,
 } from "@temporalio/workflow";
-import { dispatchStepCalls } from "./l2-step.js";
+import { dispatchStepCalls } from "./stepped-step.js";
 import { MAX_STEPS_PER_TURN, TURN_STOPPED } from "./protocol.js";
 import type {
   LocalModelCallResult,
