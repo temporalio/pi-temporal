@@ -11,7 +11,7 @@ name: pi-temporal-l3
 services:
   # The dev server. `--ip 0.0.0.0` so other containers reach it by service name.
   temporal:
-    image: temporalio/admin-tools:1.29@sha256:4a17b5be706c56a9238fb7b5b32a36966cee14939658b20597837b2443b277c8
+    image: temporalio/admin-tools:1.32@sha256:a9f84fb9a374b2374fe2e67c8efc0468ff3f1c66c8a0b14597ec86e349e62bca
     # The image's entrypoint is `sleep infinity`, so override it.
     entrypoint: ["temporal"]
     command: ["server", "start-dev", "--ip", "0.0.0.0", "--log-level", "warn"]
