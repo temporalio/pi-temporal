@@ -27,7 +27,8 @@ try {
     {
       openSession: async () =>
         ({
-          state: { messages: [] },
+          // A long answer, to check that history keeps only a capped copy.
+          state: { messages: [{ role: "assistant", content: "x".repeat(40_000) }] },
           prepareStep: () => true,
           recordPrompt: async () => true,
           // No tool calls, so the step seals as answered.
@@ -53,6 +54,11 @@ try {
   });
 
   check("a step reports what it spent", result.spent?.tokens === 250, result.spent);
+  check(
+    "and keeps a capped copy of a long answer, since it goes into history",
+    result.finalText.length < 17_000 && result.finalText.includes("session file has all of it"),
+    result.finalText.length,
+  );
   check("in money as well as tokens", result.spent?.cost === 0.125, result.spent);
   // A run started after idle retirement can only learn the session total from here.
   check(

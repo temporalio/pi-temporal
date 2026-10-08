@@ -62,7 +62,9 @@ async function main() {
   }
 
   const apiKey = modelApiKey(process.env.PI_TEMPORAL_PROVIDER);
-  // Tools the agent runs inherit this process's env. They must not see the keys.
+  // Keeps the keys out of every tool's environment. A tool running as this user can still read
+  // them from `/proc/<pid>/environ` or the key files, so a deployment that must hide them runs
+  // tools under another user or in a sandbox (`docs/guarantees.md`).
   dropFromEnv(TEMPORAL_CREDENTIAL_VARS);
   dropFromEnv([
     "OPENAI_API_KEY",

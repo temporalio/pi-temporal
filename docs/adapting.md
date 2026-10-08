@@ -39,6 +39,11 @@ makeCoreActivities({ agent: yourAgent(options), hostQueue });
 - **An outcome survives `JSON.stringify`.** It waits in a file between the tool call and the seal.
 - **The prompt is recorded once.** `hasPrompt` must find a prompt `recordPrompt` wrote, even after
   your agent compacts the conversation. Pi marks it with the prompt id.
+- **A model call that runs again reuses the response it recorded.** Temporal retries a model call
+  whose result was lost. If the response is already in the session, return it instead of asking
+  the model again, or the retry is billed and the step gets two responses.
+- **A seal is safe to repeat.** A retried seal must find the outcomes it already wrote and not
+  write them again. It must also give the same answer about whether the turn is over.
 - **A stop is a stop.** When `signal` aborts, end the model call or tool like a user stop and
   report what happened.
 - **Your agent's state between steps goes in `agentState`.** A session is opened again for every

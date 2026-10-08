@@ -45,7 +45,8 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      # `soft` so a dead server fails the check instead of hanging it. `nolock` because the session
-      # lock uses exclusive create and rename, not advisory locks.
-      o: "addr=127.0.0.1,nfsvers=4,port=12049,nolock,soft"
+      # `soft` so a dead server fails the check instead of hanging it. `nolock` because the fence
+      # and the tree leases use exclusive create and rename, not advisory locks. `actimeo=0`,
+      # since they also need a listing that shows new files at once.
+      o: "addr=127.0.0.1,nfsvers=4,port=12049,nolock,soft,actimeo=0"
       device: ":/"

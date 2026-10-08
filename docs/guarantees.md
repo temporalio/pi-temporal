@@ -167,6 +167,11 @@ session’s tree store, salvage included.
 - Live-mode results that were in memory when the process died.
 - A tool still running on a Worker inside `pi` when you quit. `pi` waits a few seconds, then
   abandons it, and its outcome is reported unknown.
+- Credentials kept from tools. A Worker drops the Temporal and model keys from the environment
+  its tools inherit, but the tools run as the same user. They can read the Worker's original
+  environment from `/proc/<pid>/environ`, a key file, or a `temporal.toml`. Inside `pi`, the model
+  key stays in the environment, since `pi` needs it. To keep credentials from the agent, run its
+  tools under another user, in a container, or in a sandbox.
 
 ## Running the checks
 

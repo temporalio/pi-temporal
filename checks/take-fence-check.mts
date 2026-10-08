@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationFailure } from "@temporalio/common";
 import { takeFence, fenceToken, SUPERSEDED } from "../src/core/fence.js";
-import { fencePrefix } from "../src/core/protocol.js";
+import { fencePrefix, fenceStart } from "../src/core/protocol.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-take-fence-"));
 const file = join(root, "s.jsonl");
@@ -43,6 +43,13 @@ try {
   const names = (await readdir(`${file}.fence`)).sort();
   assert.deepEqual(names, [fenceToken(fencePrefix(run + 1, 1), 1)]);
   console.log("PASS a later Activity and a later run sort higher, and lower tokens are dropped");
+
+  // A run that continues as new in the same millisecond counts on from the old run's last fence.
+  const same = fenceStart(run, { ms: run, seq: 7 });
+  assert.ok(fenceToken(fencePrefix(same.ms, same.seq + 1), 1) > token(7, 3));
+  const later = fenceStart(run + 1, { ms: run, seq: 7 });
+  assert.deepEqual(later, { ms: run + 1, seq: 0 });
+  console.log("PASS a run that starts in the same millisecond still sorts after the one before");
 } finally {
   await rm(root, { recursive: true, force: true });
 }
