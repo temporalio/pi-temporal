@@ -556,9 +556,10 @@ export async function piSession(input: SessionInput): Promise<void> {
       current = undefined;
       running = undefined;
       show();
-      // Counted here so failed and interrupted turns still count. The provider billed them.
-      spent.tokens += tokens;
-      spent.cost += cost;
+      // Counted here so failed and interrupted turns still count. The provider billed them. The
+      // record's total carries turns of earlier runs, which a run woken after an idle exit lacks.
+      spent.tokens = Math.max(spent.tokens + tokens, recorded?.tokens ?? 0);
+      spent.cost = Math.max(spent.cost + cost, recorded?.cost ?? 0);
       spent.seconds = sessionSecondsBefore() + (Date.now() - startedAt) / 1000;
       finished = { promptId: prompt.promptId, outcome, finalText, error, spent: { ...spent } };
     }

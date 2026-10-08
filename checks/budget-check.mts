@@ -242,8 +242,23 @@ async function main() {
     const secondRun = await turn({ sessionTokens: 250 }, woken, `${woken}-run-2`);
     check(
       "and a later run of that session is bounded by what the record says it spent",
-      secondRun.finished?.outcome === "budget",
-      secondRun.finished,
+      secondRun.finished?.outcome === "budget" && secondRun.taken === 1,
+      secondRun,
+    );
+    // The total learned from that step outlives the turn, so later prompts of the run pay nothing.
+    const laterRuns = [];
+    for (let i = 0; i < 3; i++) {
+      laterRuns.push(await turn({ sessionTokens: 250 }, woken, `${woken}-run-2`));
+    }
+    check(
+      "and its later prompts run no step",
+      laterRuns.every((r) => r.finished?.outcome === "budget" && r.taken === 0),
+      laterRuns.map((r) => ({ outcome: r.finished?.outcome, taken: r.taken })),
+    );
+    check(
+      "and report the session's whole total",
+      laterRuns.every((r) => (r.finished?.spent?.tokens ?? 0) >= 300),
+      laterRuns.map((r) => r.finished?.spent),
     );
 
     // The same for time. A run woken after an idle exit has no count of its own, so the earlier
