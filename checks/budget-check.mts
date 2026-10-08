@@ -18,6 +18,7 @@ import type {
   RunStepResult,
   ToolCallInput,
   ToolCallResult,
+  SessionInput,
   SessionTurnOptions,
   TurnState,
 } from "../src/core/protocol.js";
@@ -139,11 +140,13 @@ async function main() {
     const handle = await client.workflow.signalWithStart("piSession", {
       workflowId: run ?? `${queue}-${promptId}`,
       taskQueue: queue,
-      args: [session ?? promptId, session ?? `/unused/${promptId}.jsonl`, {
+      args: [{
+        sessionId: session ?? promptId,
+        sessionFile: session ?? `/unused/${promptId}.jsonl`,
         idleTimeout: idle,
         budget,
         stepped,
-      } satisfies SessionTurnOptions as never],
+      } satisfies SessionInput as never],
       signal: "submitPrompt",
       signalArgs: [{ promptId, text: "run" }],
     });

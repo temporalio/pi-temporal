@@ -15,7 +15,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 import { Context } from "@temporalio/activity";
-import type { RunStepInput } from "../src/core/protocol.js";
+import type { RunStepInput, SessionInput } from "../src/core/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const namespace = "default";
@@ -83,12 +83,14 @@ async function main() {
     const handle = await client.workflow.start("piSession", {
       workflowId: `${queue}-session`,
       taskQueue: queue,
-      args: ["replay", "/unused/replay.jsonl", {
+      args: [{
+        sessionId: "replay",
+        sessionFile: "/unused/replay.jsonl",
         stepped: true,
         toolTimeoutMinutes: 1,
         idleTimeout: "100 milliseconds",
         initialPrompt: { promptId: "replay", text: "run" },
-      } as Partial<RunStepInput> as never],
+      } satisfies SessionInput as never],
     });
     const settled = handle.result().catch(() => undefined);
     await Promise.race([settled, new Promise((r) => setTimeout(r, 30_000))]);

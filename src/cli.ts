@@ -31,7 +31,7 @@ import {
   ScheduleOverlapPolicy,
   WorkflowNotFoundError,
 } from "@temporalio/client";
-import type { Quiet, TurnState } from "./core/protocol.js";
+import type { Quiet, SessionInput, TurnState } from "./core/protocol.js";
 import { textOf } from "./pi/messages.js";
 
 const POLL_MS = 1_000;
@@ -211,10 +211,8 @@ async function schedule(args: string[]) {
           taskQueue: cfg.taskQueue,
           // Session-style id (Temporal appends the firing time), so `running` and `watch` see it.
           workflowId: workflowId(id),
-          // Empty session id and file. Each firing derives its own from its workflow id.
+          // No session id or file. Each firing derives its own from its Workflow ID.
           args: [
-            "",
-            "",
             {
               idleTimeout: cfg.idleTimeout,
               stepped: cfg.stepped,
@@ -223,7 +221,7 @@ async function schedule(args: string[]) {
               sessionDir: cfg.sessionDir,
               template,
               initialPrompt: { promptId: `scheduled-${id}`, text },
-            },
+            } satisfies SessionInput,
           ],
         },
       })

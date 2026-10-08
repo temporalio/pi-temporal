@@ -95,7 +95,7 @@ async function main() {
     const handle = await client.workflow.signalWithStart("piSession", {
       workflowId: s.queue,
       taskQueue: s.queue,
-      args: [s.queue, s.file, { idleTimeout: "5 seconds", stepped }],
+      args: [{ sessionId: s.queue, sessionFile: s.file, idleTimeout: "5 seconds", stepped }],
       signal: "submitPrompt",
       signalArgs: [{ promptId: `${s.queue}-prompt`, text }],
     });

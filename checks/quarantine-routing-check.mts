@@ -159,7 +159,9 @@ async function main() {
       workflowId: `${queue}-session`,
       taskQueue: queue,
       // A worker that ships the tree refuses whole-step sessions.
-      args: ["routing", sessionFile, {
+      args: [{
+        sessionId: "routing",
+        sessionFile,
         idleTimeout: "100 milliseconds",
         stepped: true,
         initialPrompt: { promptId: "routing", text: "run" },

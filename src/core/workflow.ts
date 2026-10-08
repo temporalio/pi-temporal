@@ -46,8 +46,9 @@ import type {
   Submitted,
   RunStepInput,
   RunStepResult,
-  SessionTurnOptions,
+  SessionInput,
   Spend,
+  TurnBudget,
   TurnState,
 } from "./protocol.js";
 import { makeSteppedStep, type SteppedActivities } from "./stepped-step.js";
@@ -176,11 +177,28 @@ const SEEN_PROMPTS = 200;
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
 export const turnState = defineQuery<TurnState>(QUERIES.turnState);
 
-export async function piSession(
-  sessionId: string,
-  sessionFile: string,
-  options?: SessionTurnOptions,
-): Promise<void> {
+/** What a turn used so far, for its bounds. */
+interface Usage {
+  readonly turnTokens: number;
+  readonly turnSeconds: number;
+  readonly sessionTokens: number;
+  readonly sessionSeconds: number;
+}
+
+/** Whether a turn went past any of its bounds. Workflow state and the Workflow clock only, so
+ * replay gets the same answer. */
+export function overBudget(budget: TurnBudget | undefined, used: Usage): boolean {
+  if (!budget) return false;
+  return (
+    (budget.tokens !== undefined && used.turnTokens > budget.tokens) ||
+    (budget.seconds !== undefined && used.turnSeconds > budget.seconds) ||
+    (budget.sessionTokens !== undefined && used.sessionTokens > budget.sessionTokens) ||
+    (budget.sessionSeconds !== undefined && used.sessionSeconds > budget.sessionSeconds)
+  );
+}
+
+export async function piSession(input: SessionInput): Promise<void> {
+  const { sessionId, sessionFile, ...options } = input;
   // A schedule can't name a session, and each firing needs its own. Temporal makes scheduled
   // workflow ids unique, so derive the session id from it.
   const id = sessionId || workflowInfo().workflowId.replace(WORKFLOW_ID_PREFIX, "");
@@ -300,57 +318,9 @@ export async function piSession(
   });
   setHandler(turnState, () => ({ queued: queue.length, running, finished }));
 
-  for (;;) {
-    const woke = await condition(() => queue.length > 0, idleTimeout);
-    if (!woke && queue.length === 0) {
-      // Idle: release the project directory and exit. The next prompt starts a fresh run. Best
-      // effort. Each host that held the directory is asked on its own queue.
-      // The Workflow's own count of the session's time, which also covers each turn's last seal
-      // and failed attempts. Written now, since the record is all the next run has.
-      const last = finished && { turn: finished.promptId, sessionSeconds: spent.seconds };
-      const warn = (err: unknown) =>
-        log.warn("could not retire the session's directory", { sessionId: id, err: String(err) });
-      await Promise.all([
-        retireSession({ sessionFile: file, ...last, fence: fence() }).catch(warn),
-        ...[...hostQueues].map((queue) => retireOn(queue)({ sessionFile: file }).catch(warn)),
-      ]);
-      // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.
-      if (queue.length > 0) continue;
-      // Answer waiting clients before the run closes. A prompt can still arrive meanwhile.
-      ending = true;
-      await condition(allHandlersFinished);
-      if (queue.length > 0) {
-        ending = false;
-        continue;
-      }
-      return;
-    }
-
-    // Continue-As-New only between turns. The queue is then the whole control state. A busy stepped
-    // session can hit the history limit in hours.
-    const info = workflowInfo();
-    if (info.continueAsNewSuggested || info.historyLength >= (options?.maxHistory ?? Infinity)) {
-      log.info("continuing the session as new", {
-        sessionId: id,
-        queued: queue.length,
-        historyLength: info.historyLength,
-      });
-      ending = true;
-      await condition(allHandlersFinished);
-      await continueAsNew<typeof piSession>(id, file, {
-        ...options,
-        // The initial prompt is a schedule's task. Carry it only in the queue, or it repeats.
-        initialPrompt: undefined,
-        template: projectAdopted ? undefined : options?.template,
-        queued: queue,
-        finished,
-        spent,
-        hostQueues: [...hostQueues],
-        seenPrompts: seen,
-      });
-    }
-
-    const prompt = queue.shift()!;
+  // One prompt, from the first step to an answer, a stop, a failure, or a bound. A turn that ends
+  // any way but an answer doesn't end the session, which takes the next prompt.
+  const runTurn = async (prompt: PromptInput): Promise<void> => {
     let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
     let finalText = "";
     let error: string | undefined;
@@ -394,20 +364,16 @@ export async function piSession(
         // Workflow state, not file totals, since the session file is shared. `Date.now()` is the
         // workflow clock, so replay agrees. Passed to the step so it can stop mid-batch.
         const over = (pending?: Pick<RunStepResult, "spent" | "total">) => {
-          const b = options?.budget;
-          if (!b) return false;
           const turnSeconds = (Date.now() - startedAt) / 1000;
           const turnTokens = tokens + (pending?.spent?.tokens ?? 0);
           // The session total a model call read already includes its own spend.
           const session = pending?.total ?? recorded;
-          return (
-            (b.tokens !== undefined && turnTokens > b.tokens) ||
-            (b.seconds !== undefined && turnSeconds > b.seconds) ||
-            (b.sessionTokens !== undefined &&
-              (session?.tokens ?? spent.tokens + turnTokens) > b.sessionTokens) ||
-            (b.sessionSeconds !== undefined &&
-              sessionSecondsBefore() + turnSeconds > b.sessionSeconds)
-          );
+          return overBudget(options.budget, {
+            turnTokens,
+            turnSeconds,
+            sessionTokens: session?.tokens ?? spent.tokens + turnTokens,
+            sessionSeconds: sessionSecondsBefore() + turnSeconds,
+          });
         };
         // Between the tools of one step, the step's own model call counts too.
         outOfBudget = (pending) => over(pending);
@@ -487,5 +453,60 @@ export async function piSession(
       spent.seconds = sessionSecondsBefore() + (Date.now() - startedAt) / 1000;
       finished = { promptId: prompt.promptId, outcome, finalText, error, spent: { ...spent } };
     }
+  };
+
+  for (;;) {
+    const woke = await condition(() => queue.length > 0, idleTimeout);
+    if (!woke && queue.length === 0) {
+      // Idle: release the project directory and exit. The next prompt starts a fresh run. Best
+      // effort. Each host that held the directory is asked on its own queue.
+      // The Workflow's own count of the session's time, which also covers each turn's last seal
+      // and failed attempts. Written now, since the record is all the next run has.
+      const last = finished && { turn: finished.promptId, sessionSeconds: spent.seconds };
+      const warn = (err: unknown) =>
+        log.warn("could not retire the session's directory", { sessionId: id, err: String(err) });
+      await Promise.all([
+        retireSession({ sessionFile: file, ...last, fence: fence() }).catch(warn),
+        ...[...hostQueues].map((queue) => retireOn(queue)({ sessionFile: file }).catch(warn)),
+      ]);
+      // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.
+      if (queue.length > 0) continue;
+      // Answer waiting clients before the run closes. A prompt can still arrive meanwhile.
+      ending = true;
+      await condition(allHandlersFinished);
+      if (queue.length > 0) {
+        ending = false;
+        continue;
+      }
+      return;
+    }
+
+    // Continue-As-New only between turns. The queue is then the whole control state. A busy stepped
+    // session can hit the history limit in hours.
+    const info = workflowInfo();
+    if (info.continueAsNewSuggested || info.historyLength >= (options?.maxHistory ?? Infinity)) {
+      log.info("continuing the session as new", {
+        sessionId: id,
+        queued: queue.length,
+        historyLength: info.historyLength,
+      });
+      ending = true;
+      await condition(allHandlersFinished);
+      await continueAsNew<typeof piSession>({
+        ...options,
+        sessionId: id,
+        sessionFile: file,
+        // The initial prompt is a schedule's task. Carry it only in the queue, or it repeats.
+        initialPrompt: undefined,
+        template: projectAdopted ? undefined : options?.template,
+        queued: queue,
+        finished,
+        spent,
+        hostQueues: [...hostQueues],
+        seenPrompts: seen,
+      });
+    }
+
+    await runTurn(queue.shift()!);
   }
 }

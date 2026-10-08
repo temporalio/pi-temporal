@@ -129,7 +129,7 @@ async function runMode(stepped: boolean) {
     client.workflow.signalWithStart(WORKFLOW_TYPE, {
       taskQueue,
       workflowId: workflowId(sessionId),
-      args: [sessionId, sessionFileFor(cfg.sessionDir, sessionId), options],
+      args: [{ sessionId, sessionFile: sessionFileFor(cfg.sessionDir, sessionId), ...options }],
       signal: "submitPrompt",
       signalArgs: [prompt],
     });

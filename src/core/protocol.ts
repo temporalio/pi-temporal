@@ -148,6 +148,17 @@ export interface RunStepResult {
   readonly hostQueue?: string;
 }
 
+/**
+ * How a session Workflow starts. One object, so a field can be added without breaking a running
+ * session's history or a client built against an older shape.
+ */
+export interface SessionInput extends SessionTurnOptions {
+  // Empty for a scheduled firing, which takes its id from its Workflow ID.
+  readonly sessionId?: string;
+  // Defaults to `<sessionDir>/<sessionId>.jsonl`.
+  readonly sessionFile?: string;
+}
+
 export interface SessionTurnOptions {
   // Idle time before the workflow exits. The next prompt starts a fresh run from the session file.
   readonly idleTimeout?: string;

@@ -90,7 +90,9 @@ try {
   const initialized = await client.workflow.start("piSession", {
     workflowId: `${queue}-adopt`,
     taskQueue: queue,
-    args: ["scheduled", "/unused/session.jsonl", {
+    args: [{
+      sessionId: "scheduled",
+      sessionFile: "/unused/session.jsonl",
       idleTimeout: "100 milliseconds",
       template: "/unused/template",
       initialPrompt: { promptId: "scheduled", text: "run" },
@@ -117,7 +119,9 @@ try {
   const retried = await client.workflow.start("piSession", {
     workflowId: `${queue}-retry`,
     taskQueue: queue,
-    args: ["retry", "/unused/retry.jsonl", {
+    args: [{
+      sessionId: "retry",
+      sessionFile: "/unused/retry.jsonl",
       stepped: true,
       idleTimeout: "100 milliseconds",
       initialPrompt: { promptId: "retry", text: "run" },

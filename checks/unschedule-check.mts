@@ -47,7 +47,7 @@ try {
   // Each creation names its own template, and a firing carries it in its arguments.
   const { action } = await scheduled.describe();
   const template = action.type === "startWorkflow"
-    ? (action.args?.[2] as { template?: string } | undefined)?.template
+    ? (action.args?.[0] as { template?: string } | undefined)?.template
     : undefined;
   assert.ok(template, "the schedule must name its template");
   await scheduled.trigger();
