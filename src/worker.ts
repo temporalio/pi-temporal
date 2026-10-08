@@ -16,7 +16,7 @@ import {
 import { createSessionWorker } from "./core/session-worker.js";
 import { makeActivities } from "./pi/activities.js";
 import { dataConverterFor } from "./core/codec.js";
-import { startTracing } from "./core/tracing.js";
+import { flushTracing, startTracing } from "./core/tracing.js";
 import * as worktree from "./tree/worktree.js";
 
 async function main() {
@@ -108,7 +108,9 @@ async function main() {
   await tracing?.shutdown();
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err);
+  // The spans of a failed start or a Worker that died are the ones worth seeing.
+  await flushTracing();
   process.exit(1);
 });

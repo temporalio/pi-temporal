@@ -7,14 +7,20 @@
 // in the sandbox and hands finished spans to the Worker through a sink.
 
 import { createRequire } from "node:module";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+  CompositePropagator,
+  W3CBaggagePropagator,
+  W3CTraceContextPropagator,
+} from "@opentelemetry/core";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { Resource } from "@opentelemetry/resources";
 import {
+  BasicTracerProvider,
   BatchSpanProcessor,
   NoopSpanProcessor,
   type SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import {
   makeWorkflowExporter,
   OpenTelemetryActivityInboundInterceptor,
@@ -38,9 +44,25 @@ export interface Tracing {
 let started: Tracing | undefined;
 
 /**
+ * Registers a provider for this process. The trace context follows async calls, and it crosses
+ * process boundaries only in the W3C headers. The Node provider would also read Jaeger and B3
+ * headers when `OTEL_PROPAGATORS` asks, and its Jaeger reader can crash on a malformed one.
+ */
+export function registerTracing(resource: Resource, spanProcessor: SpanProcessor) {
+  const provider = new BasicTracerProvider({ resource, spanProcessors: [spanProcessor] });
+  provider.register({
+    contextManager: new AsyncLocalStorageContextManager().enable(),
+    propagator: new CompositePropagator({
+      propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
+    }),
+  });
+  return provider;
+}
+
+/**
  * Starts tracing for this process, once. The tracer provider is global, so Activity and client
  * spans reach the same exporter as the Workflow spans the sink delivers. A process that ends on
- * its own flushes on the way out. One that calls `process.exit` should call `shutdown` first.
+ * its own flushes on the way out. One that calls `process.exit` calls `flushTracing` first.
  */
 export function startTracing(serviceName: string): Tracing {
   if (started) return started;
@@ -48,11 +70,27 @@ export function startTracing(serviceName: string): Tracing {
     "service.name": process.env.OTEL_SERVICE_NAME ?? serviceName,
   });
   const spanProcessor = new BatchSpanProcessor(new OTLPTraceExporter());
-  const provider = new NodeTracerProvider({ resource, spanProcessors: [spanProcessor] });
-  provider.register();
+  const provider = registerTracing(resource, spanProcessor);
   process.once("beforeExit", () => void provider.shutdown());
   started = { spanProcessor, resource, shutdown: () => provider.shutdown() };
   return started;
+}
+
+// Long enough for a batch to reach a collector nearby. A collector that's down mustn't hold the
+// exit, so a failed process still ends.
+const FLUSH_MS = 5_000;
+
+/**
+ * Sends the spans still buffered, if this process traces. `beforeExit` doesn't fire for
+ * `process.exit`, so a process that exits on an error calls this first, or it loses the spans
+ * that show the error.
+ */
+export async function flushTracing(): Promise<void> {
+  if (!started) return;
+  await Promise.race([
+    started.shutdown().catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, FLUSH_MS).unref()),
+  ]);
 }
 
 /** Client interceptors that start a trace for each call and pass it on in the call's headers. */

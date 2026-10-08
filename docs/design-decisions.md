@@ -253,5 +253,10 @@ what the server stores, not the server's write path.
 
 Each payload names the key that sealed it, by a hash of the key. To rotate, set the new key as
 `PI_TEMPORAL_CODEC_KEY` and move the old one to `PI_TEMPORAL_CODEC_OLD_KEYS` on every client and
-Worker. New payloads use the new key, and old ones still open. History keeps payloads for the
-namespace's retention period, so drop an old key only after that. `codec-check` covers a rotation.
+Worker. New payloads use the new key, and old ones still open. `codec-check` covers a rotation.
+
+Keep an old key while any history that holds its payloads can still be read. Retention starts only
+when a run closes, so the clock starts at the last close, not at the rotation. A session's runs
+close at each idle exit and each Continue-As-New. Drop the key once every run that started before
+the rotation has closed and the namespace's retention has passed since the last of them closed.
+Archived histories need the key for as long as you keep the archive.

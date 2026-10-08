@@ -4,8 +4,9 @@
 // Clients and Workers that read each other's payloads must share the key. Reading encrypted
 // payloads in the UI or CLI also needs a codec server with this codec.
 //
-// To rotate, make the new key current and keep the old one as a decrypt-only key. History keeps
-// payloads for the namespace's retention period, so drop the old key only after that.
+// To rotate, make the new key current and keep the old one as a decrypt-only key. Keep it while a
+// run that started before the rotation is open, then for the retention period after the last one
+// closes, and for as long as archived histories are kept.
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { DataConverter, Payload, PayloadCodec } from "@temporalio/common";

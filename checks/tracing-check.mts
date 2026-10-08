@@ -14,10 +14,14 @@ import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { Resource } from "@opentelemetry/resources";
 import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { bundleWorkflowCode } from "@temporalio/worker";
 import { createSessionWorker } from "../src/core/session-worker.js";
-import { clientTracing, WORKFLOW_TRACING_MODULE, type Tracing } from "../src/core/tracing.js";
+import {
+  clientTracing,
+  registerTracing,
+  WORKFLOW_TRACING_MODULE,
+  type Tracing,
+} from "../src/core/tracing.js";
 import { UPDATES, workflowId } from "../src/core/protocol.js";
 import type { Quiet, RunStepInput, RunStepResult, SessionInput } from "../src/core/protocol.js";
 
@@ -32,8 +36,7 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 const exporter = new InMemorySpanExporter();
 const spanProcessor = new SimpleSpanProcessor(exporter);
 const resource = new Resource({ "service.name": "tracing-check" });
-const provider = new NodeTracerProvider({ resource, spanProcessors: [spanProcessor] });
-provider.register();
+const provider = registerTracing(resource, spanProcessor);
 const tracing: Tracing = { spanProcessor, resource, shutdown: () => provider.shutdown() };
 
 const activities = () => ({

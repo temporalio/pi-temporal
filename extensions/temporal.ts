@@ -268,6 +268,9 @@ export default function (pi: ExtensionAPI) {
         activities: () => makeLocalTurnActivities(liveTurns),
         shutdownForceTime: EMBEDDED_STOP,
         dataConverter: dataConverterFor(cfg),
+        // The same tracing as the client that starts each turn, so a foreground prompt's trace
+        // goes on into its Workflow and Activities.
+        tracing: cfg.tracing ? startTracing("pi") : undefined,
       });
       worker
         .run()
