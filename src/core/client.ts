@@ -64,7 +64,7 @@ export const sessionOptions = (cfg: Config): SessionTurnOptions => ({
 });
 
 /**
- * Send a prompt, starting the session if it isn’t running. Returns how many prompts are ahead of
+ * Send a prompt, starting the session if it isn't running. Returns how many prompts are ahead of
  * it, or undefined when no Worker answered in time and it went as a Signal. A prompt the session
  * already has counts as sent, so a retry after a lost answer is safe.
  */

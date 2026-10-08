@@ -5,9 +5,9 @@ import { treeStore } from "../tree/store.js";
 import { piAgent, type PiDependencies, type PiOptions } from "./agent.js";
 
 export interface ActivityOptions extends PiOptions {
-  // Ship the project’s files with the session, so another Worker sees the last one’s changes.
+  // Ship the project's files with the session, so another Worker sees the last one's changes.
   readonly shipTree?: boolean;
-  // This Worker’s host queue. The model call reports it, so the rest of the step runs here.
+  // This Worker's host queue. The model call reports it, so the rest of the step runs here.
   readonly hostQueue?: string;
 }
 

@@ -19,7 +19,7 @@ import { dataConverterFor } from "./core/codec.js";
 import * as worktree from "./tree/worktree.js";
 
 async function main() {
-  // Prometheus metrics from the SDK’s core: task latencies, slots, poll and Activity counts. Set
+  // Prometheus metrics from the SDK's core: task latencies, slots, poll and Activity counts. Set
   // before anything connects, since the runtime is set up once per process.
   const metrics = process.env.PI_TEMPORAL_METRICS;
   if (metrics) {

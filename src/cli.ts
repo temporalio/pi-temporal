@@ -1,5 +1,7 @@
-// The CLI can follow a session without a running Pi process. The Workflow holds control state,
-// and the session file holds the conversation. Queries and file reads expose both.
+// The `pi-temporal` CLI starts, watches, stops and schedules Worker-owned sessions from anywhere.
+// It follows a session without a running Pi process. The Workflow holds control state, and the
+// session file holds the conversation. Queries and file reads expose both.
+// Usage: tsx src/cli.ts <command> ... (no command prints the list).
 
 import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
@@ -83,7 +85,7 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
     );
   }
   const file = sessionFileFor(cfg.sessionDir, sessionId);
-  // Only the first prompt sends it. Later, the Workers' tip is ahead of this client’s copy.
+  // Only the first prompt sends it. Later, the Workers' tip is ahead of this client's copy.
   if (await worktree.established(file)) {
     say("  the session already has its project");
     return;
@@ -196,7 +198,7 @@ async function schedule(args: string[]) {
   const { cfg, client, connection } = await connect();
   try {
     // Created paused, before the template is captured. A taken id or a bad spec fails here, so
-    // it can’t overwrite another schedule’s template or leave one behind.
+    // it can't overwrite another schedule's template or leave one behind.
     const handle = await client.schedule
       .create({
         scheduleId: id,

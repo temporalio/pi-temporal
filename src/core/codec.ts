@@ -1,7 +1,7 @@
 // Coding agent payloads can contain code and secrets. With a key set, this codec encrypts
 // payloads before the server stores them in history. Encryption is off by default.
 //
-// Clients and Workers that read each other’s payloads must share the key. Reading encrypted
+// Clients and Workers that read each other's payloads must share the key. Reading encrypted
 // payloads in the UI or CLI also needs a codec server with this codec.
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
@@ -28,7 +28,7 @@ export class AesGcmCodec implements PayloadCodec {
     return payloads.map((payload) => {
       const iv = randomBytes(IV_BYTES);
       const cipher = createCipheriv(CIPHER, this.key, iv);
-      // Encrypting metadata also hides the payload’s encoding.
+      // Encrypting metadata also hides the payload's encoding.
       const plain = Buffer.from(JSON.stringify(toJson(payload)));
       const sealed = Buffer.concat([iv, cipher.update(plain), cipher.final(), cipher.getAuthTag()]);
       return {
@@ -41,7 +41,7 @@ export class AesGcmCodec implements PayloadCodec {
   async decode(payloads: Payload[]): Promise<Payload[]> {
     return payloads.map((payload) => {
       // Payloads written before a key was set stay readable. So would one written by anything that
-      // can write history directly, which this codec doesn’t guard against.
+      // can write history directly, which this codec doesn't guard against.
       if (!payload.metadata?.encoding || text(payload.metadata.encoding) !== ENCODING) {
         return payload;
       }

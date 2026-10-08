@@ -1,7 +1,8 @@
-// The conversation stays in the agent’s session file so Workflow history holds only control
-// state. Activities divide the turn into units that can retry after a Worker crash.
+// The conversation stays in the agent's session file, so Workflow history holds control state
+// plus capped prompts and answers. Activities divide the turn into units that can retry after a
+// Worker crash.
 //
-// Only `@temporalio/workflow` and type-only protocol imports belong in the sandbox.
+// The sandbox loads this file, so it must not import the Pi SDK or Node modules.
 
 import { defineSearchAttributeKey, SearchAttributeType } from "@temporalio/common";
 import {
@@ -61,7 +62,7 @@ const activityOptions = {
   startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
   // For a lost Worker or a storage error. Pi retries the provider itself, inside the step, and
-  // counts those retries in the transcript, so this layer doesn’t need many.
+  // counts those retries in the transcript, so this layer doesn't need many.
   retry: { maximumAttempts: 10, initialInterval: "1 second", maximumInterval: "1 minute" },
 } as const;
 

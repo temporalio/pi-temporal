@@ -1,5 +1,5 @@
 // The project directory as a `ProjectStore`, shipped between hosts as git bundles (`worktree.ts`).
-// Optional: needed only when Workers on different hosts take turns on one session’s files.
+// Optional: needed only when Workers on different hosts take turns on one session's files.
 
 import type { ProjectStore } from "../core/agent.js";
 import * as worktree from "./worktree.js";

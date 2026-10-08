@@ -7,8 +7,8 @@ export const WORKFLOW_ID_PREFIX = "pi-session-";
 // Workflow may move a host-queue step.
 export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
 /**
- * Where a run’s fences start. A run that started no later than the one it continued from counts
- * on from that run’s last fence, so its fences still sort after the old run’s.
+ * Where a run's fences start. A run that started no later than the one it continued from counts
+ * on from that run's last fence, so its fences still sort after the old run's.
  */
 export const fenceStart = (
   runStartMs: number,
@@ -16,7 +16,7 @@ export const fenceStart = (
 ): { ms: number; seq: number } =>
   after && after.ms >= runStartMs ? { ms: after.ms, seq: after.seq } : { ms: runStartMs, seq: 0 };
 
-/** The Workflow’s half of a fence: its run, and the Activity it is about to schedule. */
+/** The Workflow's half of a fence: its run, and the Activity it is about to schedule. */
 export const fencePrefix = (runStartMs: number, seq: number) =>
   `${String(runStartMs).padStart(13, "0")}.${String(seq).padStart(8, "0")}`;
 

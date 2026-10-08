@@ -4,8 +4,8 @@
 // A retry takes over without waiting for a lease to expire.
 //
 // The number is `<run start ms>.<Activity seq>.<attempt>`, so a later run, a later Activity of a
-// run, and a later attempt all sort higher. A new run’s start time must be later than the old
-// run’s, which the server’s clock gives unless it goes back by more than a whole run.
+// run, and a later attempt all sort higher. A new run's start time must be later than the old
+// run's, which the server's clock gives unless it goes back by more than a whole run.
 //
 // The guard checks the fence before each append. A writer that stalls after the check
 // can still land that one append. On NFS, mount with `actimeo=0` (at least `acdirmin=0` and

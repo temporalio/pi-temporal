@@ -54,10 +54,10 @@ const STATUS_KEY = "pi-temporal";
 const POLL_MS = 2000;
 // Shorter than the poll interval, so a Worker that never answers cannot stack polls behind it.
 const QUERY_MS = 1500;
-// How long quitting pi waits for an embedded Worker’s in-flight tool. Past it the tool is
+// How long quitting pi waits for an embedded Worker's in-flight tool. Past it the tool is
 // abandoned, and recovery reports its outcome unknown rather than running it again.
 const EMBEDDED_STOP = "5s";
-// A bound on a live turn’s Workflow, so a turn on a queue nobody polls can’t wait forever. A day
+// A bound on a live turn's Workflow, so a turn on a queue nobody polls can't wait forever. A day
 // is far past any real turn, so it never cuts one short.
 const TURN_TIMEOUT = "24h";
 
@@ -90,7 +90,7 @@ interface Task {
 
 export default function (pi: ExtensionAPI) {
   const cfg = env();
-  // Keeps the Temporal credentials, read once into `cfg` above, out of every tool’s environment.
+  // Keeps the Temporal credentials, read once into `cfg` above, out of every tool's environment.
   // The model keys stay, since pi itself needs them. Tools run as you, so they could read either
   // from this process anyway. This only stops them being handed over by default.
   dropFromEnv(TEMPORAL_CREDENTIAL_VARS);
@@ -99,10 +99,10 @@ export default function (pi: ExtensionAPI) {
   let embedding: Promise<SessionWorker> | undefined;
   const watching = new Map<string, Task>();
   let watcher: NodeJS.Timeout | undefined;
-  // The turn executor is handed a turn, not a context, so it borrows the session’s for messages.
+  // The turn executor is handed a turn, not a context, so it borrows the session's for messages.
   let uiCtx: ExtensionContext | undefined;
   let warnedNoTemporal = false;
-  // The embedded Worker hosts the same Activities, so it gets the standalone Worker’s checks.
+  // The embedded Worker hosts the same Activities, so it gets the standalone Worker's checks.
   const workerProblems = cfg.embeddedWorker ? preflight(cfg) : [];
   let polling = false;
 
@@ -117,7 +117,7 @@ export default function (pi: ExtensionAPI) {
     return opening;
   };
 
-  // Deferring the bundle build keeps it out of Pi’s startup path.
+  // Deferring the bundle build keeps it out of Pi's startup path.
   const startWorker = (ctx: ExtensionContext) => {
     if (embedding) return embedding;
     const starting: Promise<SessionWorker> = (async () => {

@@ -4,7 +4,7 @@
 // Stepped mode gives each model call, tool call, and seal its own Activity. A process crash
 // loses results that the seal has not recorded.
 //
-// Only `@temporalio/workflow` and type-only protocol imports belong in the sandbox.
+// The sandbox loads this file, so it must not import the Pi SDK or Node modules.
 
 import {
   ActivityCancellationType,
@@ -84,7 +84,7 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
       await CancellationScope.nonCancellable(() => seal(true)).catch((err: unknown) => {
         log.warn("could not close a stopped step", { step, error: String(err) });
       });
-      // A user stop closes the turn, it doesn’t fail it.
+      // A user stop closes the turn, it doesn't fail it.
       if (userStopped(stopped)) return;
       throw stopped;
     }

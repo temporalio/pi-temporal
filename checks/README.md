@@ -8,7 +8,7 @@ The groups below show test patterns you can copy for your own agent.
 
 ## Pure functions, no server
 
-These checks run storage and configuration logic without a Temporal server.
+These checks run logic that needs no Temporal server.
 
 `take-fence-check`, `pending-check`, `lease-check`, `lease-recovery-check`, `lock-gap-check`,
 `stall-check`, `session-id-check`, `config-check`, `stale-tip-check`, `worktree-check`,
@@ -33,7 +33,7 @@ results so a failure can be reproduced without a model call.
 ## The Workflow with stub Activities, on a dev server
 
 These checks run a real Worker and Workflow with stub Activities. They cover prompt submission
-and budgets, as well as routing and Continue-as-New.
+and budgets, as well as routing and Continue-As-New.
 
 `step-loop-check`, `submit-check`, `budget-check`, `continue-as-new-check`, `workflow-init-check`,
 `local-turn-check`, `embedded-stop-check`, `codec-check`, `unschedule-check`, `cli-check`

@@ -1,4 +1,4 @@
-// A live turn stays in the Pi process so it can use Pi’s transcript and streaming events.
+// A live turn stays in the Pi process so it can use Pi's transcript and streaming events.
 //
 // Unsealed tool results live in memory. A process crash loses them, and reopening the session
 // resumes from the transcript.
@@ -28,7 +28,7 @@ export type LiveTurns = Map<string, LiveTurn>;
 interface TurnProgress {
   recorded: boolean;
   readonly results: Map<string, TurnToolCallOutcome>;
-  // Retries join the same unit so they don’t bill another model call or repeat a tool’s effect.
+  // Retries join the same unit so they don't bill another model call or repeat a tool's effect.
   // Failed units are forgotten so another attempt can run them.
   readonly units: Map<string, Promise<unknown>>;
 }

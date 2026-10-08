@@ -11,7 +11,7 @@ turn. An interrupted tool with no saved result is reported to the model as an un
 ANTHROPIC_API_KEY=... demo/run.sh
 ```
 
-`ANTHROPIC_API_KEY_FILE` works too. You’ll need Docker and `python3`. The default model is
+`ANTHROPIC_API_KEY_FILE` works too. You'll need Docker and `python3`. The default model is
 `claude-haiku-4-5`. Allow a few minutes for a run. Model charges depend on how much work is
 interrupted and repeated.
 
@@ -29,7 +29,7 @@ killed Worker must wait for its lease to go stale.
 - The Temporal UI at http://localhost:8233 shows each attempt and the Worker that ran it.
 
 When the turn ends, the script prints the answer and the contents of `result.txt`. It also reports
-the kills. If the turn didn’t finish, the script exits with a nonzero status. Logs stay under
+the kills. If the turn didn't finish, the script exits with a nonzero status. Logs stay under
 `demo/logs/<run>/`.
 
 ## Knobs

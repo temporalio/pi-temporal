@@ -7,7 +7,7 @@ storage. The `fleet` profile also moves the project files.
 
 Pi keeps the conversation in its session file and keeps its terminal interface. Temporal tracks
 execution through Workflows and Activities. If a tool started but left no saved result, recovery
-reports an unknown outcome to the model. It doesn’t repeat the call on a guess.
+reports an unknown outcome to the model. It doesn't repeat the call on a guess.
 
 Live turns recover when you reopen `pi`. `/background` tasks run in separate Worker sessions and
 can continue after you quit.
@@ -20,7 +20,7 @@ can continue after you quit.
   Workers.
 - Worker sessions accept token and wall-clock budgets for each turn or the whole session.
 
-You can use this repo as a template for your own agent’s loop. The Temporal code in `src/core/`
+You can use this repo as a template for your own agent's loop. The Temporal code in `src/core/`
 uses the `Agent` interface. Pi is one implementation.
 
 - [docs/architecture.md](docs/architecture.md) describes state ownership and the optional modules.
@@ -52,7 +52,7 @@ cd /path/to/your/project
 ```
 
 Each live turn gets a `piLocalTurn` Workflow, which gives it a record in Temporal and retries.
-The turn runs in memory inside `pi`, so it can’t move to another process. Kill `pi` during a tool
+The turn runs in memory inside `pi`, so it can't move to another process. Kill `pi` during a tool
 call, reopen it with `run-pi.sh -c`, and Pi records an unknown outcome for an interrupted call
 with no saved result.
 
@@ -76,12 +76,12 @@ npx tsx src/cli.ts doctor                 # resolved config and server reachabil
 ```
 
 The Workflow holds control state. The session file holds the conversation. To follow a session,
-the client tails the file and waits on the Workflow’s `waitForQuiet` Update. With `PI_SESSION_DIR`
+the client tails the file and waits on the Workflow's `waitForQuiet` Update. With `PI_SESSION_DIR`
 on shared storage, you can submit a task from one machine and watch it from another. `watch`
 exits with a nonzero status unless the turn was answered. `--timeout=<seconds>` bounds how long it
 follows.
 
-`start` and `schedule` check the project’s ignore rules before sending `--project`. They refuse
+`start` and `schedule` check the project's ignore rules before sending `--project`. They refuse
 your home directory. `/background` applies the same checks to its directory.
 
 The session you type in stays yours. `/background` and `start` create a new Worker-owned session
@@ -93,7 +93,7 @@ A turn starts with a user prompt and ends with the final response. Each step con
 call and any tool calls it requests. The seal records those tool results in the transcript.
 
 By default, a Worker session runs each step in one `runStep` Activity. One `piSession` Workflow
-handles the session’s turns. A live turn uses its own `piLocalTurn` Workflow and runs in one
+handles the session's turns. A live turn uses its own `piLocalTurn` Workflow and runs in one
 `runLocalTurn` Activity. The transcript decides what runs next.
 
 `PI_TEMPORAL_STEPPED=1` splits the model call and seal into separate Activities. Each tool call
@@ -118,7 +118,7 @@ reports an unknown outcome instead of repeating the call.
 | project files travel | no | yes |
 | unit of work | a whole step | each model call, tool call, and seal |
 
-`doctor` checks the profile’s configuration rules. It can’t verify shared storage or the clock
+`doctor` checks the profile's configuration rules. It can't verify shared storage or the clock
 assumptions described in [docs/guarantees.md](docs/guarantees.md).
 
 | variable | what it sets | default |
@@ -126,13 +126,13 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_TEMPORAL_PROFILE` | `local` or `fleet`, the defaults below | `local` |
 | `PI_SESSION_DIR` | where session files live, shared storage in a fleet | `~/.pi-temporal/sessions` |
 | `PI_TEMPORAL_STEPPED` | `1` runs each model call, tool call, and seal as its own Activity | off, on in `fleet` |
-| `PI_TEMPORAL_SHIP_TREE` | `1` ships the project’s files between hosts | off, on in `fleet` |
+| `PI_TEMPORAL_SHIP_TREE` | `1` ships the project's files between hosts | off, on in `fleet` |
 | `PI_TEMPORAL_TASK_QUEUE` | the Task Queue sessions use | `pi-session` |
 | `PI_TEMPORAL_PROVIDER` | `openai` or `anthropic` (reads `<PROVIDER>_API_KEY` or `_API_KEY_FILE`) | `openai` |
-| `PI_MODEL` | substring matched against the provider’s model ids | `mini` / `haiku` |
+| `PI_MODEL` | substring matched against the provider's model ids | `mini` / `haiku` |
 | `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` | tool attempt timeout, stepped Worker sessions | 30 |
 | `PI_TEMPORAL_BUDGET_TOKENS`, `_SECONDS` | tokens and wall clock per turn | none |
-| `PI_TEMPORAL_BUDGET_HARD_SECONDS` | deadline that cancels the turn’s wait, even during a call | none |
+| `PI_TEMPORAL_BUDGET_HARD_SECONDS` | deadline that cancels the turn's wait, even during a call | none |
 | `PI_TEMPORAL_BUDGET_SESSION_TOKENS`, `_SECONDS` | tokens and wall clock per session | none |
 | `PI_SESSION_IDLE_TIMEOUT` | how long an idle session Workflow waits | `5 minutes` |
 | `PI_TEMPORAL_DATA` | host directory for shadow repos and markers | `~/.pi-temporal` |
@@ -140,8 +140,8 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_TEMPORAL_EMBEDDED_WORKER` | `0` when a standalone Worker (`npm run worker`) owns the queue | on |
 | `PI_TEMPORAL_CODEC_KEY`, `_FILE` | 32 bytes, base64, to encrypt payloads in history | none |
 | `PI_TEMPORAL_SEARCH_ATTRIBUTE` | `1` keeps session state in the `PiSessionState` search attribute | off |
-| `PI_TEMPORAL_METRICS` | address for the Worker’s Prometheus metrics, such as `0.0.0.0:9464` | none |
-| `PI_TEMPORAL_WORKFLOW_BUNDLE` | a bundle from `npm run bundle`, so the Worker doesn’t bundle at start | none |
+| `PI_TEMPORAL_METRICS` | address for the Worker's Prometheus metrics, such as `0.0.0.0:9464` | none |
+| `PI_TEMPORAL_WORKFLOW_BUNDLE` | a bundle from `npm run bundle`, so the Worker doesn't bundle at start | none |
 
 The hard deadline stops the Workflow from waiting for the call. An external command may keep
 running after cancellation. Token and other wall-clock budgets are checked between steps or
@@ -150,11 +150,11 @@ sequential tool calls, so a running call can exceed them.
 The standard Temporal settings also apply. Use `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`,
 `TEMPORAL_API_KEY`, the `TEMPORAL_TLS_*` variables, or a `TEMPORAL_PROFILE` in `temporal.toml`.
 When both sources set a credential, the `PI_TEMPORAL_*` value takes priority. Other TLS settings
-from the profile still apply, including its CA. Tools don’t inherit either set of credentials.
+from the profile still apply, including its CA. Tools don't inherit either set of credentials.
 They run as the same user, so they can still read them.
 See [docs/guarantees.md](docs/guarantees.md).
 
-For Temporal Cloud, export an API key with the namespace’s address before you start a Worker or
+For Temporal Cloud, export an API key with the namespace's address before you start a Worker or
 run the CLI.
 
 ```bash
@@ -170,13 +170,13 @@ export PI_TEMPORAL_TLS_CERT=/run/secrets/tls.crt PI_TEMPORAL_TLS_KEY=/run/secret
 export PI_TEMPORAL_TLS_CA=/run/secrets/ca.crt
 ```
 
-If Temporal can’t be reached before a turn starts, the extension says so and runs that turn as
+If Temporal can't be reached before a turn starts, the extension says so and runs that turn as
 plain Pi, without recovery. If Temporal goes away mid-turn, the turn stops with an error, and the
 steps it already recorded stay in the session.
 
 ## The Pi fork
 
-The step-level API isn’t in the published Pi package yet, so this repo builds the
+The step-level API isn't in the published Pi package yet, so this repo builds the
 [temporalio/pi](https://github.com/temporalio/pi) fork at the commit in `fork.pin`. The fork
 adds `prepareStep`, `recordPrompt`, `modelCall` / `runToolCall` / `sealStep`, `setWriteGuard`,
 and `pi.registerTurnExecutor`. [docs/upstream.md](docs/upstream.md) has the plan to upstream it.
@@ -200,4 +200,4 @@ by how they test, so you can find examples for your own agent.
 
 [osolmaz/pi-workflows](https://github.com/osolmaz/pi-workflows) makes user-defined workflow
 graphs durable in Pi with its own file-queue engine. This project uses Temporal to recover the
-agent’s turn loop.
+agent's turn loop.
