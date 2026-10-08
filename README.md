@@ -255,18 +255,13 @@ The workflow's checks stop mistakes, not someone who means harm. GitHub runs the
 tagged commit has it. So protect `v*` tags with a ruleset that lets only release maintainers
 create, move or delete them.
 
-`package.json` is at `0.1.0`, so the first release only needs its tag.
+A release bumps the version first. Merge the bump to `main`, then tag that commit.
 
 ```shell
-git tag v0.1.0 origin/main
-git push origin v0.1.0
-```
-
-A later release bumps the version first. Merge the bump to `main`, then tag that commit the same
-way.
-
-```shell
-npm version 0.2.0 --no-git-tag-version
+npm version 0.3.0 --no-git-tag-version
+# After the bump is on main.
+git tag v0.3.0 origin/main
+git push origin v0.3.0
 ```
 
 ## Prior art
