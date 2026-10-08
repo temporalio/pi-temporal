@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { connect, interrupt, sessionExists, submitPrompt } from "./client.js";
+import { connect, interrupt, sessionExists, submitPrompt } from "./core/client.js";
 import {
   clientProblems,
   describe,
@@ -24,15 +24,15 @@ import {
   WORKFLOW_TYPE,
   WORKFLOW_ID_PREFIX,
   workflowId,
-} from "./protocol.js";
+} from "./core/protocol.js";
 import {
   QueryRejectedError,
   ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   WorkflowNotFoundError,
 } from "@temporalio/client";
-import type { Quiet, TurnState } from "./protocol.js";
-import { textOf } from "./messages.js";
+import type { Quiet, SessionInput, TurnState } from "./core/protocol.js";
+import { textOf } from "./pi/messages.js";
 
 const POLL_MS = 1_000;
 
@@ -211,10 +211,8 @@ async function schedule(args: string[]) {
           taskQueue: cfg.taskQueue,
           // Session-style id (Temporal appends the firing time), so `running` and `watch` see it.
           workflowId: workflowId(id),
-          // Empty session id and file. Each firing derives its own from its workflow id.
+          // No session id or file. Each firing derives its own from its Workflow ID.
           args: [
-            "",
-            "",
             {
               idleTimeout: cfg.idleTimeout,
               stepped: cfg.stepped,
@@ -223,7 +221,7 @@ async function schedule(args: string[]) {
               sessionDir: cfg.sessionDir,
               template,
               initialPrompt: { promptId: `scheduled-${id}`, text },
-            },
+            } satisfies SessionInput,
           ],
         },
       })

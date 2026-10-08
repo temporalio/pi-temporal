@@ -14,8 +14,8 @@ import type {
   LocalToolCallInput,
   LocalTurnInput,
   ToolCallResult,
-} from "./protocol.js";
-import { TURN_STOPPED } from "./protocol.js";
+} from "../core/protocol.js";
+import { TURN_STOPPED } from "../core/protocol.js";
 
 /** A turn this process is holding, waiting for its workflow to say run. */
 export interface LiveTurn {

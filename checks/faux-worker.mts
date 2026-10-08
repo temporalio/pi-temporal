@@ -18,7 +18,7 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/activities.js";
+import { makeActivities } from "../src/pi/activities.js";
 
 // Load the agent's own copies by path. The provider registry and stream class are module state.
 const codingAgent = new URL("../node_modules/@earendil-works/pi-coding-agent", import.meta.url);
@@ -266,7 +266,7 @@ export async function runFauxWorker(queue: string, dir: string) {
     connection,
     namespace: "default",
     taskQueue: queue,
-    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities: makeActivities(
       { projectDir, provider: PROVIDER },
       { openSession: fauxOpenSession(dir, projectDir) },

@@ -1,0 +1,23 @@
+// The Activities a Pi session's Workflow runs: the core ones, with Pi as the agent and, when the
+// project travels between hosts, the tree store.
+
+import { makeCoreActivities } from "../core/activities.js";
+import { treeStore } from "../tree/store.js";
+import { piAgent, type PiDependencies, type PiOptions } from "./agent.js";
+
+export interface ActivityOptions extends PiOptions {
+  // Ship the project's files with the session, so another Worker sees the last one's changes.
+  readonly shipTree?: boolean;
+  // This Worker's host queue. The model call reports it, so the rest of the step runs here.
+  readonly hostQueue?: string;
+}
+
+export function makeActivities(opts: ActivityOptions, dependencies: PiDependencies = {}) {
+  return makeCoreActivities({
+    agent: piAgent(opts, dependencies),
+    ...(opts.shipTree ? { store: treeStore(opts.projectDir) } : {}),
+    ...(opts.hostQueue === undefined ? {} : { hostQueue: opts.hostQueue }),
+  });
+}
+
+export type Activities = ReturnType<typeof makeActivities>;

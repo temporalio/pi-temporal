@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
+import type { ToolOutcome } from "./agent.js";
 
 const RESULT = ".json";
 const STARTED = ".started";
@@ -88,7 +88,7 @@ export async function keepResult(
   turn: string,
   step: number,
   callId: string,
-  outcome: TurnToolCallOutcome,
+  outcome: ToolOutcome,
 ): Promise<void> {
   const target = resultPath(sessionFile, turn, step, callId);
   // Unique per writer. A timed-out attempt may still be writing while its retry writes too.
@@ -110,7 +110,7 @@ export async function readResult(
   turn: string,
   step: number,
   callId: string,
-): Promise<TurnToolCallOutcome | undefined> {
+): Promise<ToolOutcome | undefined> {
   // Only a missing result is no result. Read as missing, an unreadable one would make the seal
   // record unknown over a real result.
   let kept: string;
@@ -120,7 +120,7 @@ export async function readResult(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw err;
   }
-  return JSON.parse(kept) as TurnToolCallOutcome;
+  return JSON.parse(kept) as ToolOutcome;
 }
 
 /** Drop the results kept for the given calls of one step. Their claims stay: see `sweep`. */

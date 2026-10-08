@@ -31,7 +31,7 @@ import { constants } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import * as pending from "../pending.js";
+import * as pending from "../core/pending.js";
 import { withLease } from "./lease.js";
 
 const execFileAsync = promisify(execFile);

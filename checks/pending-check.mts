@@ -7,8 +7,12 @@
 import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { unknownToolCallOutcome } from "@earendil-works/pi-coding-agent";
-import * as pending from "../src/pending.js";
+import { type TurnToolCallOutcome, unknownToolCallOutcome } from "@earendil-works/pi-coding-agent";
+import * as pending from "../src/core/pending.js";
+
+// The core keeps an outcome as the agent made it. Here that's Pi's shape.
+const readOutcome = async (...args: Parameters<typeof pending.readResult>) =>
+  (await pending.readResult(...args)) as TurnToolCallOutcome | undefined;
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
@@ -33,23 +37,23 @@ async function main() {
   );
   check(
     "an untouched call has no result",
-    (await pending.readResult(file, t1, 1, "c1")) === undefined,
+    (await readOutcome(file, t1, 1, "c1")) === undefined,
   );
 
   check("a first dispatch is admitted", (await pending.claimDispatch(file, t1, 1, "c1")) === true);
   check("a dispatch leaves a claim", (await pending.dispatchClaimed(file, t1, 1, "c1")) === true);
-  check("the claim is not a result", (await pending.readResult(file, t1, 1, "c1")) === undefined);
+  check("the claim is not a result", (await readOutcome(file, t1, 1, "c1")) === undefined);
   check("a second dispatch is refused", (await pending.claimDispatch(file, t1, 1, "c1")) === false);
 
   await pending.keepResult(file, t1, 1, "c1", outcome("c1"));
-  const kept = await pending.readResult(file, t1, 1, "c1");
+  const kept = await readOutcome(file, t1, 1, "c1");
   check("a kept result round-trips", kept?.message.toolCallId === "c1", kept);
   check("a kept result keeps its terminate flag", kept?.terminate === false, kept);
 
   // Scratch from a dead writer must never read as a result.
   const step1 = pending.stepDirFor(file, t1, 1);
   await writeFile(join(step1, "c2.json.abandoned.writing"), "{ not json", "utf8");
-  check("scratch is not a result", (await pending.readResult(file, t1, 1, "c2")) === undefined);
+  check("scratch is not a result", (await readOutcome(file, t1, 1, "c2")) === undefined);
 
   // An attempt past its startToClose can still be writing while its retry writes. A shared
   // scratch path would publish a torn result that the seal reads as unknown.
@@ -58,14 +62,14 @@ async function main() {
     const content = [{ type: "text" as const, text: "x".repeat(size) }];
     return { ...kept, message: { ...kept.message, content } };
   };
-  let overlapped: Awaited<ReturnType<typeof pending.readResult>>;
+  let overlapped: Awaited<ReturnType<typeof readOutcome>>;
   let wrote = true;
   try {
     await Promise.all([
       pending.keepResult(file, t1, 1, "c3", big("c3", 400_000)),
       pending.keepResult(file, t1, 1, "c3", big("c3", 400_001)),
     ]);
-    overlapped = await pending.readResult(file, t1, 1, "c3");
+    overlapped = await readOutcome(file, t1, 1, "c3");
   } catch (err) {
     wrote = false;
     overlapped = undefined;
@@ -82,13 +86,13 @@ async function main() {
   await pending.sweep(file, t1, 2);
   check(
     "an earlier step's results are forgotten",
-    (await pending.readResult(file, t1, 1, "c1")) === undefined,
+    (await readOutcome(file, t1, 1, "c1")) === undefined,
   );
   // Notes must outlive results, or a stalled attempt reruns the tool (`stale-dispatch-check.mts`).
   check("its admission stays", (await pending.dispatchClaimed(file, t1, 1, "c1")) === true);
-  const reused = (await pending.readResult(file, t1, 2, "c1"))?.message.toolCallId === "c1";
+  const reused = (await readOutcome(file, t1, 2, "c1"))?.message.toolCallId === "c1";
   check("the same id in this step is its own", reused);
-  check("the whole earlier step goes", (await pending.readResult(file, t1, 1, "c2")) === undefined);
+  check("the whole earlier step goes", (await readOutcome(file, t1, 1, "c2")) === undefined);
 
   const left = await readdir(pending.stepDirFor(file, t1, 2));
   check("no scratch is left behind", left.every((name) => !name.endsWith(".writing")), left);
@@ -96,7 +100,7 @@ async function main() {
   await pending.forgetResults(file, t1, 2, ["c1"]);
   check(
     "forgetting a result drops it",
-    (await pending.readResult(file, t1, 2, "c1")) === undefined,
+    (await readOutcome(file, t1, 2, "c1")) === undefined,
   );
   check("and leaves what admitted it", (await pending.dispatchClaimed(file, t1, 2, "c1")) === true);
 
@@ -104,7 +108,7 @@ async function main() {
   await pending.sweepResults(file);
   check(
     "a new turn drops the results",
-    (await pending.readResult(file, t1, 2, "c1")) === undefined,
+    (await readOutcome(file, t1, 2, "c1")) === undefined,
   );
   check("and keeps the admissions", (await pending.dispatchClaimed(file, t1, 1, "c1")) === true);
 

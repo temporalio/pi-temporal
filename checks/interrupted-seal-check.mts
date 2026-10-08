@@ -20,9 +20,9 @@ import {
   type AgentSession,
   type TurnToolCallOutcome,
 } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/activities.js";
-import { makeSteppedStep } from "../src/stepped-step.js";
-import * as pending from "../src/pending.js";
+import { makeActivities } from "../src/pi/activities.js";
+import { makeSteppedStep } from "../src/core/stepped-step.js";
+import * as pending from "../src/core/pending.js";
 
 class Cancelled extends Error {}
 for (const { failure, atSeal } of [

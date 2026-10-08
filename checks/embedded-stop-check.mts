@@ -8,9 +8,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, Connection } from "@temporalio/client";
-import { makeLocalTurnActivities, type LiveTurns } from "../src/local-turn-activity.js";
-import { LOCAL_TURN_WORKFLOW } from "../src/protocol.js";
-import { createSessionWorker } from "../src/session-worker.js";
+import { makeLocalTurnActivities, type LiveTurns } from "../src/pi/local-turn-activity.js";
+import { LOCAL_TURN_WORKFLOW } from "../src/core/protocol.js";
+import { createSessionWorker } from "../src/core/session-worker.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
@@ -43,8 +43,7 @@ async function main() {
     address,
     namespace: "default",
     taskQueue: queue,
-    projectDir: root,
-    activities: makeLocalTurnActivities(live),
+    activities: () => makeLocalTurnActivities(live),
     shutdownForceTime: "2s",
   });
   const running = worker.run().catch(() => {});

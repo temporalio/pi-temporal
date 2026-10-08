@@ -11,10 +11,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { sendPrompt } from "../src/client.js";
+import { sendPrompt } from "../src/core/client.js";
 import { fromEnv } from "../src/config.js";
-import { UPDATES, workflowId } from "../src/protocol.js";
-import type { Quiet, RunStepInput, RunStepResult } from "../src/protocol.js";
+import { UPDATES, workflowId } from "../src/core/protocol.js";
+import type { Quiet, RunStepInput, RunStepResult } from "../src/core/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const failures: string[] = [];
@@ -27,7 +27,7 @@ const ran = new Map<string, number>();
 const activities = {
   async runStep(input: RunStepInput): Promise<RunStepResult> {
     ran.set(input.promptId, (ran.get(input.promptId) ?? 0) + 1);
-    return { done: true, retryAttempt: 0, finalText: `answered ${input.promptId}` };
+    return { done: true, finalText: `answered ${input.promptId}` };
   },
   async retireSession() {},
   async adoptProject() {},
@@ -49,7 +49,7 @@ const startWorker = async () => {
     connection: native,
     namespace: "default",
     taskQueue: queue,
-    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities,
   });
   running = worker.run();

@@ -12,7 +12,7 @@ import {
   WorkflowUpdateRPCTimeoutOrCancelledError,
 } from "@temporalio/client";
 import { ApplicationFailure } from "@temporalio/common";
-import { type Config, connectionOptions, fromEnv, sessionFileFor } from "./config.js";
+import { type Config, connectionOptions, fromEnv, sessionFileFor } from "../config.js";
 import {
   DUPLICATE_PROMPT,
   SIGNALS,
@@ -67,7 +67,7 @@ export async function sendPrompt(
   prompt: PromptInput,
 ): Promise<number | undefined> {
   const file = sessionFileFor(cfg.sessionDir, sessionId);
-  const args: Parameters<Session> = [sessionId, file, sessionOptions(cfg)];
+  const args: Parameters<Session> = [{ sessionId, sessionFile: file, ...sessionOptions(cfg) }];
   const start = { taskQueue: cfg.taskQueue, workflowId: workflowId(sessionId), args };
   try {
     const submitted = await client.withDeadline(Date.now() + ACCEPT_MS, () =>
