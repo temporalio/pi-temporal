@@ -39,6 +39,13 @@ export interface Config {
   readonly brokenTlsPair?: boolean;
   // How long one tool call may run in stepped mode. Unset keeps the Workflow's default.
   readonly toolTimeoutMinutes?: number;
+  // How long a Worker's shutdown lets running Activities finish. A deploy should outlast most
+  // model calls, so a step isn't cut off and paid for twice.
+  readonly shutdownGrace: number;
+  // Activity slots per Worker poller (`core/session-worker.ts`).
+  readonly maxActivities: number;
+  // Worker Versioning. Both `PI_TEMPORAL_DEPLOYMENT` and `PI_TEMPORAL_BUILD_ID`, or neither.
+  readonly deployment?: { readonly name: string; readonly buildId: string };
   // Spend limits for a turn and a session. Unset means no limit.
   readonly budget?: TurnBudget;
 }
@@ -100,6 +107,9 @@ export function fromEnv(): Config {
     searchAttribute: onOff("PI_TEMPORAL_SEARCH_ATTRIBUTE", false),
     ...codecKeyFromEnv(),
     toolTimeoutMinutes: minutesFromEnv("PI_TEMPORAL_TOOL_TIMEOUT_MINUTES"),
+    shutdownGrace: (wholeFromEnv("PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS", "seconds") ?? 60) * 1000,
+    maxActivities: wholeFromEnv("PI_TEMPORAL_MAX_ACTIVITIES", "Activities") ?? 16,
+    ...deploymentFromEnv(),
     budget: budgetFromEnv(),
     // In a fleet the files must travel, or tools run against the wrong directory.
     shipTree: onOff("PI_TEMPORAL_SHIP_TREE", fleet),
@@ -273,6 +283,10 @@ export function describe(cfg: Config): Record<string, string> {
     stepped: String(cfg.stepped),
     toolTimeoutMinutes: cfg.toolTimeoutMinutes ? `${cfg.toolTimeoutMinutes} minutes` : "default",
     shipTree: String(cfg.shipTree),
+    maxActivities: String(cfg.maxActivities),
+    deployment: cfg.deployment
+      ? `${cfg.deployment.name}.${cfg.deployment.buildId}`
+      : "unversioned",
     budget: cfg.budget
       ? Object.entries(cfg.budget)
           .map(([name, value]) => `${name}=${value}`)
@@ -302,6 +316,17 @@ function wholeFromEnv(name: string, unit: string): number | undefined {
     throw new Error(`${name} must be a whole number of ${unit}, got ${JSON.stringify(raw)}`);
   }
   return value;
+}
+
+function deploymentFromEnv(): Pick<Config, "deployment"> {
+  const name = process.env.PI_TEMPORAL_DEPLOYMENT;
+  const buildId = process.env.PI_TEMPORAL_BUILD_ID;
+  if (!name && !buildId) return {};
+  // Half a version would start an unversioned Worker that the deployment never routes to.
+  if (!name || !buildId) {
+    throw new Error("PI_TEMPORAL_DEPLOYMENT and PI_TEMPORAL_BUILD_ID must be set together");
+  }
+  return { deployment: { name, buildId } };
 }
 
 // Read where a session starts and passed in its options, since workflows can't read env.

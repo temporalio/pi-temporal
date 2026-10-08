@@ -68,8 +68,6 @@ export interface AgentSession {
       readonly postRun: boolean;
     },
   ): Promise<Sealed>;
-  /** Stop what the session is running, like a user stop. */
-  abort(): Promise<void>;
   /** Wait for work the session started on its own after a seal, such as a compaction. */
   waitForIdle(): Promise<void>;
   dispose(): void;

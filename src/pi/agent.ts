@@ -125,7 +125,6 @@ function wrap(session: PiSession): AgentSession {
       };
       return { done: sealed.done, agentState: next as AgentState };
     },
-    abort: () => session.abort(),
     waitForIdle: () => session.waitForIdle(),
     dispose: () => session.dispose(),
 

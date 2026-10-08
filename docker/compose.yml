@@ -25,6 +25,9 @@ services:
 
   worker-a: &worker
     image: pi-temporal:l3
+    # Past the Worker's shutdown grace (60 seconds by default), so a running model call or tool
+    # can finish before Docker kills the process.
+    stop_grace_period: 90s
     depends_on:
       temporal:
         condition: service_healthy

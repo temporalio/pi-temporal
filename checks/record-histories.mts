@@ -1,4 +1,4 @@
-// Not a check. Records the histories `replay-check` replays, one per kind of session run, into
+// Not a check. Records the histories `replay-kept-check` replays, one per kind of session run, into
 // `checks/histories/`, named with today's date so older ones are kept. Run it when a change to the
 // Workflows is meant to change what they do, and commit the new files next to the old ones. A
 // history from an older release that no longer replays means running sessions of that release
@@ -46,7 +46,7 @@ const activities = {
   async runStep(input: RunStepInput): Promise<RunStepResult> {
     const taken = (steps.get(input.promptId) ?? 0) + 1;
     steps.set(input.promptId, taken);
-    if (input.text.includes("hang")) await stoppable(60_000);
+    if (input.text?.includes("hang")) await stoppable(60_000);
     return { done: taken >= 2, finalText: taken >= 2 ? "answered" : "", agentState: { taken } };
   },
   async runModelCall(input: RunStepInput): Promise<ModelCallResult> {

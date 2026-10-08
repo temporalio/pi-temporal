@@ -18,7 +18,7 @@ through a write guard. Most agent loops need changes to support this. Pi needed 
 | `runToolCall(id, signal)` | Runs one recorded call and reports the outcome. Writes nothing. |
 | `sealStep(outcomes, options)` | Writes the step's outcomes in the model's order and says whether the turn is over. |
 | `answered`, `asked`, `unanswered`, `endsWithResponse`, `lastAnswer` | Reads the session, so a retry can tell what an earlier attempt did. |
-| `abort()`, `waitForIdle()`, `dispose()` | Stops the running work, waits for work the session started after a seal, and closes it. |
+| `waitForIdle()`, `dispose()` | Waits for work the session started after a seal, and closes it. |
 | `spend()`, `latestEntry`, `appendEntry` | Token totals, and a place for the core's bookkeeping. |
 | `openRecord(file, guard)` | The session's record alone, without the model, for one bookkeeping entry. |
 | `unknownOutcome(call)`, `notRunOutcome(call)` | What the model is told about a call that may have run, or never started. |
@@ -38,6 +38,9 @@ makeCoreActivities({ agent: yourAgent(options), hostQueue });
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.
 - `hasPrompt` must find a prompt written by `recordPrompt`, even after compaction. Otherwise a
   retry could record the prompt twice. Pi marks each prompt with its ID.
+- `prepareStep` must settle calls that a stopped or crashed step left open as unknown outcomes,
+  and never run them again. A whole-step `runStep` has no dispatch claims, so this is all that
+  keeps its retry from running a tool twice.
 - A retried model call must reuse its recorded response. Temporal can lose the Activity's
   completion after the response reaches the session file. Calling the model again would add a
   second response and another charge.
@@ -53,7 +56,8 @@ makeCoreActivities({ agent: yourAgent(options), hostQueue });
 | if you don't need | delete |
 |---|---|
 | Workers on different hosts sharing a project | `src/tree/`, and the `store` option |
-| a retry and timeout per tool call | stepped mode: `src/core/stepped-step.ts`, `makeSteppedStep` in `workflow.ts`, and the three stepped Activities |
+| a retry and timeout per tool call | stepped mode: `src/core/stepped-step.ts`, `makeSteppedStep` in `workflow.ts`, and the three stepped Activities. `src/pi/local-turn-workflow.ts` imports `dispatchStepCalls` from `stepped-step.ts`, so change it too, or delete live turns |
+| Activities that use a host's local files | host queues: `src/core/queue.ts`, the `hostQueueFor` option of `createSessionWorker`, and `onHost` and `retireOn` in `workflow.ts`. Only tree shipping turns them on |
 | a Workflow behind each live turn | `src/pi/local-turn-*`, its export in `src/workflow-bundle.ts`, and its Worker in the extension |
 | bounds on spend | `TurnBudget`, `overBudget`, and the deadline scope in `runTurn` |
 | schedules | `adoptProject`, `template`, and `cli.ts schedule` |

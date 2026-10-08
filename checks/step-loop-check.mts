@@ -58,11 +58,14 @@ async function waitFor(what: string, ok: () => boolean, ms = 20_000) {
 /** Stubs for one mode. Both record the step numbers each prompt was driven through. */
 function stubs(stepped: boolean) {
   const seen = new Map<string, number[]>();
+  // Steps after the first that still carried the prompt's text.
+  const textAfterFirst: number[] = [];
   const stepsFor = (promptId: string) => seen.get(promptId) ?? [];
   const note = (input: RunStepInput) => {
     const steps = seen.get(input.promptId) ?? [];
     steps.push(input.step);
     seen.set(input.promptId, steps);
+    if (input.step > 1 && input.text !== undefined) textAfterFirst.push(input.step);
     return steps.length;
   };
 
@@ -99,7 +102,7 @@ function stubs(stepped: boolean) {
     },
   };
 
-  return { activities: stepped ? split : wholeStep, stepsFor };
+  return { activities: stepped ? split : wholeStep, stepsFor, textAfterFirst };
 }
 
 async function runMode(stepped: boolean) {
@@ -108,7 +111,7 @@ async function runMode(stepped: boolean) {
 
   const taskQueue = `pi-step-check-${randomUUID().slice(0, 8)}`;
   const options: SessionTurnOptions = { idleTimeout: "10 seconds", stepped };
-  const { activities, stepsFor } = stubs(stepped);
+  const { activities, stepsFor, textAfterFirst } = stubs(stepped);
 
   const nativeConnection = await NativeConnection.connect({ address: cfg.address });
   const worker = await Worker.create({
@@ -141,13 +144,29 @@ async function runMode(stepped: boolean) {
   await sleep(1000); // a fourth step would land in this window
   const looped = JSON.stringify(stepsFor(looping.promptId)) === "[1,2,3]";
   check(`${label}: one step at a time, in order`, looped, stepsFor(looping.promptId));
+  // Each step's input goes into history, so only the first step carries the prompt.
+  check(`${label}: only the first step carries the prompt`, textAfterFirst.length === 0, {
+    textAfterFirst,
+  });
 
   // An interrupt ends the turn, not the session.
   hangingCalls.add(sessionId);
   const hanging = { promptId: randomUUID(), text: "hang" };
   await send(hanging);
   await waitFor("the hanging step to start", () => stepsFor(hanging.promptId).length === 1);
-  await client.workflow.getHandle(workflowId(sessionId)).signal("interrupt");
+  // A stop meant for a turn that already ended must not stop this one.
+  const handle = client.workflow.getHandle(workflowId(sessionId));
+  await handle.signal("interrupt", { promptId: looping.promptId });
+  await sleep(1000);
+  const { running: stillRunning } = await handle.query<{ running?: { promptId: string } }>(
+    "turnState",
+  );
+  check(
+    `${label}: a stop for an earlier turn leaves this one running`,
+    stillRunning?.promptId === hanging.promptId,
+    stillRunning,
+  );
+  await handle.signal("interrupt", { promptId: hanging.promptId });
   await sleep(1000);
   const held = stepsFor(hanging.promptId).length === 1;
   check(`${label}: the interrupt stopped the turn`, held, stepsFor(hanging.promptId));

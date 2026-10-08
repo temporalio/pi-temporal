@@ -125,6 +125,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 |---|---|---|
 | `PI_TEMPORAL_PROFILE` | `local` or `fleet`, the defaults below | `local` |
 | `PI_SESSION_DIR` | where session files live, shared storage in a fleet | `~/.pi-temporal/sessions` |
+| `PI_PROJECT_DIR` | the directory a standalone Worker's tools run in, required in `fleet` | the Worker's working directory |
 | `PI_TEMPORAL_STEPPED` | `1` runs each model call, tool call, and seal as its own Activity | off, on in `fleet` |
 | `PI_TEMPORAL_SHIP_TREE` | `1` ships the project's files between hosts | off, on in `fleet` |
 | `PI_TEMPORAL_TASK_QUEUE` | the Task Queue sessions use | `pi-session` |
@@ -137,7 +138,12 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_SESSION_IDLE_TIMEOUT` | how long an idle session Workflow waits | `5 minutes` |
 | `PI_TEMPORAL_DATA` | host directory for shadow repos and markers | `~/.pi-temporal` |
 | `PI_TEMPORAL_LIVE_TURNS` | `0` runs live turns as plain pi, with no Workflow | on |
-| `PI_TEMPORAL_EMBEDDED_WORKER` | `0` when a standalone Worker (`npm run worker`) owns the queue | on |
+| `PI_TEMPORAL_EMBEDDED_WORKER` | `0` when a standalone Worker (`npm run worker`) owns the queue, `1` to keep the Worker inside `pi` | on, off in `fleet` |
+| `PI_TEMPORAL_MAX_ACTIVITIES` | Activity slots for each queue a Worker polls | 16 |
+| `PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS` | how long a stopping standalone Worker lets running Activities finish | 60 |
+| `PI_TEMPORAL_DEPLOYMENT`, `PI_TEMPORAL_BUILD_ID` | turn on Worker Versioning for a standalone Worker. Set both or neither | none |
+| `PI_TEMPORAL_API_KEY`, `_FILE` | API key for Temporal Cloud | none |
+| `PI_TEMPORAL_TLS` | `1` connects over TLS without a client certificate | off |
 | `PI_TEMPORAL_CODEC_KEY`, `_FILE` | 32 bytes, base64, to encrypt payloads in history | none |
 | `PI_TEMPORAL_SEARCH_ATTRIBUTE` | `1` keeps session state in the `PiSessionState` search attribute | off |
 | `PI_TEMPORAL_METRICS` | address for the Worker's Prometheus metrics, such as `0.0.0.0:9464` | none |
@@ -162,6 +168,18 @@ export TEMPORAL_ADDRESS=your-ns.a1b2c.tmprl.cloud:7233 TEMPORAL_NAMESPACE=your-n
 export PI_TEMPORAL_API_KEY_FILE=/run/secrets/temporal-key
 ```
 
+`PI_TEMPORAL_SEARCH_ATTRIBUTE=1` needs the namespace to know `PiSessionState` first. Register it
+once with the `temporal` CLI, or with `tcld` on Temporal Cloud.
+
+```bash
+temporal operator search-attribute create --name PiSessionState --type Keyword
+tcld namespace search-attributes add --namespace your-ns.a1b2c --sa PiSessionState=Keyword
+```
+
+With `PI_TEMPORAL_CODEC_KEY` set, the Cloud UI shows payloads as ciphertext. To read them there,
+run a codec server with the codec in `src/core/codec.ts` and the same key. Then set its URL in
+the namespace's codec server setting. This repo doesn't ship a codec server.
+
 For a cluster with mTLS, export the certificate pair instead.
 
 ```bash
@@ -173,6 +191,16 @@ export PI_TEMPORAL_TLS_CA=/run/secrets/ca.crt
 If Temporal can't be reached before a turn starts, the extension says so and runs that turn as
 plain Pi, without recovery. If Temporal goes away mid-turn, the turn stops with an error, and the
 steps it already recorded stay in the session.
+
+`PI_TEMPORAL_METRICS` turns on the SDK's Prometheus metrics on each Worker. These are good first
+alerts.
+
+- `temporal_activity_schedule_to_start_latency` on host queues. A rise means a host is gone or
+  full, and its steps wait out their queue timeout before they move.
+- `temporal_activity_execution_failed`. Activity attempts that failed, such as a lost session
+  file or a refused project.
+- `temporal_workflow_task_execution_failed`. A Workflow Task that throws, such as after a bad
+  deploy. Temporal retries it until a fixed Worker runs it, so the session waits.
 
 ## The Pi fork
 

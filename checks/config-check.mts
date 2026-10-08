@@ -70,3 +70,20 @@ process.env.TEMPORAL_TLS_CLIENT_CERT_DATA = "not a real certificate";
 assert.ok(preflight(fromEnv()).some((problem) => /come as a pair/.test(problem)));
 delete process.env.TEMPORAL_TLS_CLIENT_CERT_DATA;
 console.log("PASS half the standard certificate pair is refused");
+
+// Half a Worker Deployment Version would start a Worker the deployment never routes to.
+process.env.PI_TEMPORAL_DEPLOYMENT = "pi-temporal";
+assert.throws(() => fromEnv(), /must be set together/);
+process.env.PI_TEMPORAL_BUILD_ID = "abc123";
+assert.deepEqual(fromEnv().deployment, { name: "pi-temporal", buildId: "abc123" });
+delete process.env.PI_TEMPORAL_DEPLOYMENT;
+delete process.env.PI_TEMPORAL_BUILD_ID;
+console.log("PASS a deployment version needs both its name and its build id");
+
+// The SDK's default of 100 Activity slots is too many for tools on one host.
+assert.equal(fromEnv().maxActivities, 16);
+assert.equal(fromEnv().shutdownGrace, 60_000);
+process.env.PI_TEMPORAL_MAX_ACTIVITIES = "0";
+assert.throws(() => fromEnv(), /whole number of Activities/);
+delete process.env.PI_TEMPORAL_MAX_ACTIVITIES;
+console.log("PASS Worker slots and shutdown grace have bounded defaults");

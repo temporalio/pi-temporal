@@ -33,6 +33,7 @@ flowchart LR
 ```
 
 Prompt text and final answers enter Workflow history as payloads. Error text enters history too.
+Each step's input goes into history, so only the first step of a turn carries the prompt text.
 Tool arguments and output stay in the session file, along with the model's other responses.
 
 Prompts are capped at 64K characters. The answer kept in history is capped at 16K characters,
@@ -48,10 +49,10 @@ store them encrypted.
 | `src/workflow-bundle.ts` | The two Workflows a Worker registers. |
 | `src/core/workflow.ts` | `piSession`. The prompt queue, the `submit` and `waitForQuiet` Updates, `runTurn`, budgets, Continue-As-New, and the idle exit. |
 | `src/core/stepped-step.ts` | One step as a model call, a tool call each, and a seal. Host queues, the fallback to the shared queue, and the recovery seal. Has no SDK imports, so `stepped-step-check` runs it with no server. |
-| `src/core/activities.ts` | The Activities, for any `Agent`. Fence tokens, dispatch claims, kept results, cancellation, heartbeats. |
+| `src/core/activities.ts` | The Activities, for any `Agent`. Fence tokens, dispatch claims, kept results, cancellation, heartbeats, and how a Worker shutdown differs from a stop. |
 | `src/core/agent.ts` | The `Agent` interface. What the Temporal side needs from an agent. |
 | `src/core/fence.ts`, `src/core/pending.ts` | How a stale attempt is kept out of the session file, and how a tool runs at most once. |
-| `src/core/client.ts`, `src/core/session-worker.ts` | How a prompt is sent, and how a Worker is built. |
+| `src/core/client.ts`, `src/core/session-worker.ts` | How a prompt is sent, and how a Worker is built, with its slots, shutdown grace, and optional Worker Versioning. |
 | `src/pi/agent.ts` | Pi's `Agent`. The only place that knows Pi's session format. |
 | `src/worker.ts`, `src/cli.ts`, `extensions/temporal.ts` | Entry points. The standalone Worker, the CLI, and the pi extension. |
 
@@ -79,13 +80,14 @@ The turn can't move to another process. This part supports Pi's terminal interfa
 
 ## Optional modules
 
-The default setup uses one Worker. Its `piSession` Workflow runs whole steps through `runStep`.
+The default setup uses one Worker on one Task Queue. Its `piSession` Workflow runs whole steps
+through `runStep`.
 You can omit the optional modules below when your agent doesn't need them.
 
 | module | switch | needed when |
 |---|---|---|
 | Stepped mode | `PI_TEMPORAL_STEPPED=1` | you want a retry and timeout per tool call |
-| Host queues | always on for a Worker with a project directory | tools write a host's local files |
+| Host queues | on with `PI_TEMPORAL_SHIP_TREE=1` | tools write a host's local files |
 | Tree shipping, `src/tree/` | `PI_TEMPORAL_SHIP_TREE=1` | Workers on different hosts take turns on one project |
 | Live turns, `src/pi/local-turn-*` | `PI_TEMPORAL_LIVE_TURNS` | you want a Workflow behind each live `pi` turn |
 | Budgets | `PI_TEMPORAL_BUDGET_*` | a turn or session must stop at a bound |

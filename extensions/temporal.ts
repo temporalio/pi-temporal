@@ -3,7 +3,8 @@
 // Set `PI_TEMPORAL_LIVE_TURNS=0` to disable live turns.
 //
 // `/background` tasks survive Pi exit because a Worker owns their sessions. The embedded Worker
-// needs the Pi fork build. Set `PI_TEMPORAL_EMBEDDED_WORKER=0` when a fleet Worker owns the queue.
+// needs the Pi fork build. It's off by default in the `fleet` profile, where the fleet's Workers
+// own the queue. `PI_TEMPORAL_EMBEDDED_WORKER` set to `1` or `0` overrides that.
 
 import type {
   ExtensionAPI,
@@ -28,6 +29,7 @@ import {
   workflowId,
 } from "../src/core/protocol.js";
 import type {
+  InterruptInput,
   LocalTurnInput,
   PromptInput,
   TurnState,
@@ -74,13 +76,19 @@ type Env = Config & {
 
 // Shared settings come from `fromEnv`, so the extension and the Worker agree on profile and
 // session directory. The rest are extension-only.
-const env = (): Env => ({
-  ...fromEnv(),
-  embeddedWorker: process.env.PI_TEMPORAL_EMBEDDED_WORKER !== "0",
-  liveTurns: process.env.PI_TEMPORAL_LIVE_TURNS !== "0",
-  provider: process.env.PI_TEMPORAL_PROVIDER,
-  modelHint: process.env.PI_MODEL,
-});
+const env = (): Env => {
+  const shared = fromEnv();
+  const embedded = process.env.PI_TEMPORAL_EMBEDDED_WORKER;
+  return {
+    ...shared,
+    // Off by default in the fleet profile. On the fleet's queue, this pi would take other
+    // sessions' work and run it with the user's key in the user's directory.
+    embeddedWorker: embedded === undefined ? shared.profile !== "fleet" : embedded !== "0",
+    liveTurns: process.env.PI_TEMPORAL_LIVE_TURNS !== "0",
+    provider: process.env.PI_TEMPORAL_PROVIDER,
+    modelHint: process.env.PI_MODEL,
+  };
+};
 
 interface Task {
   readonly sessionId: string;
@@ -126,7 +134,8 @@ export default function (pi: ExtensionAPI) {
         connect: connectionOptions(cfg),
         namespace: cfg.namespace,
         taskQueue: cfg.taskQueue,
-        hostQueueFor: ctx.cwd,
+        // Only when Workers on other hosts have their own copy of the project.
+        ...(cfg.shipTree ? { hostQueueFor: ctx.cwd } : {}),
         activities: (hostQueue) =>
           makeActivities({
             // Tools run where you are, so a background task sees the project you asked from.
@@ -138,6 +147,7 @@ export default function (pi: ExtensionAPI) {
             hostQueue,
           }),
         shutdownForceTime: EMBEDDED_STOP,
+        maxConcurrentActivities: cfg.maxActivities,
         dataConverter: dataConverterFor(cfg.codecKey),
       });
       worker
@@ -455,7 +465,11 @@ export default function (pi: ExtensionAPI) {
       const { client } = await connect();
       for (const task of watching.values()) {
         try {
-          await client.workflow.getHandle(workflowId(task.sessionId)).signal(SIGNALS.interrupt);
+          // Names the task's turn, so a stop can't reach a later prompt in the same session.
+          const target: InterruptInput = { promptId: task.promptId };
+          await client.workflow
+            .getHandle(workflowId(task.sessionId))
+            .signal(SIGNALS.interrupt, target);
         } catch {
           // Already gone; poll() clears it.
         }

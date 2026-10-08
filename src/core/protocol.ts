@@ -56,6 +56,11 @@ const utf8Length = (text: string) => {
   return bytes;
 };
 
+/** Which turn a stop is for. Without it, a stop sent as one turn ends could stop the next. */
+export interface InterruptInput {
+  readonly promptId?: string;
+}
+
 export const SIGNALS = {
   submitPrompt: "submitPrompt",
   interrupt: "interrupt",
@@ -112,7 +117,11 @@ export interface PromptInput {
   readonly text: string;
 }
 
-export interface RunStepInput extends PromptInput {
+export interface RunStepInput {
+  readonly promptId: string;
+  // Only on the first step, which records the prompt. Each step's input goes into history, so
+  // sending a long prompt with every step would fill it within one turn.
+  readonly text?: string;
   // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
   readonly fence?: string;
   // The agent's own state from the step before. See `AgentState`.

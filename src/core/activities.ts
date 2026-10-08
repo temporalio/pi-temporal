@@ -41,10 +41,18 @@ const QUARANTINED = "WorktreeQuarantined";
 // exit still counts the turns before it. The Workflow's own count only spans one run.
 const SESSION_SECONDS = "pi-temporal.session-seconds";
 
-// Whether Temporal asked this Activity to stop. Only as fresh as the last heartbeat.
+// A Worker that shuts down cancels its running Activities too, once `shutdownGraceTime` passes.
+// That isn't a user stop. The work must go on elsewhere, so this Activity keeps running until
+// the process ends, and recovery treats it like a crash. Recording a stop would end the turn.
+const shuttingDown = (context: Context) =>
+  context.cancellationDetails?.workerShutdown === true ||
+  (context.cancellationSignal.reason as Error | undefined)?.message === "WORKER_SHUTDOWN";
+
+// Whether the Workflow asked this Activity to stop. Only as fresh as the last heartbeat.
 const stopRequested = () => {
   try {
-    return Context.current().cancellationSignal.aborted;
+    const context = Context.current();
+    return context.cancellationSignal.aborted && !shuttingDown(context);
   } catch {
     return false;
   }
@@ -64,11 +72,21 @@ const say = (level: "info" | "warn", message: string) => {
 // reports what it did, and the seal records that instead of an unknown outcome. Cancellation
 // arrives with a heartbeat, so it takes up to one heartbeat to get there.
 const cancellation = (): AbortSignal | undefined => {
+  let context: Context;
   try {
-    return Context.current().cancellationSignal;
+    context = Context.current();
   } catch {
     return undefined;
   }
+  const cancelled = context.cancellationSignal;
+  const stop = new AbortController();
+  // The abort fires outside the Activity's async context, so the context is captured here.
+  const forward = () => {
+    if (!shuttingDown(context)) stop.abort(cancelled.reason);
+  };
+  if (cancelled.aborted) forward();
+  else cancelled.addEventListener("abort", forward, { once: true });
+  return stop.signal;
 };
 
 const heartbeatEvery = (ms: number) => {
@@ -223,6 +241,9 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
       // recorded after one breaks every later turn.
       settleWhatStopped(session);
       // Record without running, so the first step is a normal step that Temporal can retry.
+      if (input.text === undefined) {
+        throw ApplicationFailure.nonRetryable("the first step of a turn came without its prompt");
+      }
       if (!(await session.recordPrompt(input.promptId, input.text))) {
         throw ApplicationFailure.nonRetryable("the agent did not record the prompt");
       }

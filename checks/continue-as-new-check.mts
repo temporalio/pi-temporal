@@ -41,7 +41,7 @@ async function main() {
     workflowsPath: fileURLToPath(new URL("../src/core/workflow.ts", import.meta.url)),
     activities: {
       async runStep(input: RunStepInput): Promise<RunStepResult> {
-        answered.push(input.text);
+        answered.push(input.text ?? "");
         return { done: true, finalText: `answered ${input.text}` };
       },
     },
