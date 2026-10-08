@@ -1,8 +1,8 @@
 // Holds that a writer that stalls after its lease check can't take the session back to its older
 // tree. Writer A stops right before it names its tip. B takes the lease over and publishes two
 // steps. When A wakes up, the tip must stay B's, and a new host must restore B's newest files.
-// Also when B's second step compacts the store and frees A's number, and when the session is
-// forgotten while A waits.
+// Also when B's second step compacts the store and frees A's number, when the session is
+// forgotten while A waits, and when a `forget` itself stalls while the session is sent again.
 //
 // Usage: npx tsx checks/stale-tip-check.mts
 
@@ -26,6 +26,7 @@ function barrier() {
 
 const originalWrite = fs.writeFile;
 const originalMkdir = fs.mkdir;
+const originalReaddir = fs.readdir;
 const originalNow = Date.now;
 
 /**
@@ -181,8 +182,63 @@ async function stalledAcrossForget(name: string, steps: number) {
   console.log(`PASS ${name}: the project sent again restores on a new host`);
 }
 
+/**
+ * A `forget` stalls after it names the new generation, before it deletes anything. The session is
+ * sent again under that generation. The late `forget` must not delete what was sent again.
+ */
+async function stalledForget() {
+  const sessionFile = join(root, "sessions", "stalled-forget.jsonl");
+  const project = (host: string) => join(root, "stalled-forget", host, "project");
+  const asHost = (host: string) => {
+    process.env.PI_TEMPORAL_DATA = join(root, "stalled-forget", host, "data");
+  };
+  for (const host of ["a", "b", "c"]) await fs.mkdir(project(host), { recursive: true });
+  asHost("a");
+  await fs.writeFile(join(project("a"), "old.txt"), "one\n");
+  await worktree.capture(project("a"), sessionFile, { seed: true });
+
+  const paused = barrier();
+  const resume = barrier();
+  let stalled = false;
+  fs.readdir = (async (...args: Parameters<typeof fs.readdir>) => {
+    if (!stalled && String(args[0]) === `${sessionFile}.tree`) {
+      stalled = true;
+      paused.release();
+      await resume.promise;
+    }
+    return originalReaddir(...args);
+  }) as typeof fs.readdir;
+  syncBuiltinESMExports();
+  const late = worktree.forget(sessionFile).then(
+    () => undefined,
+    (err: unknown) => err,
+  );
+  await paused.promise;
+
+  Date.now = () => originalNow() + 5 * 60_000;
+  try {
+    asHost("b");
+    await fs.writeFile(join(project("b"), "new.txt"), "fresh\n");
+    await worktree.capture(project("b"), sessionFile, { seed: true });
+  } finally {
+    Date.now = originalNow;
+  }
+  resume.release();
+  const failure = await late;
+  fs.readdir = originalReaddir;
+  syncBuiltinESMExports();
+  assert.ok(failure instanceof Error, "the stalled forget must fail");
+  console.log("PASS a stalled forget fails once it lost the lease");
+
+  asHost("c");
+  await worktree.ensure(project("c"), sessionFile);
+  assert.equal(await read(join(project("c"), "new.txt")), "fresh\n");
+  console.log("PASS stalled-forget: the project sent again restores on a new host");
+}
+
 try {
   await fs.mkdir(join(root, "sessions"), { recursive: true });
+  await stalledForget();
   await stalledAcrossForget("forgotten", 0);
   // A ends at 39 and stalls on its restart at 40, then cleans up after the session was sent again.
   await stalledAcrossForget("forgotten-restart", 38);
@@ -192,6 +248,7 @@ try {
 } finally {
   fs.writeFile = originalWrite;
   fs.mkdir = originalMkdir;
+  fs.readdir = originalReaddir;
   syncBuiltinESMExports();
   Date.now = originalNow;
   await fs.rm(root, { recursive: true, force: true });

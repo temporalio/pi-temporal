@@ -698,8 +698,11 @@ interface ClosedStep extends Fence {
  * starts: a capture that beat it left a tip the replacement reads, and a later one is refused.
  */
 export async function closeStep(sessionFile: string, fence: Fence): Promise<void> {
-  await withLease(sharedLockPath(sessionFile), async () => {
+  await withLease(sharedLockPath(sessionFile), async (owned) => {
     if (await isClosed(sessionFile, fence)) return;
+    // The replacement starts only after a close that held the lease to the end, so a late write
+    // from a stalled close adds nothing. Refused anyway, like every write under a lease.
+    await stillHolding(owned, "closing the step", sessionFile);
     // A timed-out attempt has no lifetime bound, so its closure must survive later turns.
     await mkdir(closedDir(sessionFile), { recursive: true });
     const closed: ClosedStep = { ...fence, at: new Date().toISOString() };
@@ -730,6 +733,7 @@ async function isClosed(sessionFile: string, fence: Fence): Promise<boolean> {
 async function moveAside(
   projectDir: string,
   sessionFile: string,
+  owned: () => Promise<boolean>,
   current?: Writer,
 ): Promise<string | undefined> {
   const held = await readJson<Held>(heldPath(projectDir, sessionFile));
@@ -740,6 +744,8 @@ async function moveAside(
     if (ours) return undefined;
   }
   const moved = `${projectDir}.stranded.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  // A holder that stalled past its lease would move the next holder's live checkout.
+  if (!(await owned())) return undefined;
   try {
     await rename(projectDir, moved);
   } catch {
@@ -747,7 +753,9 @@ async function moveAside(
     return undefined;
   }
   await mkdir(projectDir, { recursive: true });
-  // The note and markers describe the moved directory, not the new empty one.
+  // The note and markers describe the moved directory, not the new empty one. After a lost lease
+  // they may be the next holder's, so they stay.
+  if (!(await owned())) return moved;
   await rm(heldPath(projectDir, sessionFile), { force: true });
   await rm(writersDir(projectDir), { recursive: true, force: true });
   return moved;
@@ -1016,6 +1024,8 @@ async function heldByOthers(
       holdouts++;
       continue;
     }
+    // The lease can lapse after `handBack`, and the note may then be the next holder's.
+    await stillHolding(owned, "dropping a retired note", projectDir);
     await rm(path, { force: true });
   }
   return holdouts > 0;
@@ -1097,11 +1107,11 @@ export async function capture(
           `and the session is at ${tip.tree.slice(0, 8)}`,
       );
     }
+    // Clearing the marker is a shared write, and the shadow index is a local one. Both wait for
+    // the leases, or a stalled capture could clear a retirement that came after it.
+    await stillHolding(owned, "capturing", projectDir);
     // After the refusals, so a capture that is refused leaves a retired session retired.
     await revive(sessionFile);
-
-    // The shadow index is a local write too, so it waits for the leases as well.
-    await stillHolding(owned, "capturing", projectDir);
     const tree = await treeHere(projectDir);
     if (tip?.tree === tree) return;
     if (tip) await ingest(projectDir, sessionFile, generation, takenIn(held, generation));
@@ -1124,7 +1134,7 @@ export async function ensure(
     // reach it, so the move narrows the risk and doesn't close it.
     await refuseWhenStranded(projectDir, current).catch(async (err: unknown) => {
       if (!(err instanceof Quarantined)) throw err;
-      const moved = await moveAside(projectDir, sessionFile, current);
+      const moved = await moveAside(projectDir, sessionFile, owned, current);
       if (moved === undefined) throw err;
       console.warn(
         `moved ${projectDir} to ${moved}: a tool call from an earlier step never came back and ` +
@@ -1154,12 +1164,11 @@ export async function ensure(
       throw new WrongTree(`not restoring ${projectDir}: it holds files this session never shipped`);
     }
     // After the refusals, so a restore that is refused leaves a retired session retired. Before the
-    // early return, since a host already on the tip is still serving the session.
+    // early return, since a host already on the tip is still serving the session. The writes
+    // start here, and the lock may have been taken over while the reads above waited.
+    await stillHolding(owned, "restoring", projectDir);
     await revive(sessionFile);
     if (held?.tree === tip.tree) return;
-
-    // The writes start here, and the lock may have been taken over while the reads above waited.
-    await stillHolding(owned, "restoring", projectDir);
     if (held) {
       // Behind the tip with unshipped edits (a worker died before shipping). Publishing them would
       // revert the tip on every host, so set them aside and move to the tip.
@@ -1199,6 +1208,8 @@ export async function release(projectDir: string, sessionFile: string): Promise<
     if (!held) return false;
     // Keep the note if not emptied, or the next restore would refuse the leftovers.
     if (!(await handBack(projectDir, held, owned))) return false;
+    // The lease can lapse after `handBack`, and the note may then be the next holder's.
+    if (!(await owned())) return false;
     await rm(heldPath(projectDir, sessionFile), { force: true });
     return true;
   });
@@ -1210,8 +1221,9 @@ export async function release(projectDir: string, sessionFile: string): Promise<
  */
 export async function retire(projectDir: string, sessionFile: string): Promise<boolean> {
   // Under the shared lock, so it can't interleave with a capture or restore deciding to revive.
-  await withLease(sharedLockPath(sessionFile), async () => {
+  await withLease(sharedLockPath(sessionFile), async (owned) => {
     if (await established(sessionFile)) {
+      await stillHolding(owned, "retiring", sessionFile);
       await writeJson(retiredPath(sessionFile), { at: new Date().toISOString() });
     }
   });
@@ -1288,6 +1300,8 @@ export async function sweep(): Promise<number> {
         if (current.built && !(await handBack(note.directory!, current, owned))) {
           return false;
         }
+        // The lease can lapse after `handBack`, and the note may then be the next holder's.
+        if (!(await owned())) return false;
         await rm(path, { force: true });
         return true;
       }).catch(() => false);
@@ -1317,19 +1331,27 @@ export async function setAside(projectDir: string, sessionFile: string): Promise
  * Delete a finished session's tree store. Pass `projectDir` to also drop this host's note.
  */
 export async function forget(sessionFile: string, projectDir?: string): Promise<void> {
-  const drop = async () => {
+  // Asks before each delete. A `forget` that stalled past its lease would delete what a new
+  // session wrote since. It throws instead, and the retry starts over under a fresh lease.
+  const drop = async (owned: () => Promise<boolean>) => {
+    const holding = () => stillHolding(owned, "forgetting", sessionFile);
     // Kept for good. It names the generation every later reader and writer uses.
     const generation = (await generationOf(sessionFile)) + 1;
+    await holding();
     await writeJson(forgottenPath(sessionFile), { at: new Date().toISOString(), generation });
     for (const name of await readdir(shareDir(sessionFile))) {
       // Keep the held lock, or another writer gets in mid-delete.
       if (name === "writers.lock") continue;
+      await holding();
       await rm(join(shareDir(sessionFile), name), { recursive: true, force: true });
     }
-    if (projectDir) await rm(heldPath(projectDir, sessionFile), { force: true });
+    if (projectDir) {
+      await holding();
+      await rm(heldPath(projectDir, sessionFile), { force: true });
+    }
     // Results only. A timed-out tool Activity can outlive its Workflow, and its dispatch claim is
     // what stops it running the tool after the session is gone.
-    await pending.sweepResults(sessionFile);
+    await pending.sweepResults(sessionFile, holding);
   };
   if (projectDir) await withTreeLocks(projectDir, sessionFile, drop);
   else await withLease(sharedLockPath(sessionFile), drop);
