@@ -8,7 +8,7 @@ import { type Duration, msToNumber } from "@temporalio/common";
 import { loadClientConnectConfig } from "@temporalio/envconfig";
 import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
-import { sessionIdProblem, type TurnBudget } from "./core/protocol.js";
+import type { TurnBudget } from "./core/protocol.js";
 
 export type Profile = "local" | "fleet";
 
@@ -389,8 +389,4 @@ function budgetFromEnv(): TurnBudget | undefined {
   return set.length > 0 ? (Object.fromEntries(set) as TurnBudget) : undefined;
 }
 
-export const sessionFileFor = (sessionDir: string, sessionId: string) => {
-  const problem = sessionIdProblem(sessionId);
-  if (problem) throw new Error(`session id ${JSON.stringify(sessionId)} can't be used: ${problem}`);
-  return `${sessionDir}/${sessionId}.jsonl`;
-};
+export { sessionFileFor } from "./core/protocol.js";

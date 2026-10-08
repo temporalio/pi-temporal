@@ -1,20 +1,18 @@
 // Client helpers to submit a prompt to a session and to interrupt one. A prompt is an
 // Update-with-start: the first starts the per-session Workflow, later ones join the running one.
 // The session checks the prompt and says where it sits in the queue.
+//
+// Each helper takes a client and plain options, so any agent can use them without Pi's config.
+// `src/client.ts` builds those from the environment for Pi.
 
-import { randomUUID } from "node:crypto";
 import {
-  Client,
-  Connection,
+  type Client,
   WithStartWorkflowOperation,
   WorkflowNotFoundError,
   WorkflowUpdateFailedError,
   WorkflowUpdateRPCTimeoutOrCancelledError,
 } from "@temporalio/client";
 import { ApplicationFailure } from "@temporalio/common";
-import { type Config, connectionOptions, fromEnv, sessionFileFor } from "../config.js";
-import { dataConverterFor } from "./codec.js";
-import { clientTracing, startTracing } from "./tracing.js";
 import {
   DUPLICATE_PROMPT,
   QUERIES,
@@ -26,7 +24,7 @@ import {
 import type {
   InterruptInput,
   PromptInput,
-  SessionTurnOptions,
+  SessionInput,
   Submitted,
   TurnState,
 } from "./protocol.js";
@@ -34,47 +32,19 @@ import type { piSession } from "./workflow.js";
 
 type Session = typeof piSession;
 
-const withCodec = (cfg: Config) => {
-  const dataConverter = dataConverterFor(cfg);
-  return dataConverter ? { dataConverter } : {};
-};
-
 // An Update needs a Worker to accept it. Past this, the prompt goes as a Signal, which the server
 // keeps until a Worker comes.
 const ACCEPT_MS = 10_000;
 // A Query needs a Worker to answer. Past this, a stop goes out without naming its turn.
 const QUERY_MS = 3_000;
 
-/** Every client here is built by this, so the CLI and the extension follow sessions alike. */
-export async function openClient(cfg: Config = fromEnv()) {
-  if (cfg.tracing) startTracing("pi-temporal-client");
-  const connection = await Connection.connect(connectionOptions(cfg));
-  const client = new Client({
-    connection,
-    namespace: cfg.namespace,
-    // A closed Workflow answers queries with its last state, so one terminated mid-turn looks busy
-    // forever. Rejecting the query tells a follower the session is over.
-    workflow: { queryRejectCondition: "NOT_OPEN" },
-    ...withCodec(cfg),
-    // Starts each trace here, so a prompt's spans in the Worker hang under the call that sent it.
-    ...(cfg.tracing ? { interceptors: clientTracing() } : {}),
-  });
-  return { client, connection };
+/** Where a prompt goes, and how its session starts if this prompt is the one that starts it. */
+export interface SessionStart {
+  readonly taskQueue: string;
+  readonly sessionId: string;
+  // The session's start input. Ignored when the session is already running.
+  readonly input: SessionInput;
 }
-
-export async function connect() {
-  const cfg = fromEnv();
-  return { cfg, ...(await openClient(cfg)) };
-}
-
-/** What a session started from this config runs with. */
-export const sessionOptions = (cfg: Config): SessionTurnOptions => ({
-  idleTimeout: cfg.idleTimeout,
-  stepped: cfg.stepped,
-  toolTimeoutMinutes: cfg.toolTimeoutMinutes,
-  budget: cfg.budget,
-  ...(cfg.searchAttribute ? { searchAttribute: true } : {}),
-});
 
 /**
  * Send a prompt, starting the session if it isn't running. Returns how many prompts are ahead of
@@ -83,14 +53,12 @@ export const sessionOptions = (cfg: Config): SessionTurnOptions => ({
  */
 export async function sendPrompt(
   client: Client,
-  cfg: Config,
-  sessionId: string,
+  { taskQueue, sessionId, input }: SessionStart,
   prompt: PromptInput,
 ): Promise<number | undefined> {
-  const file = sessionFileFor(cfg.sessionDir, sessionId);
-  const args: Parameters<Session> = [{ sessionId, sessionFile: file, ...sessionOptions(cfg) }];
+  const args: Parameters<Session> = [{ ...input, sessionId }];
   const start = {
-    taskQueue: cfg.taskQueue,
+    taskQueue,
     workflowId: workflowId(sessionId),
     args,
     // Shown in the UI and CLI. The session id only, since a prompt may hold secrets.
@@ -129,16 +97,6 @@ export async function sendPrompt(
   return undefined;
 }
 
-export async function submitPrompt(sessionId: string, text: string, promptId = randomUUID()) {
-  const { cfg, client, connection } = await connect();
-  try {
-    await sendPrompt(client, cfg, sessionId, { promptId, text });
-  } finally {
-    await connection.close();
-  }
-  return promptId;
-}
-
 /**
  * Whether a session's Workflow exists. Undefined when nobody can say, such as when the server is
  * unreachable. Only a definite false proves a start never landed.
@@ -160,18 +118,13 @@ export async function sessionExists(
  * stop the next one. Without a Worker to say which turn runs, the stop goes untargeted. Returns
  * false when the session said nothing was running, so nothing was sent.
  */
-export async function interrupt(sessionId: string): Promise<boolean> {
-  const { client, connection } = await connect();
-  try {
-    const handle = client.workflow.getHandle(workflowId(sessionId));
-    const state = await client
-      .withDeadline(Date.now() + QUERY_MS, () => handle.query<TurnState>(QUERIES.turnState))
-      .catch(() => undefined);
-    if (state && !state.running) return false;
-    const target: InterruptInput = { promptId: state?.running?.promptId };
-    await handle.signal(SIGNALS.interrupt, target);
-    return true;
-  } finally {
-    await connection.close();
-  }
+export async function interruptSession(client: Client, sessionId: string): Promise<boolean> {
+  const handle = client.workflow.getHandle(workflowId(sessionId));
+  const state = await client
+    .withDeadline(Date.now() + QUERY_MS, () => handle.query<TurnState>(QUERIES.turnState))
+    .catch(() => undefined);
+  if (state && !state.running) return false;
+  const target: InterruptInput = { promptId: state?.running?.promptId };
+  await handle.signal(SIGNALS.interrupt, target);
+  return true;
 }

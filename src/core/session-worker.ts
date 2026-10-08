@@ -15,6 +15,9 @@ import { type Tracing, workerTracing } from "./tracing.js";
 // heartbeats about every 24 seconds here, so a stopped tool would run on that long.
 const HEARTBEAT_THROTTLE = "3 seconds";
 
+// Core only, so a Worker built here runs with no agent's Workflows in its bundle.
+const CORE_WORKFLOWS = fileURLToPath(new URL("./workflows.ts", import.meta.url));
+
 const defined = <T extends object>(options: T): Partial<T> =>
   Object.fromEntries(
     Object.entries(options).filter(([, value]) => value !== undefined),
@@ -31,8 +34,12 @@ export interface SessionWorkerOptions {
   // Also poll a host queue named for this project directory, so a step's tools and seal can come
   // back to the host that holds the project. Leave it out when nothing is host-bound.
   readonly hostQueueFor?: string;
-  // A Workflow bundle built ahead of time (`npm run bundle`). Without one, the Worker bundles the
-  // source at start, which is fine for development.
+  // The module whose exports are the Workflows to register, bundled at start. Defaults to the
+  // core session Workflow alone (`./workflows.ts`). An agent with Workflows of its own passes an
+  // entry that exports them beside the core ones, such as `src/workflow-bundle.ts`.
+  readonly workflowsPath?: string;
+  // A Workflow bundle built ahead of time (`npm run bundle`). It wins over `workflowsPath`, and
+  // saves bundling at start.
   readonly workflowBundlePath?: string;
   // The same codec as the clients, or they can't read each other's payloads.
   readonly dataConverter?: WorkerOptions["dataConverter"];
@@ -106,7 +113,7 @@ export async function createSessionWorker(
       taskQueue: opts.taskQueue,
       ...(opts.workflowBundlePath
         ? { workflowBundle: { codePath: opts.workflowBundlePath } }
-        : { workflowsPath: fileURLToPath(new URL("../workflow-bundle.ts", import.meta.url)) }),
+        : { workflowsPath: opts.workflowsPath ?? CORE_WORKFLOWS }),
     });
     // Activities only, for work that must run on this host. Without this poller every step on the
     // host queue would wait out schedule-to-start before falling back to the shared queue.

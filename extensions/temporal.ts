@@ -12,6 +12,7 @@ import type {
   TurnExecutorContext,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   type Client,
   type Connection,
@@ -40,7 +41,8 @@ import { makeActivities } from "../src/pi/activities.js";
 import { dataConverterFor } from "../src/core/codec.js";
 import { startTracing } from "../src/core/tracing.js";
 import * as worktree from "../src/tree/worktree.js";
-import { openClient, sendPrompt, sessionExists } from "../src/core/client.js";
+import { sendPrompt, sessionExists } from "../src/core/client.js";
+import { openClient, sessionStart } from "../src/client.js";
 import {
   clientProblems,
   type Config,
@@ -54,6 +56,8 @@ import {
 } from "../src/config.js";
 
 const STATUS_KEY = "pi-temporal";
+// Pi's live-turn Workflow beside the core session, for both Workers this extension runs.
+const WORKFLOWS = fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url));
 const POLL_MS = 2000;
 // Shorter than the poll interval, so a Worker that never answers cannot stack polls behind it.
 const QUERY_MS = 1500;
@@ -137,6 +141,7 @@ export default function (pi: ExtensionAPI) {
         taskQueue: cfg.taskQueue,
         // Only when Workers on other hosts have their own copy of the project.
         ...(cfg.shipTree ? { hostQueueFor: ctx.cwd } : {}),
+        workflowsPath: WORKFLOWS,
         activities: (hostQueue) =>
           makeActivities({
             // Tools run where you are, so a background task sees the project you asked from.
@@ -266,6 +271,7 @@ export default function (pi: ExtensionAPI) {
         taskQueue: turnQueue,
         // Only this process's live turns. The queue is already this process's own.
         activities: () => makeLocalTurnActivities(liveTurns),
+        workflowsPath: WORKFLOWS,
         shutdownForceTime: EMBEDDED_STOP,
         dataConverter: dataConverterFor(cfg),
         // The same tracing as the client that starts each turn, so a foreground prompt's trace
@@ -425,7 +431,7 @@ export default function (pi: ExtensionAPI) {
           await worktree.capture(ctx.cwd, sessionFile, { seed: true });
           seeded = true;
         }
-        await sendPrompt(client, cfg, task.sessionId, prompt);
+        await sendPrompt(client, sessionStart(cfg, task.sessionId), prompt);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
         // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.

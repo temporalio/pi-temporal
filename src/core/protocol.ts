@@ -46,6 +46,13 @@ export const sessionIdProblem = (sessionId: string): string | undefined => {
   return undefined;
 };
 
+/** The session file for an id in a session directory. Throws for an id that can't name one. */
+export const sessionFileFor = (sessionDir: string, sessionId: string) => {
+  const problem = sessionIdProblem(sessionId);
+  if (problem) throw new Error(`session id ${JSON.stringify(sessionId)} can't be used: ${problem}`);
+  return `${sessionDir}/${sessionId}.jsonl`;
+};
+
 // Counted by hand, because the Workflow's sandbox has no `Buffer`.
 const utf8Length = (text: string) => {
   let bytes = 0;

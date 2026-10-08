@@ -15,6 +15,7 @@ import { ApplicationFailure } from "@temporalio/common";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { AesGcmCodec, dataConverterFor } from "../src/core/codec.js";
 import { sendPrompt } from "../src/core/client.js";
+import { sessionStart } from "../src/client.js";
 import { fromEnv } from "../src/config.js";
 import { UPDATES, workflowId } from "../src/core/protocol.js";
 import type { Quiet, RunStepInput, RunStepResult } from "../src/core/protocol.js";
@@ -85,7 +86,7 @@ const worker = await Worker.create({
 const running = worker.run();
 const session = `codec-${randomUUID().slice(0, 8)}`;
 try {
-  await sendPrompt(client, cfg, session, { promptId: randomUUID(), text: secret });
+  await sendPrompt(client, sessionStart(cfg, session), { promptId: randomUUID(), text: secret });
   const handle = client.workflow.getHandle(workflowId(session));
   const quiet = await handle.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
   assert.equal(quiet.finished?.finalText, `${secret} back`);

@@ -1,4 +1,5 @@
-// Both Workflows share one `workflowsPath` so each Worker can serve either kind of session.
+// Pi's Workflows on top of the core ones, in one `workflowsPath`, so each Pi Worker can serve
+// either kind of session.
 
-export { piSession, submitPrompt, interrupt, turnState } from "./core/workflow.js";
+export * from "./core/workflows.js";
 export { piLocalTurn } from "./pi/local-turn-workflow.js";

@@ -2,6 +2,7 @@
 // The Pi extension runs the same Worker in its own process.
 
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Runtime } from "@temporalio/worker";
 import {
   connectionOptions,
@@ -84,6 +85,8 @@ async function main() {
     // directory, any Worker can run any unit.
     ...(cfg.shipTree ? { hostQueueFor: projectDir } : {}),
     dataConverter: dataConverterFor(cfg),
+    // Pi's live-turn Workflow too, so this Worker serves every kind of session.
+    workflowsPath: fileURLToPath(new URL("./workflow-bundle.ts", import.meta.url)),
     workflowBundlePath: process.env.PI_TEMPORAL_WORKFLOW_BUNDLE,
     shutdownGraceTime: cfg.shutdownGrace,
     maxConcurrentActivities: cfg.maxActivities,
