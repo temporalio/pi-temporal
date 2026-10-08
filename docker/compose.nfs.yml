@@ -1,5 +1,5 @@
 # Puts /sessions on a real NFSv4 server, to test that exclusive create and atomic rename hold
-# there (NFSv3 doesn't, see `src/fence.ts` and `src/tree/lease.ts`).
+# there (NFSv3 doesn't, see `src/core/fence.ts` and `src/tree/lease.ts`).
 #
 #   NFS=1 docker/tree-check.sh
 #

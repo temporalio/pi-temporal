@@ -4,7 +4,7 @@
 //
 // Usage: npx tsx checks/stepped-step-check.mts
 
-import { makeSteppedStep } from "../src/stepped-step.js";
+import { makeSteppedStep } from "../src/core/stepped-step.js";
 import type {
   DeferredToolCall,
   ModelCallResult,
@@ -13,7 +13,7 @@ import type {
   SealStepInput,
   ToolCallInput,
   ToolCallResult,
-} from "../src/protocol.js";
+} from "../src/core/protocol.js";
 
 class FakeCancel extends Error {}
 const isCancellation = (err: unknown) => err instanceof FakeCancel;
@@ -25,7 +25,7 @@ const INPUT: RunStepInput = {
   promptId: "p1",
   text: "go",
 };
-const SEALED: RunStepResult = { done: false, retryAttempt: 0, finalText: "" };
+const SEALED: RunStepResult = { done: false, finalText: "" };
 const call = (id: string, name = "bash"): DeferredToolCall => ({ id, name });
 
 interface Recorded {
@@ -85,7 +85,7 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 async function main() {
   // A step the model call reports as over dispatches nothing and closes nothing.
   {
-    const settled: RunStepResult = { done: true, retryAttempt: 0, finalText: "already answered" };
+    const settled: RunStepResult = { done: true, finalText: "already answered" };
     const run = await drive({ settled, calls: [], sequential: false, ended: true });
     check("a settled step dispatches nothing", run.dispatched.length === 0, run.dispatched);
     check("a settled step is not sealed again", run.seals.length === 0, run.seals);
@@ -163,8 +163,8 @@ async function main() {
     check("an ended model call is still sealed", run.seals.length === 1, run.seals);
   }
 
-  // `retryAttempt` must round-trip through the step. It is optional, so dropping it compiles and
-  // silently resets the retry budget every step.
+  // The agent's state must round-trip through the step. It is optional, so dropping it compiles
+  // and silently resets what the agent counts, such as its retry budget, every step.
   {
     const seals: SealStepInput[] = [];
     const step = makeSteppedStep({
@@ -173,15 +173,15 @@ async function main() {
         runToolCall: async () => ({ outcome: "settled" }),
         sealStep: async (input) => {
           seals.push(input);
-          return { done: false, retryAttempt: 2, finalText: "" };
+          return { done: false, agentState: { retries: 2 }, finalText: "" };
         },
       },
       isCancellation,
       nonCancellable: (fn) => fn(),
     });
-    const result = await step({ ...INPUT, retryAttempt: 1 });
-    check("the seal is told what the last step spent", seals[0]?.retryAttempt === 1, seals[0]);
-    check("and what it spends comes back", result.retryAttempt === 2, result);
+    const result = await step({ ...INPUT, agentState: { retries: 1 } });
+    check("the seal is given the last step's state", seals[0]?.agentState?.retries === 1, seals[0]);
+    check("and the state it returns comes back", result.agentState?.retries === 2, result);
   }
 
   // An unknown outcome is logged and still sealed.

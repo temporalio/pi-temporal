@@ -102,11 +102,8 @@ export interface PromptInput {
 export interface RunStepInput extends PromptInput {
   // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
   readonly fence?: string;
-  // Failed attempts of this step so far. The workflow keeps the count because the session is
-  // rebuilt per activity and compaction can rewrite the transcript.
-  readonly retryAttempt?: number;
-  // Whether the turn spent its one compact-and-retry, kept by the workflow for the same reason.
-  readonly overflowRecoveryAttempted?: boolean;
+  // The agent's own state from the step before. See `AgentState`.
+  readonly agentState?: AgentState;
   // The session's turn time when this step was scheduled. Each step writes its total to the
   // session record, so a run woken after an idle exit still counts the earlier turns.
   readonly sessionSeconds?: number;
@@ -117,6 +114,13 @@ export interface RunStepInput extends PromptInput {
   // runs next.
   readonly step: number;
 }
+
+/**
+ * The agent's own state between steps, such as a retry count. The Workflow carries it from each
+ * step's result into the next step's input, since a session is opened again for every Activity.
+ * Scoped to one turn.
+ */
+export type AgentState = Readonly<Record<string, unknown>>;
 
 /** What one unit of work cost. Per activity, not a running total, because the session file is
  * shared and a total read from it includes turns this one did not run. */
@@ -129,10 +133,8 @@ export interface Spend {
 export interface RunStepResult {
   // False means the workflow schedules another step.
   readonly done: boolean;
-  // Required, so a step cannot silently drop the retry cap.
-  readonly retryAttempt: number;
-  // Optional, since a step that never reached a seal has nothing to say.
-  readonly overflowRecoveryAttempted?: boolean;
+  // For the next step. A result with none keeps what an earlier step reported.
+  readonly agentState?: AgentState;
   // The assistant's final text once done. The log is the source of truth.
   readonly finalText: string;
   // This step's spend, for the turn budget.
@@ -249,8 +251,7 @@ export interface SealStepInput {
   // Which turn's kept results to read. See `ToolCallInput`.
   readonly turn: string;
   readonly step: number;
-  readonly retryAttempt?: number;
-  readonly overflowRecoveryAttempted?: boolean;
+  readonly agentState?: AgentState;
   readonly sessionSeconds?: number;
   // The turn was stopped. Record results only, with no provider retry or compaction.
   readonly interrupted?: boolean;

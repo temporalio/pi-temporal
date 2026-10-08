@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { Context } from "@temporalio/activity";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { QUERIES } from "../src/protocol.js";
+import { QUERIES } from "../src/core/protocol.js";
 import type {
   ModelCallResult,
   RetireInput,
@@ -20,7 +20,7 @@ import type {
   ToolCallResult,
   SessionTurnOptions,
   TurnState,
-} from "../src/protocol.js";
+} from "../src/core/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const queue = `pi-budget-${Date.now()}`;
@@ -77,7 +77,6 @@ const activities = {
     return {
       ...(secondsBefore === undefined ? {} : { sessionSeconds: secondsBefore }),
       done: taken >= answerAfter,
-      retryAttempt: 0,
       finalText: taken >= answerAfter ? "answered" : "",
       spent: { tokens: tokensPerStep, cost: tokensPerStep / 1000 },
       total: { tokens: billed, cost: billed / 1000 },
@@ -100,7 +99,7 @@ const activities = {
     return { outcome: "settled" };
   },
   async sealStep(): Promise<RunStepResult> {
-    return { done: true, retryAttempt: 0, finalText: "answered" };
+    return { done: true, finalText: "answered" };
   },
   // Like the real activity, keeps the Workflow's own total of the session's time.
   async retireSession(input: RetireInput) {
@@ -120,7 +119,7 @@ async function main() {
     connection: native,
     namespace: "default",
     taskQueue: queue,
-    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities,
     maxHeartbeatThrottleInterval: "1 second",
   });

@@ -15,9 +15,9 @@ import {
   type LiveTurn,
   type LiveTurns,
   makeLocalTurnActivities,
-} from "../src/local-turn-activity.js";
-import { LOCAL_TURN_WORKFLOW } from "../src/protocol.js";
-import type { LocalTurnInput } from "../src/protocol.js";
+} from "../src/pi/local-turn-activity.js";
+import { LOCAL_TURN_WORKFLOW } from "../src/core/protocol.js";
+import type { LocalTurnInput } from "../src/core/protocol.js";
 
 const STEPS_TO_ANSWER = 3;
 const cfg = fromEnv();
@@ -100,7 +100,7 @@ async function main() {
     connection: nativeConnection,
     namespace: cfg.namespace,
     taskQueue,
-    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities: makeLocalTurnActivities(live),
   });
   const running = worker.run();

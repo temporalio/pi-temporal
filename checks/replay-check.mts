@@ -15,7 +15,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 import { Context } from "@temporalio/activity";
-import type { RunStepInput } from "../src/protocol.js";
+import type { RunStepInput } from "../src/core/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const namespace = "default";
@@ -35,14 +35,14 @@ const activities = {
   async adoptProject() {},
   async retireSession() {},
   async runStep() {
-    return { done: true, retryAttempt: 0, finalText: "answered" };
+    return { done: true, finalText: "answered" };
   },
   async runModelCall() {
     const calls = [{ id: "call", name: "probe" }];
     return { calls, sequential: false, ended: false, queue: hostQueue };
   },
   async sealStep() {
-    return { done: true, retryAttempt: 0, finalText: "closed" };
+    return { done: true, finalText: "closed" };
   },
 };
 
@@ -55,7 +55,7 @@ async function main() {
     connection: native,
     namespace,
     taskQueue: queue,
-    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities: {
       ...activities,
       async runToolCall() {
@@ -121,7 +121,7 @@ async function main() {
 
     let ownReplay: unknown;
     await Worker.runReplayHistory(
-      { workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)) },
+      { workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)) },
       history,
     ).catch((err) => {
       ownReplay = err;

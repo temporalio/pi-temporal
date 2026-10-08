@@ -1,6 +1,6 @@
-// Builds the worker that drives Pi steps. Used by the standalone worker and by the pi extension,
-// which runs one in-process so `/background` works with no separate worker. Same workflow and
-// activities in both. Only the lifetime differs.
+// Builds a Worker for the session Workflows. Used by the standalone Worker and by the pi extension,
+// which runs one in-process so `/background` works with no separate Worker. The caller brings the
+// Activities, so this file knows nothing about the agent.
 
 import { fileURLToPath } from "node:url";
 import {
@@ -8,21 +8,23 @@ import {
   Worker,
   type WorkerOptions,
 } from "@temporalio/worker";
-import { makeActivities, type ActivityOptions } from "./activities.js";
 import { queueForWorker } from "./queue.js";
 
 // A stop reaches a running Activity only with a heartbeat's answer. By default the SDK sends
 // heartbeats about every 24 seconds here, so a stopped tool would run on that long.
 const HEARTBEAT_THROTTLE = "3 seconds";
 
-export interface SessionWorkerOptions extends ActivityOptions {
+export interface SessionWorkerOptions {
   readonly address: string;
   // API key or mTLS settings, built by `connectionOptions` so client and worker always agree.
   readonly connect?: Parameters<typeof NativeConnection.connect>[0];
   readonly namespace: string;
   readonly taskQueue: string;
-  // Extra activities, e.g. runLocalTurn, which needs the live turns of its own process.
-  readonly activities?: Record<string, unknown>;
+  // The Activities this Worker runs, given its host queue when it has one.
+  readonly activities: (hostQueue: string | undefined) => Record<string, unknown>;
+  // Also poll a host queue named for this project directory, so a step's tools and seal can come
+  // back to the host that holds the project. Leave it out when nothing is host-bound.
+  readonly hostQueueFor?: string;
   // How long `stop()` waits for in-flight activities before it gives up on them. Unset, it waits
   // for them all. An embedded worker sets it, so quitting pi can't hang on a long tool.
   readonly shutdownForceTime?: WorkerOptions["shutdownForceTime"];
@@ -41,37 +43,37 @@ export async function createSessionWorker(
   const connection = await NativeConnection.connect(
     opts.connect ?? { address: opts.address },
   );
-  // This process's own queue, so a step can return to the worker that started it. Computed once
-  // here so the poller and the activities can't report different names.
-  const stepQueue = queueForWorker(opts.taskQueue, opts.projectDir);
-  const activities = {
-    ...makeActivities({ ...opts, stepQueue }),
-    ...opts.activities,
-  };
+  // This process's own queue, so a step can come back to the Worker that started it. Computed
+  // once here, so the poller and the Activities can't report different names.
+  const hostQueue =
+    opts.hostQueueFor === undefined ? undefined : queueForWorker(opts.taskQueue, opts.hostQueueFor);
+  const activities = opts.activities(hostQueue);
   // A failed start gives back what it opened. The extension tries again on the next task, and a
   // long-lived pi would otherwise keep a connection per failed attempt.
   let worker: Worker | undefined;
-  let hostWorker: Worker;
+  let hostWorker: Worker | undefined;
   try {
     worker = await Worker.create({
       connection,
       namespace: opts.namespace,
       taskQueue: opts.taskQueue,
-      workflowsPath: fileURLToPath(new URL("./workflows.ts", import.meta.url)),
+      workflowsPath: fileURLToPath(new URL("../workflow-bundle.ts", import.meta.url)),
       activities,
       shutdownForceTime: opts.shutdownForceTime,
       maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
     });
     // Activities only, for work that must run on this host. Without this poller every step on the
     // host queue would wait out schedule-to-start before falling back to the shared queue.
-    hostWorker = await Worker.create({
-      connection,
-      namespace: opts.namespace,
-      taskQueue: stepQueue,
-      activities,
-      shutdownForceTime: opts.shutdownForceTime,
-      maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
-    });
+    if (hostQueue !== undefined) {
+      hostWorker = await Worker.create({
+        connection,
+        namespace: opts.namespace,
+        taskQueue: hostQueue,
+        activities,
+        shutdownForceTime: opts.shutdownForceTime,
+        maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
+      });
+    }
   } catch (err) {
     // A Worker holds its connection until its run ends, so one that never ran is run and shut
     // down at once. Only then does the connection close.
@@ -93,7 +95,7 @@ export async function createSessionWorker(
     // Settles when either poller fails, or when both end on a shutdown. A dead host-queue poller
     // looks healthy otherwise, and every host-queue unit waits out its queue timeout.
     run: () => {
-      runningHost ??= hostWorker.run();
+      runningHost ??= hostWorker?.run();
       running ??= shared.run();
       return Promise.all([running, runningHost]).then(() => undefined);
     },
@@ -113,7 +115,7 @@ export async function createSessionWorker(
     };
     // `shutdown()` throws unless the worker is running, e.g. when it already died.
     await attempt(() => shared.getState() === "RUNNING" && shared.shutdown());
-    await attempt(() => hostWorker.getState() === "RUNNING" && hostWorker.shutdown());
+    await attempt(() => hostWorker?.getState() === "RUNNING" && hostWorker.shutdown());
     // A worker shut down mid-poll, or forced past `shutdownForceTime`, rejects. That's the
     // shutdown, not a failure.
     await running?.catch(() => {});

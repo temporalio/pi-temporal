@@ -13,7 +13,7 @@ import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ApplicationFailure } from "@temporalio/common";
-import { makeActivities } from "../src/activities.js";
+import { makeActivities } from "../src/pi/activities.js";
 import * as worktree from "../src/tree/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 

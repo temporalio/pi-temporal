@@ -12,7 +12,7 @@ import {
   WorkflowUpdateRPCTimeoutOrCancelledError,
 } from "@temporalio/client";
 import { ApplicationFailure } from "@temporalio/common";
-import { type Config, connectionOptions, fromEnv, sessionFileFor } from "./config.js";
+import { type Config, connectionOptions, fromEnv, sessionFileFor } from "../config.js";
 import {
   DUPLICATE_PROMPT,
   SIGNALS,

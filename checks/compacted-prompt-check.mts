@@ -7,8 +7,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/activities.js";
-import { textOf } from "../src/messages.js";
+import { makeActivities } from "../src/pi/activities.js";
+import { textOf } from "../src/pi/messages.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-compacted-prompt-"));
 const file = join(root, "session.jsonl");

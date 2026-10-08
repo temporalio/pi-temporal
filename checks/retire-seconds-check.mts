@@ -6,7 +6,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/activities.js";
+import { makeActivities } from "../src/pi/activities.js";
 
 const dir = await mkdtemp(join(tmpdir(), "pi-retire-seconds-"));
 const file = join(dir, "s.jsonl");

@@ -39,6 +39,7 @@ import {
   WORKFLOW_ID_PREFIX,
 } from "./protocol.js";
 import type {
+  AgentState,
   PromptInput,
   Quiet,
   RetireInput,
@@ -353,9 +354,8 @@ export async function piSession(
     let outcome: NonNullable<TurnState["finished"]>["outcome"] = "ceiling";
     let finalText = "";
     let error: string | undefined;
-    // Kept here because the session is rebuilt per activity and compaction rewrites the transcript.
-    let retryAttempt = 0;
-    let overflowRecoveryAttempted = false;
+    // The agent's state between steps, kept here because the session is opened again per Activity.
+    let agentState: AgentState | undefined;
     // Turn-scoped so the `finally` counts spend even for failed or stopped turns.
     const startedAt = Date.now();
     let tokens = 0;
@@ -418,18 +418,16 @@ export async function piSession(
             sessionId: id,
             sessionFile: file,
             step,
-            retryAttempt,
-            overflowRecoveryAttempted,
+            agentState,
             sessionSeconds: sessionSecondsBefore() + (Date.now() - startedAt) / 1000,
             // For `runStep`, or for the model call of a stepped step.
             fence: fence(),
             ...prompt,
           };
           const result = await runTurnStep(input);
-          retryAttempt = result.retryAttempt;
-          // A result with nothing to say, such as one from an older worker, keeps what an earlier
-          // seal reported. Reset to false, it would hand the turn a second compact-and-retry.
-          overflowRecoveryAttempted = result.overflowRecoveryAttempted ?? overflowRecoveryAttempted;
+          // A result with nothing to say keeps what an earlier step reported. Reset, it could hand
+          // the agent a second go at something it allows once per turn.
+          agentState = result.agentState ?? agentState;
           tokens += result.spent?.tokens ?? 0;
           cost += result.spent?.cost ?? 0;
           recorded = result.total ?? recorded;

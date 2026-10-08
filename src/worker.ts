@@ -12,7 +12,8 @@ import {
   preflight,
   TEMPORAL_CREDENTIAL_VARS,
 } from "./config.js";
-import { createSessionWorker } from "./session-worker.js";
+import { createSessionWorker } from "./core/session-worker.js";
+import { makeActivities } from "./pi/activities.js";
 import * as worktree from "./tree/worktree.js";
 
 async function main() {
@@ -67,11 +68,16 @@ async function main() {
     connect: connectionOptions(cfg),
     namespace: cfg.namespace,
     taskQueue: cfg.taskQueue,
-    projectDir,
-    provider: process.env.PI_TEMPORAL_PROVIDER,
-    modelHint: process.env.PI_MODEL,
-    apiKey,
-    shipTree: cfg.shipTree,
+    hostQueueFor: projectDir,
+    activities: (hostQueue) =>
+      makeActivities({
+        projectDir,
+        provider: process.env.PI_TEMPORAL_PROVIDER,
+        modelHint: process.env.PI_MODEL,
+        apiKey,
+        shipTree: cfg.shipTree,
+        hostQueue,
+      }),
   });
 
   console.log("pi-temporal worker");

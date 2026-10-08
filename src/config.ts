@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { sessionIdProblem, type TurnBudget } from "./protocol.js";
+import { sessionIdProblem, type TurnBudget } from "./core/protocol.js";
 
 export type Profile = "local" | "fleet";
 

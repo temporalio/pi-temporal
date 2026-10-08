@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeSteppedStep } from "../src/stepped-step.js";
+import { makeSteppedStep } from "../src/core/stepped-step.js";
 import * as worktree from "../src/tree/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-migration-rejoin-"));
@@ -50,11 +50,11 @@ try {
       sealStep: async (input) => {
         if (input.interrupted) {
           recoverySeals++;
-          return { done: true, retryAttempt: 0, finalText: "" };
+          return { done: true, finalText: "" };
         }
         await worktree.ensure(b, sessionFile);
         assert.equal(await readFile(join(b, "accepted.txt"), "utf8"), "work from host B\n");
-        return { done: true, retryAttempt: 0, finalText: "" };
+        return { done: true, finalText: "" };
       },
     },
     onHost: () => ({
@@ -76,7 +76,7 @@ try {
 
   // The lost host's step is recorded and the turn goes on.
   const carried = await step({
-    sessionId: "session", sessionFile, promptId: "turn", text: "task", step: 1, retryAttempt: 0,
+    sessionId: "session", sessionFile, promptId: "turn", text: "task", step: 1,
   });
   assert.equal(carried.done, false);
   assert.equal(sharedCalls, 0, "a started attempt must not overlap a migrated batch");

@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { connect, interrupt, sessionExists, submitPrompt } from "./client.js";
+import { connect, interrupt, sessionExists, submitPrompt } from "./core/client.js";
 import {
   clientProblems,
   describe,
@@ -24,15 +24,15 @@ import {
   WORKFLOW_TYPE,
   WORKFLOW_ID_PREFIX,
   workflowId,
-} from "./protocol.js";
+} from "./core/protocol.js";
 import {
   QueryRejectedError,
   ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   WorkflowNotFoundError,
 } from "@temporalio/client";
-import type { Quiet, TurnState } from "./protocol.js";
-import { textOf } from "./messages.js";
+import type { Quiet, TurnState } from "./core/protocol.js";
+import { textOf } from "./pi/messages.js";
 
 const POLL_MS = 1_000;
 

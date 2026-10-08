@@ -13,9 +13,9 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { makeActivities } from "../src/activities.js";
-import { QUERIES } from "../src/protocol.js";
-import type { TurnState } from "../src/protocol.js";
+import { makeActivities } from "../src/pi/activities.js";
+import { QUERIES } from "../src/core/protocol.js";
+import type { TurnState } from "../src/core/protocol.js";
 import * as worktree from "../src/tree/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
@@ -81,7 +81,7 @@ async function main() {
     taskQueue: queue,
     // Eager dispatch would hand every activity back to this worker and hide the routing.
     maxEagerActivityReservationsPerWorkflowTask: 0,
-    workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities: makeActivities(
       { projectDir: hosts.refused, shipTree: true },
       {
@@ -104,7 +104,7 @@ async function main() {
     helper,
     `import { NativeConnection, Worker } from "@temporalio/worker";\n` +
       `import { makeActivities } from ${JSON.stringify(
-        fileURLToPath(new URL("../src/activities.js", import.meta.url)),
+        fileURLToPath(new URL("../src/pi/activities.js", import.meta.url)),
       )};\n` +
       `const native = await NativeConnection.connect({ address: ${JSON.stringify(address)} });\n` +
       `const worker = await Worker.create({\n` +
