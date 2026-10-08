@@ -71,6 +71,10 @@ model, run as a child process so a check can `SIGKILL` or `SIGSTOP` it mid-Activ
 
 `seal-check`, `fence-check`, `quarantine-routing-check`, `detached-check`
 
+`echo-check` does the same with no Pi. It runs `examples/echo/` as its README says, then
+`SIGKILL`s a Worker while the echo tool runs, and checks that a new Worker reports the tool's
+outcome as unknown instead of running it again. Start here to test your own agent.
+
 ## Docker
 
 The scripts in `../docker/` run Workers in separate containers, over NFS, and across a container

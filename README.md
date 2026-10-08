@@ -27,6 +27,10 @@ can continue after you quit.
 You can use this repo as a template for your own agent's loop. The Temporal code in `src/core/`
 uses the `Agent` interface. Pi is one implementation.
 
+- [examples/echo/](examples/echo/) is the place to start. It's a whole agent with a scripted
+  model, a Worker and a client, built on `src/core/` alone. It runs against a dev server with no
+  Pi, no model key, and no Docker.
+
 - [docs/architecture.md](docs/architecture.md) describes state ownership and the optional modules.
   It also gives a reading order for the code.
 - [docs/design-decisions.md](docs/design-decisions.md) says why each Temporal choice was made.

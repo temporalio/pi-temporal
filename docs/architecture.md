@@ -6,6 +6,8 @@ interface, so you can use it with another agent.
 
 [design-decisions.md](design-decisions.md) explains the choices behind this split.
 [adapting.md](adapting.md) describes the interface your agent must implement.
+[`examples/echo/`](../examples/echo/) is a small agent on `src/core/` alone, and the place to
+start reading.
 
 ## The split
 
@@ -46,13 +48,14 @@ store them encrypted.
 
 | file | what to look for |
 |---|---|
-| `src/workflow-bundle.ts` | The two Workflows a Worker registers. |
+| `examples/echo/` | A whole agent with a scripted model, its Worker, and a client. The shortest path through the core. |
+| `src/core/workflows.ts`, `src/workflow-bundle.ts` | The Workflows a Worker registers. Core Workers register `piSession` alone. Pi's Workers add `piLocalTurn`. |
 | `src/core/workflow.ts` | `piSession`. The prompt queue, the `submit` and `waitForQuiet` Updates, `runTurn`, budgets, Continue-As-New, and the idle exit. |
 | `src/core/stepped-step.ts` | One step as a model call, a tool call each, and a seal. Host queues, the fallback to the shared queue, and the recovery seal. Has no SDK imports, so `stepped-step-check` runs it with no server. |
 | `src/core/activities.ts` | The Activities, for any `Agent`. Fence tokens, dispatch claims, kept results, cancellation, heartbeats, and how a Worker shutdown differs from a stop. |
 | `src/core/agent.ts` | The `Agent` interface. What the Temporal side needs from an agent. |
 | `src/core/fence.ts`, `src/core/pending.ts` | How a stale attempt is kept out of the session file, and how a tool runs at most once. |
-| `src/core/client.ts`, `src/core/session-worker.ts` | How a prompt is sent, and how a Worker is built, with its slots, shutdown grace, and optional Worker Versioning. |
+| `src/core/client.ts`, `src/core/session-worker.ts` | How a prompt is sent, and how a Worker is built, with its slots, shutdown grace, and optional Worker Versioning. Neither reads Pi's config. `src/client.ts` builds their options from it. |
 | `src/pi/agent.ts` | Pi's `Agent`. The only place that knows Pi's session format. |
 | `src/worker.ts`, `src/cli.ts`, `extensions/temporal.ts` | Entry points. The standalone Worker, the CLI, and the pi extension. |
 
