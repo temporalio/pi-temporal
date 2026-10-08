@@ -12,6 +12,10 @@ updates:
     directory: /docker
     schedule: { interval: weekly }
     cooldown: { default-days: 14 }
+    ignore:
+      # Odd-numbered Node majors never become LTS, so the image stays on an LTS line.
+      - dependency-name: node
+        versions: ["25.x", "27.x", "29.x"]
   - package-ecosystem: docker-compose
     directory: /docker
     schedule: { interval: weekly }
