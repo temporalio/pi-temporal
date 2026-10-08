@@ -130,7 +130,8 @@ export function makeCoreActivities(options: CoreActivityOptions) {
   const activities = makeUncheckedActivities(options);
   const { sessionRoot } = options;
   // Made here, once, so a fresh Worker takes its first session. Never a directory from input.
-  mkdirSync(sessionRoot, { recursive: true });
+  // Owner only, as the Pi agent makes it, since session files hold the whole conversation.
+  mkdirSync(sessionRoot, { recursive: true, mode: 0o700 });
   const root = realpathSync(sessionRoot);
   // A direct child of the root, compared by real path. A link under the root can't lead out, a
   // root reached through a link still takes its files, and a file can't hide in another

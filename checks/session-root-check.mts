@@ -121,6 +121,8 @@ try {
     () => false,
   );
   check("a missing directory is made at setup", made);
+  const mode = await stat(join(root, "fresh", "sessions")).then((s) => s.mode & 0o777);
+  check("and only its owner can open it", mode === 0o700, mode.toString(8));
 
   // Without a store, adopting writes nothing, so the root can be `/` here.
   const top = makeCoreActivities({ agent: echoAgent(), sessionRoot: "/" });
