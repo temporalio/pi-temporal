@@ -37,7 +37,7 @@ const newestOf = (names: readonly string[]) =>
 export async function takeFence(sessionFile: string, token: string): Promise<() => void> {
   if (!TOKEN.test(token)) throw new Error(`not a fence: ${token}`);
   const dir = dirOf(sessionFile);
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
   // Taking the same token twice is the same attempt, so it's not a conflict.
   await writeFile(join(dir, token), "", { flag: "wx" }).catch((err: NodeJS.ErrnoException) => {
     if (err.code !== "EEXIST") throw err;

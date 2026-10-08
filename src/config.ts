@@ -5,7 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import { loadClientConnectConfig } from "@temporalio/envconfig";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { sessionIdProblem, type TurnBudget } from "./core/protocol.js";
 
@@ -75,6 +75,8 @@ function onOff(name: string, fallback: boolean): boolean {
   );
 }
 
+const localQueue = () => `pi-session-${userInfo().username.replace(/[^\w.-]/g, "_")}`;
+
 function profileFromEnv(): Profile {
   const raw = process.env.PI_TEMPORAL_PROFILE;
   if (raw === undefined || raw === "" || raw === "local") return "local";
@@ -100,7 +102,9 @@ export function fromEnv(): Config {
     address: address ?? "127.0.0.1:7233",
     namespace: namespace ?? "default",
     standard,
-    taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
+    // Per user on one machine, so two people sharing a dev server don't run each other's turns.
+    // A fleet shares one queue on purpose.
+    taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? (fleet ? "pi-session" : localQueue()),
     // Absolute, since it travels in Workflow input and the client and worker have different cwds.
     sessionDir: given("PI_SESSION_DIR")
       ? resolve(process.env.PI_SESSION_DIR!)

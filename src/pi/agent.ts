@@ -160,7 +160,8 @@ export function piAgent(opts: PiOptions, dependencies: PiDependencies = {}): Age
 
   async function openSession(sessionFile: string, guard: () => void): Promise<PiSession> {
     if (dependencies.openSession) return dependencies.openSession(sessionFile, guard);
-    await mkdir(dirname(sessionFile), { recursive: true });
+    // Owner only. The session holds the conversation, tool output included.
+    await mkdir(dirname(sessionFile), { recursive: true, mode: 0o700 });
     const sessionManager = SessionManager.open(sessionFile);
     sessionManager.setWriteGuard(guard);
 

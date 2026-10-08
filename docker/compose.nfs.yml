@@ -9,7 +9,7 @@ name: pi-temporal-l3
 
 services:
   nfs:
-    image: erichough/nfs-server:latest
+    image: erichough/nfs-server:latest@sha256:784ef30907aa318b8324c4c49bd258b11a740ab0eea9f09b5ccf9df378fa77ca
     privileged: true
     environment:
       - NFS_EXPORT_0=/exports *(rw,no_subtree_check,no_root_squash,fsid=0)
@@ -17,7 +17,7 @@ services:
       - nfsdata:/exports
     ports:
       # Published on a fixed port, since the daemon mounts it and can't resolve service names.
-      - "12049:2049"
+      - "127.0.0.1:12049:2049"
     healthcheck:
       test: ["CMD-SHELL", "rpcinfo -T tcp 127.0.0.1 100003 4 >/dev/null 2>&1"]
       interval: 3s

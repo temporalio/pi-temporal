@@ -136,7 +136,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_PROJECT_DIR` | the directory a standalone Worker's tools run in, required in `fleet` | the Worker's working directory |
 | `PI_TEMPORAL_STEPPED` | `1` runs each model call, tool call, and seal as its own Activity | off, on in `fleet` |
 | `PI_TEMPORAL_SHIP_TREE` | `1` ships the project's files between hosts | off, on in `fleet` |
-| `PI_TEMPORAL_TASK_QUEUE` | the Task Queue sessions use | `pi-session` |
+| `PI_TEMPORAL_TASK_QUEUE` | the Task Queue sessions use | `pi-session-<user>`, `pi-session` in `fleet` |
 | `PI_TEMPORAL_PROVIDER` | `openai` or `anthropic` (reads `<PROVIDER>_API_KEY` or `_API_KEY_FILE`) | `openai` |
 | `PI_MODEL` | substring matched against the provider's model ids | `mini` / `haiku` |
 | `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` | tool attempt timeout, stepped Worker sessions | 30 |
