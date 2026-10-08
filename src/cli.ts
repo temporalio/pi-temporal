@@ -16,7 +16,7 @@ import {
   preflight,
   sessionFileFor,
 } from "./config.js";
-import * as worktree from "./worktree.js";
+import * as worktree from "./tree/worktree.js";
 import {
   SESSION_MEMO,
   sessionIdProblem,

@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 
 const root = await fs.mkdtemp(join(tmpdir(), "pi-stale-tip-"));
 const read = (path: string) => fs.readFile(path, "utf8").catch(() => undefined);

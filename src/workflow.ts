@@ -28,6 +28,7 @@ import {
 } from "@temporalio/workflow";
 import {
   FAILED_BEFORE_CLAIM,
+  fencePrefix,
   MAX_STEPS_PER_TURN,
   DUPLICATE_PROMPT,
   QUERIES,
@@ -118,7 +119,7 @@ const onHost = (taskQueue: string, timeoutMinutes: number) => ({
     taskQueue,
     scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
   }).runToolCall,
-  // A seal runs under the session lock and is safe to repeat, so it may retry. A queue timeout is
+  // A seal is fenced and safe to repeat, so it may retry. A queue timeout is
   // never retried, so a lost host still fails fast.
   sealStep: proxyActivities<SteppedActivities>({
     ...cappedOptions,
@@ -197,6 +198,9 @@ export async function piSession(
   }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
+  // One per Activity that writes the session file. See `fence.ts`.
+  let fenced = 0;
+  const fence = () => fencePrefix(workflowInfo().runStartTime.getTime(), ++fenced);
   // Set per turn, since it reads that turn's spend. The step driver is built once.
   let outOfBudget = (_pending?: Pick<RunStepResult, "spent" | "total">): boolean => false;
   const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
@@ -210,6 +214,7 @@ export async function piSession(
         },
         isCancellation,
         outOfBudget: (pending) => outOfBudget(pending),
+        fence,
         // No patch gate. Replay doesn't compare activity timeouts, so a running session takes the
         // configured timeout from its next host-queue call on.
         onHost: (queue) =>
@@ -305,7 +310,7 @@ export async function piSession(
       const warn = (err: unknown) =>
         log.warn("could not retire the session's directory", { sessionId: id, err: String(err) });
       await Promise.all([
-        retireSession({ sessionFile: file, ...last }).catch(warn),
+        retireSession({ sessionFile: file, ...last, fence: fence() }).catch(warn),
         ...[...hostQueues].map((queue) => retireOn(queue)({ sessionFile: file }).catch(warn)),
       ]);
       // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.
@@ -416,6 +421,8 @@ export async function piSession(
             retryAttempt,
             overflowRecoveryAttempted,
             sessionSeconds: sessionSecondsBefore() + (Date.now() - startedAt) / 1000,
+            // For `runStep`, or for the model call of a stepped step.
+            fence: fence(),
             ...prompt,
           };
           const result = await runTurnStep(input);

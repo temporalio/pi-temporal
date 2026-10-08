@@ -8,8 +8,8 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import * as worktree from "../src/worktree.js";
-import { withSessionLock } from "../src/session-lock.js";
+import * as worktree from "../src/tree/worktree.js";
+import { withLease } from "../src/tree/lease.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
@@ -337,7 +337,7 @@ async function main() {
   check("and one that never saw the session gets there too", fresh2 === "45\n", fresh2);
 
   // The cross-host `writers` lock. Held here as another machine would, a capture must wait for it.
-  const otherHostHolds = withSessionLock(join(`${compacted}.tree`, "writers"), async () => {
+  const otherHostHolds = withLease(join(`${compacted}.tree`, "writers"), async () => {
     await new Promise((resolve) => setTimeout(resolve, 700));
     return Date.now();
   });

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { withSessionLock } from "../src/session-lock.js";
+import { withLease } from "../src/tree/lease.js";
 
 const execFileAsync = promisify(execFile);
 const failures: string[] = [];
@@ -26,7 +26,7 @@ const role = process.argv[2];
 const file = process.argv[3];
 
 if (role === "holder") {
-  await withSessionLock(file!, async (owned, ownedNow) => {
+  await withLease(file!, async (owned, ownedNow) => {
     await writeFile(`${file}.holding`, "");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, STALL_MS);
     // The write guard's question for a write that lands as soon as the loop resumes.
@@ -42,7 +42,7 @@ if (role === "holder") {
       await new Promise((r) => setTimeout(r, 100));
     }
   }
-  await withSessionLock(file!, async () => new Promise((r) => setTimeout(r, 20_000)), 120_000);
+  await withLease(file!, async () => new Promise((r) => setTimeout(r, 20_000)), 120_000);
 } else {
   const dir = await mkdtemp(join(tmpdir(), "pi-stall-"));
   const session = join(dir, "s.jsonl");

@@ -26,11 +26,11 @@ import type {
   ToolCallInput,
   ToolCallResult,
 } from "./protocol.js";
-import { FAILED_AFTER_CLAIM, FAILED_BEFORE_CLAIM } from "./protocol.js";
+import { FAILED_AFTER_CLAIM, FAILED_BEFORE_CLAIM, fencePrefix } from "./protocol.js";
 import { SHIP_TREE_NEEDS_STEPS } from "./config.js";
 import * as pending from "./pending.js";
-import * as worktree from "./worktree.js";
-import { withSessionLock } from "./session-lock.js";
+import * as worktree from "./tree/worktree.js";
+import { claimFence, fenceToken } from "./fence.js";
 import { textOf } from "./messages.js";
 
 // Retry delay after a host refuses the project directory. Short, so the work finds a free host.
@@ -208,20 +208,27 @@ export function makeActivities(
       throw err;
     });
   };
-  // A lock can be reclaimed while its holder is blocked, so re-check before writing. On failure,
-  // Temporal retries and the retry takes the lock.
-  const stillOurs = async (owned: () => Promise<boolean>, what: string) => {
-    if (!(await owned())) {
-      throw new Error(`lost the session lock before ${what}; another attempt has it`);
+  // Runs `body` as the session file's writer, with the guard Pi asks before each append. The
+  // assistant message lands at the end of a stream that can run for minutes, so the guard, not a
+  // check up front, is what keeps a superseded attempt out.
+  //
+  // An Activity with no fence was scheduled by an older Workflow. It sorts below every fenced one,
+  // so it can't block the run that follows. A check calling an activity directly, with no
+  // Activity around it, gets one from this host's clock.
+  const withFence = async <T>(
+    sessionFile: string,
+    prefix: string | undefined,
+    body: (guard: () => void) => Promise<T>,
+  ) => {
+    let attempt: number | undefined;
+    try {
+      attempt = Context.current().info.attempt;
+    } catch {
+      // No Activity around it.
     }
-  };
-
-  // Guards Pi's own appends. The assistant message lands at the end of a stream that can run for
-  // minutes, long after any awaited check.
-  const writeGuard = (ownedNow: () => boolean, what: string) => () => {
-    if (!ownedNow()) {
-      throw new Error(`lost the session lock during ${what}; another attempt has it`);
-    }
+    const fallback = attempt === undefined ? fencePrefix(Date.now(), 0) : fencePrefix(0, 0);
+    const token = fenceToken(prefix ?? fallback, attempt ?? 1);
+    return await body(await claimFence(sessionFile, token));
   };
 
   // The files are set aside either way, since they're the only record of what the tool did. A
@@ -406,11 +413,11 @@ export function makeActivities(
     }
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
         await bringTree(input.sessionFile);
-        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the step"));
+        const session = await openSession(input.sessionFile, guard);
         try {
-          await stillOurs(owned, "the step");
+          guard();
           const settled = await readyForStep(session, input, false);
           if (settled) return settled;
 
@@ -490,15 +497,15 @@ export function makeActivities(
   async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
         await bringTree(input.sessionFile);
         const session = await openSession(
           input.sessionFile,
-          writeGuard(ownedNow, "the model call"),
+          guard,
         );
         try {
           // Before the first write (recording the prompt).
-          await stillOurs(owned, "the model call");
+          guard();
           const settled = await readyForStep(session, input, true);
           if (settled) return { settled, calls: [], sequential: false, ended: true };
 
@@ -547,24 +554,18 @@ export function makeActivities(
     const stop = heartbeatEvery(3000);
     let claimed = false;
     try {
-      // This host may not have run the model call, so restore the project files first. Under the
-      // session lease to order it against transcript recovery. The tree store has its own leases.
+      // This host may not have run the model call, so restore the project files first. The tree
+      // store has its own leases.
       const writer: worktree.Writer = { turn: input.turn, step: input.step, callId: input.call.id };
-      await withSessionLock(input.sessionFile, () => bringTree(input.sessionFile, writer));
-      // Opening can append (a thinking-level entry), so the open is locked. The lock is released
-      // before the tool runs so siblings stay parallel. After that, any append is refused, which
-      // also catches an extension writing from `tool_execution_end`.
-      let opening = true;
-      const session = await withSessionLock(input.sessionFile, (_owned, ownedNow) =>
-        openSession(input.sessionFile, () => {
-          if (opening) return writeGuard(ownedNow, "opening the session")();
-          throw new Error(
-            "a tool activity must not write to the session: " +
-              "the seal records what the step produced",
-          );
-        }),
-      );
-      opening = false;
+      await bringTree(input.sessionFile, writer);
+      // A tool call never writes the session, so siblings need no order between them. What
+      // opening could add, the model call already wrote. The seal records what the step produced.
+      // This also catches an extension writing from `tool_execution_end`.
+      const session = await openSession(input.sessionFile, () => {
+        throw new Error(
+          "a tool activity must not write to the session: the seal records what the step produced",
+        );
+      });
       try {
         // Already sealed. Clean up the leftover kept result.
         if (answeredInTranscript(session.state.messages as Msg[], input.call.id)) {
@@ -610,9 +611,8 @@ export function makeActivities(
         // Ship from here. Only this host has the tool's changes, and the seal may land elsewhere.
         // The result is kept, so a failure here must not fail the call. The next step's restore
         // or a later capture can carry the files.
-        await withSessionLock(input.sessionFile, () =>
-          shipTree(input.sessionFile, { current: writer, fence: { turn, step } }),
-        ).catch((err: unknown) => {
+        const ship = shipTree(input.sessionFile, { current: writer, fence: { turn, step } });
+        await ship.catch((err: unknown) => {
           say("warn", `could not ship the project tree after ${call.id}: ${String(err)}`);
         });
         return { outcome: "settled" };
@@ -636,7 +636,7 @@ export function makeActivities(
   async function sealStep(input: SealStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
         // Close the step first. The lost host, or a stopped tool still running there, may publish
         // from a stale tip later, and this lets that capture be refused.
         if (input.interrupted && opts.shipTree) {
@@ -644,7 +644,7 @@ export function makeActivities(
         }
         // A cancelled tool may still be writing on another host.
         if (!input.interrupted) await bringTree(input.sessionFile);
-        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the seal"));
+        const session = await openSession(input.sessionFile, guard);
         try {
           const results: TurnToolCallOutcome[] = [];
           for (const call of input.calls) {
@@ -662,7 +662,7 @@ export function makeActivities(
           }
 
           // `expectCalls` stops results being attached to a message appended since the model call.
-          await stillOurs(owned, "the seal");
+          guard();
           const before = billed(session);
           const sealed = await session.sealStep(results, {
             expectCalls: input.calls.map((call) => call.id),
@@ -712,8 +712,7 @@ export function makeActivities(
     const { sessionFile, turn, sessionSeconds } = input;
     if (turn === undefined || sessionSeconds === undefined) return;
     if (!(await access(sessionFile).then(() => true, () => false))) return;
-    await withSessionLock(sessionFile, async (_owned, ownedNow) => {
-      const guard = writeGuard(ownedNow, "recording the session's time");
+    await withFence(sessionFile, input.fence, async (guard) => {
       const manager = dependencies.openSession
         ? managerOf(await dependencies.openSession(sessionFile, guard))
         : SessionManager.open(sessionFile);

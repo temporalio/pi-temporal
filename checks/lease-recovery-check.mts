@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { withSessionLock } from "../src/session-lock.js";
+import { withLease } from "../src/tree/lease.js";
 
 const root = await fs.mkdtemp(join(tmpdir(), "pi-lease-recovery-"));
 const originalWrite = fs.writeFile;
@@ -41,12 +41,12 @@ async function releasedEpochRace() {
   }) as typeof fs.writeFile;
   syncBuiltinESMExports();
 
-  const late = withSessionLock(file, async () => { overlapped ||= held; });
+  const late = withLease(file, async () => { overlapped ||= held; });
   let current: Promise<void> | undefined;
   try {
     await paused.promise;
-    await withSessionLock(file, async () => {});
-    current = withSessionLock(file, async () => {
+    await withLease(file, async () => {});
+    current = withLease(file, async () => {
       held = true;
       active.release();
       await leave.promise;
@@ -68,7 +68,7 @@ async function releasedEpochRace() {
 
 async function failedRenewal() {
   const file = join(root, "renewal.jsonl");
-  await withSessionLock(file, async (_owned, ownedNow) => {
+  await withLease(file, async (_owned, ownedNow) => {
     let attempts = 0;
     fs.utimes = async (...args) => {
       if (String(args[0]).startsWith(`${file}.lock/`)) {
@@ -101,7 +101,7 @@ async function failedRenewal() {
 // past the window can't extend the lease, because a contender may have taken over meanwhile.
 async function lateRenewal() {
   const file = join(root, "late.jsonl");
-  await withSessionLock(file, async (owned, ownedNow) => {
+  await withLease(file, async (owned, ownedNow) => {
     const stalled = barrier();
     const resume = barrier();
     let done = false;
@@ -143,7 +143,7 @@ async function lateRenewal() {
 
 async function observedLoss() {
   const file = join(root, "loss.jsonl");
-  await withSessionLock(file, async (owned, ownedNow) => {
+  await withLease(file, async (owned, ownedNow) => {
     await fs.writeFile(join(`${file}.lock`, "00000002"), JSON.stringify({ token: "other" }));
     assert.equal(await owned(), false);
     assert.equal(ownedNow(), false, "an observed loss must stop synchronous writes at once");
@@ -157,7 +157,7 @@ async function observedLoss() {
 // its claim doesn't give the lease back.
 async function expiredStaysLost() {
   const file = join(root, "expired.jsonl");
-  await withSessionLock(file, async (owned, ownedNow) => {
+  await withLease(file, async (owned, ownedNow) => {
     Date.now = () => originalNow() + 51_000;
     try {
       assert.equal(await owned(), false, "an expired holder cannot confirm ownership");
@@ -184,7 +184,7 @@ async function unreadableClaim() {
   }) as typeof fs.stat;
   syncBuiltinESMExports();
   try {
-    await assert.rejects(withSessionLock(file, async () => { entered = true; }), { code: "EIO" });
+    await assert.rejects(withLease(file, async () => { entered = true; }), { code: "EIO" });
     assert.equal(entered, false, "unreadable claims cannot admit another writer");
   } finally {
     fs.stat = originalStat;

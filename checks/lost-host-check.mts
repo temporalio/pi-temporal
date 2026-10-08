@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { AgentSession, TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
 import { makeActivities } from "../src/activities.js";
 import { makeSteppedStep } from "../src/stepped-step.js";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-lost-host-"));
 const originalData = process.env.PI_TEMPORAL_DATA;

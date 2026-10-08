@@ -33,6 +33,9 @@ export interface SteppedStepDeps {
   readonly onHost?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
   // Migration requires evidence that no attempt started on the host queue.
   readonly isUnclaimed?: (err: unknown) => boolean;
+  // A fresh fence for each Activity scheduled. A seal sent again on another queue is a new
+  // Activity, whose attempts count from one again.
+  readonly fence?: () => string;
   // Run the seal even when the turn was cancelled, so finished calls keep their real results.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
   // Checked between sequential calls. A started call is never stopped, since the transcript needs
@@ -248,9 +251,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         interrupted,
         ...(lost ? { lost: true } : {}),
       };
+      const stamped = () => ({ ...sealed, ...(deps.fence ? { fence: deps.fence() } : {}) });
       // A recovery seal must not move a project that an abandoned tool may still write.
-      if (interrupted) return deps.activities.sealStep(sealed);
-      return viaHost((on) => on.sealStep(sealed));
+      if (interrupted) return deps.activities.sealStep(stamped());
+      return viaHost((on) => on.sealStep(stamped()));
     };
 
     const recover = async (failure: unknown): Promise<RunStepResult> => {

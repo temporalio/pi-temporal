@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 
 // The project is a volume, so it cannot be moved aside. A refused directory stays refused.
 const work = "/work";

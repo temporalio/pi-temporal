@@ -6,6 +6,10 @@ export const WORKFLOW_ID_PREFIX = "pi-session-";
 // A tool call that failed before any attempt claimed it, so the tool never started and the
 // workflow may move a host-queue step.
 export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
+/** The Workflow's half of a fence: its run, and the Activity it is about to schedule. */
+export const fencePrefix = (runStartMs: number, seq: number) =>
+  `${String(runStartMs).padStart(13, "0")}.${String(seq).padStart(8, "0")}`;
+
 // The memo key a session keeps its state under, `{ state: "running" | "idle", queued }`.
 export const SESSION_MEMO = "piSession";
 
@@ -96,6 +100,8 @@ export interface PromptInput {
 }
 
 export interface RunStepInput extends PromptInput {
+  // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
+  readonly fence?: string;
   // Failed attempts of this step so far. The workflow keeps the count because the session is
   // rebuilt per activity and compaction can rewrite the transcript.
   readonly retryAttempt?: number;
@@ -227,6 +233,8 @@ export interface ToolCallResult {
 /** What an idle session leaves behind when its run exits. */
 export interface RetireInput {
   readonly sessionFile: string;
+  // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
+  readonly fence?: string;
   // The last turn and the session's time after it, as the Workflow counted. Absent when no turn
   // ran in this run or the one it continued from.
   readonly turn?: string;
@@ -234,6 +242,8 @@ export interface RetireInput {
 }
 
 export interface SealStepInput {
+  // Orders this Activity's writes to the session file against every other one. See `fence.ts`.
+  readonly fence?: string;
   readonly sessionId: string;
   readonly sessionFile: string;
   // Which turn's kept results to read. See `ToolCallInput`.
