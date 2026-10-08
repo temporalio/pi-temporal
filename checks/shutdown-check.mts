@@ -37,12 +37,14 @@ async function cancelledStep(
           state: { messages: [{ role: "assistant", content: "done" }] },
           prepareStep: () => true,
           recordPrompt: async () => true,
-          modelCall: async () => {
-            await new Promise((resolve) => setTimeout(resolve, 200));
-            return { toolCalls: [], sequential: false, ended: false };
-          },
-          abort: async () => {
-            aborted = true;
+          // Stops when the Activity's signal aborts, as Pi's own model call does.
+          modelCall: async (options?: { signal?: AbortSignal }) => {
+            await new Promise<void>((resolve) => {
+              options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+              setTimeout(resolve, 200);
+            });
+            aborted = options?.signal?.aborted === true;
+            return { toolCalls: [], sequential: false, ended: aborted };
           },
           runToolCall: async () => undefined,
           sealStep: async () => ({ done: true, retryAttempt: 0 }),
