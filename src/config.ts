@@ -28,6 +28,8 @@ export interface Config {
   readonly searchAttribute: boolean;
   // Encrypts payloads in history (`core/codec.ts`). 32 bytes, from base64.
   readonly codecKey?: Buffer;
+  // Retired keys that still decrypt payloads sealed before a rotation. Never used to encrypt.
+  readonly codecOldKeys?: readonly Buffer[];
   // API key for Temporal Cloud, or a certificate pair for mTLS. Never printed by `describe`.
   readonly apiKey?: string;
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
@@ -146,17 +148,34 @@ export const TEMPORAL_CREDENTIAL_VARS = [
   "TEMPORAL_CODEC_AUTH",
   "PI_TEMPORAL_CODEC_KEY",
   "PI_TEMPORAL_CODEC_KEY_FILE",
+  "PI_TEMPORAL_CODEC_OLD_KEYS",
+  "PI_TEMPORAL_CODEC_OLD_KEYS_FILE",
 ];
 
 // A bad key must fail at start, not as payloads nobody can read.
-function codecKeyFromEnv(): { codecKey?: Buffer } {
+function codecKeyFromEnv(): { codecKey?: Buffer; codecOldKeys?: Buffer[] } {
+  const decoded = (name: string, encoded: string) => {
+    const key = Buffer.from(encoded.trim(), "base64");
+    if (key.length !== 32) throw new Error(`${name} must hold 32-byte keys, base64 encoded`);
+    return key;
+  };
   const encoded = secret("PI_TEMPORAL_CODEC_KEY");
-  if (encoded === undefined) return {};
-  const codecKey = Buffer.from(encoded, "base64");
-  if (codecKey.length !== 32) {
-    throw new Error("PI_TEMPORAL_CODEC_KEY must be 32 bytes, base64 encoded");
+  const old = secret("PI_TEMPORAL_CODEC_OLD_KEYS");
+  // Old keys only decrypt. Without a current key nothing is encrypted, which a rotation never
+  // means, so the pair is refused.
+  if (encoded === undefined) {
+    if (old !== undefined) {
+      throw new Error("PI_TEMPORAL_CODEC_OLD_KEYS needs PI_TEMPORAL_CODEC_KEY");
+    }
+    return {};
   }
-  return { codecKey };
+  return {
+    codecKey: decoded("PI_TEMPORAL_CODEC_KEY", encoded),
+    codecOldKeys: (old ?? "")
+      .split(",")
+      .filter((each) => each.trim() !== "")
+      .map((each) => decoded("PI_TEMPORAL_CODEC_OLD_KEYS", each)),
+  };
 }
 
 export function dropFromEnv(names: readonly string[]): void {

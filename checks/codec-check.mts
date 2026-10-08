@@ -39,12 +39,29 @@ assert.equal(shown((await codec.decode([sealed]))[0]), shown(plain));
 assert.equal(shown((await codec.decode([plain]))[0]), shown(plain));
 console.log("PASS a payload round-trips, and one from before the key reads as it was");
 
+// A rotation. The new key encrypts, and the old one still opens what it sealed.
+const next = randomBytes(32);
+const rotated = new AesGcmCodec(next, [key]);
+assert.equal(shown((await rotated.decode([sealed]))[0]), shown(plain));
+const [resealed] = await rotated.encode([plain]);
+assert.equal(shown((await new AesGcmCodec(next).decode([resealed]))[0]), shown(plain));
+await assert.rejects(codec.decode([resealed]), /no codec key opens/);
+console.log("PASS after a rotation, old payloads still open and new ones use the new key");
+
+// Payloads sealed before keys were named say `default`. Every key is tried for them.
+const legacy = {
+  ...sealed,
+  metadata: { ...sealed.metadata, "encryption-key-id": Buffer.from("default") },
+};
+assert.equal(shown((await rotated.decode([legacy]))[0]), shown(plain));
+console.log("PASS a payload from before keys were named still opens");
+
 const root = await mkdtemp(join(tmpdir(), "pi-codec-"));
 const queue = `pi-codec-${randomUUID().slice(0, 8)}`;
 process.env.PI_TEMPORAL_TASK_QUEUE = queue;
 process.env.PI_SESSION_DIR = join(root, "sessions");
 const cfg = { ...fromEnv(), codecKey: key };
-const dataConverter = dataConverterFor(key);
+const dataConverter = dataConverterFor({ codecKey: key });
 const connection = await Connection.connect({ address });
 const client = new Client({ connection, namespace: "default", dataConverter });
 const native = await NativeConnection.connect({ address });

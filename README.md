@@ -145,6 +145,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_TEMPORAL_API_KEY`, `_FILE` | API key for Temporal Cloud | none |
 | `PI_TEMPORAL_TLS` | `1` connects over TLS without a client certificate | off |
 | `PI_TEMPORAL_CODEC_KEY`, `_FILE` | 32 bytes, base64, to encrypt payloads in history | none |
+| `PI_TEMPORAL_CODEC_OLD_KEYS`, `_FILE` | retired codec keys, comma-separated, that still decrypt | none |
 | `PI_TEMPORAL_SEARCH_ATTRIBUTE` | `1` keeps session state in the `PiSessionState` search attribute | off |
 | `PI_TEMPORAL_METRICS` | address for the Worker's Prometheus metrics, such as `0.0.0.0:9464` | none |
 | `PI_TEMPORAL_WORKFLOW_BUNDLE` | a bundle from `npm run bundle`, so the Worker doesn't bundle at start | none |

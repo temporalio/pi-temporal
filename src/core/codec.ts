@@ -3,8 +3,11 @@
 //
 // Clients and Workers that read each other's payloads must share the key. Reading encrypted
 // payloads in the UI or CLI also needs a codec server with this codec.
+//
+// To rotate, make the new key current and keep the old one as a decrypt-only key. History keeps
+// payloads for the namespace's retention period, so drop the old key only after that.
 
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { DataConverter, Payload, PayloadCodec } from "@temporalio/common";
 
 const ENCODING = "binary/encrypted";
@@ -15,13 +18,27 @@ const TAG_BYTES = 16;
 const bytes = (text: string) => new TextEncoder().encode(text);
 const text = (data: Uint8Array) => new TextDecoder().decode(data);
 
-/** AES-256-GCM over each whole payload. `keyId` names the key, so it can be rotated later. */
+// Names a key without showing it. A payload carries the name of the key that sealed it, so a
+// reader with several keys knows which one to use.
+const keyIdOf = (key: Buffer) => createHash("sha256").update(key).digest("hex").slice(0, 16);
+
+/**
+ * AES-256-GCM over each whole payload. `key` encrypts. `oldKeys` only decrypt, so payloads sealed
+ * before a rotation stay readable.
+ */
 export class AesGcmCodec implements PayloadCodec {
+  private readonly keyId: string;
+  private readonly keys: Map<string, Buffer>;
+
   constructor(
     private readonly key: Buffer,
-    private readonly keyId = "default",
+    oldKeys: readonly Buffer[] = [],
   ) {
-    if (key.length !== 32) throw new Error("the codec key must be 32 bytes");
+    for (const each of [key, ...oldKeys]) {
+      if (each.length !== 32) throw new Error("a codec key must be 32 bytes");
+    }
+    this.keyId = keyIdOf(key);
+    this.keys = new Map([...oldKeys, key].map((each) => [keyIdOf(each), each]));
   }
 
   async encode(payloads: Payload[]): Promise<Payload[]> {
@@ -45,24 +62,36 @@ export class AesGcmCodec implements PayloadCodec {
       if (!payload.metadata?.encoding || text(payload.metadata.encoding) !== ENCODING) {
         return payload;
       }
-      const keyId = payload.metadata["encryption-key-id"];
-      if (keyId && text(keyId) !== this.keyId) {
-        throw new Error(`payload was encrypted with key ${text(keyId)}, not ${this.keyId}`);
-      }
       const sealed = Buffer.from(payload.data ?? []);
       // Node accepts shorter tags, but this format requires a full tag.
       if (sealed.length < IV_BYTES + TAG_BYTES) throw new Error("encrypted payload is cut short");
-      const iv = sealed.subarray(0, IV_BYTES);
-      const tag = sealed.subarray(sealed.length - TAG_BYTES);
-      const decipher = createDecipheriv(CIPHER, this.key, iv, { authTagLength: TAG_BYTES });
-      decipher.setAuthTag(tag);
-      const plain = Buffer.concat([
-        decipher.update(sealed.subarray(IV_BYTES, sealed.length - TAG_BYTES)),
-        decipher.final(),
-      ]);
-      return fromJson(JSON.parse(plain.toString()));
+      const named = payload.metadata["encryption-key-id"];
+      const keyId = named ? text(named) : undefined;
+      const known = keyId === undefined ? undefined : this.keys.get(keyId);
+      if (known) return fromJson(JSON.parse(open(sealed, known).toString()));
+      // A name no key has, such as the `default` of payloads sealed before keys were named. Each
+      // key is tried, and the auth tag refuses every wrong one.
+      for (const each of this.keys.values()) {
+        try {
+          return fromJson(JSON.parse(open(sealed, each).toString()));
+        } catch {
+          // The next key.
+        }
+      }
+      throw new Error(`no codec key opens a payload sealed with key ${keyId ?? "(unnamed)"}`);
     });
   }
+}
+
+function open(sealed: Buffer, key: Buffer): Buffer {
+  const iv = sealed.subarray(0, IV_BYTES);
+  const tag = sealed.subarray(sealed.length - TAG_BYTES);
+  const decipher = createDecipheriv(CIPHER, key, iv, { authTagLength: TAG_BYTES });
+  decipher.setAuthTag(tag);
+  return Buffer.concat([
+    decipher.update(sealed.subarray(IV_BYTES, sealed.length - TAG_BYTES)),
+    decipher.final(),
+  ]);
 }
 
 type JsonPayload = { metadata: Record<string, string>; data: string };
@@ -81,6 +110,11 @@ const fromJson = (json: JsonPayload): Payload => ({
   data: Buffer.from(json.data, "base64"),
 });
 
-/** The data converter for a key, or undefined to store payloads as plain JSON. */
-export const dataConverterFor = (key: Buffer | undefined): DataConverter | undefined =>
-  key ? { payloadCodecs: [new AesGcmCodec(key)] } : undefined;
+/** The data converter for the configured keys, or undefined to store payloads as plain JSON. */
+export const dataConverterFor = (keys: {
+  readonly codecKey?: Buffer;
+  readonly codecOldKeys?: readonly Buffer[];
+}): DataConverter | undefined =>
+  keys.codecKey
+    ? { payloadCodecs: [new AesGcmCodec(keys.codecKey, keys.codecOldKeys)] }
+    : undefined;

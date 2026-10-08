@@ -34,7 +34,7 @@ import type { piSession } from "./workflow.js";
 type Session = typeof piSession;
 
 const withCodec = (cfg: Config) => {
-  const dataConverter = dataConverterFor(cfg.codecKey);
+  const dataConverter = dataConverterFor(cfg);
   return dataConverter ? { dataConverter } : {};
 };
 

@@ -81,7 +81,7 @@ async function main() {
     // A host queue matters only when each host has its own copy of the project. With one shared
     // directory, any Worker can run any unit.
     ...(cfg.shipTree ? { hostQueueFor: projectDir } : {}),
-    dataConverter: dataConverterFor(cfg.codecKey),
+    dataConverter: dataConverterFor(cfg),
     workflowBundlePath: process.env.PI_TEMPORAL_WORKFLOW_BUNDLE,
     shutdownGraceTime: cfg.shutdownGrace,
     maxConcurrentActivities: cfg.maxActivities,

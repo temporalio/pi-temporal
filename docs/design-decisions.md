@@ -242,3 +242,8 @@ encrypted.
 The codec still reads a plain payload, so history written before the key was set stays readable.
 That also means it doesn't guard against someone who can write history directly. It protects
 what the server stores, not the server's write path.
+
+Each payload names the key that sealed it, by a hash of the key. To rotate, set the new key as
+`PI_TEMPORAL_CODEC_KEY` and move the old one to `PI_TEMPORAL_CODEC_OLD_KEYS` on every client and
+Worker. New payloads use the new key, and old ones still open. History keeps payloads for the
+namespace's retention period, so drop an old key only after that. `codec-check` covers a rotation.

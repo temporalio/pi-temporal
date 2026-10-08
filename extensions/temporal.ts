@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI) {
           }),
         shutdownForceTime: EMBEDDED_STOP,
         maxConcurrentActivities: cfg.maxActivities,
-        dataConverter: dataConverterFor(cfg.codecKey),
+        dataConverter: dataConverterFor(cfg),
       });
       worker
         .run()
@@ -265,7 +265,7 @@ export default function (pi: ExtensionAPI) {
         // Only this process's live turns. The queue is already this process's own.
         activities: () => makeLocalTurnActivities(liveTurns),
         shutdownForceTime: EMBEDDED_STOP,
-        dataConverter: dataConverterFor(cfg.codecKey),
+        dataConverter: dataConverterFor(cfg),
       });
       worker
         .run()
