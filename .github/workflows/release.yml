@@ -1,0 +1,63 @@
+name: release
+# A pushed tag such as `v1.2.3` or `v1.2.3-rc.1` becomes a GitHub release. The glob below only
+# narrows which tags start a run. `scripts/release-tag.mts` holds the real rules, and a tag that
+# breaks them fails before anything is published.
+on:
+  push:
+    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+permissions:
+  contents: read
+# One run per tag, so a quick re-push can't race the first run into two releases.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # To create the release. Nothing else in this job writes.
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # The full history, to check that the tagged commit is on `main`.
+          fetch-depth: 0
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Check the tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: npx tsx scripts/release-tag.mts "$TAG" >> "$GITHUB_OUTPUT"
+      # A tag on a branch that never merged would release code no one reviewed.
+      - name: Check the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "$GITHUB_REF_NAME points at $GITHUB_SHA, which isn't on main"
+            exit 1
+          }
+      # The release ships a Workflow bundle, so it must replay what running sessions recorded.
+      - run: npx tsx checks/replay-kept-check.mts
+      - name: Build the Workflow bundle
+        run: |
+          npm run bundle
+          cd dist
+          sha256sum workflow-bundle.js > SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          # A re-run after a failed upload replaces the assets instead of failing on the release.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/workflow-bundle.js dist/SHA256SUMS --clobber
+            exit 0
+          fi
+          flags=(--verify-tag --generate-notes --title "$TAG")
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" dist/workflow-bundle.js dist/SHA256SUMS
