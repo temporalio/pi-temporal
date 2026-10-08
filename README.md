@@ -107,9 +107,9 @@ handles the session's turns. A live turn uses its own `piLocalTurn` Workflow and
 `PI_TEMPORAL_STEPPED=1` splits the model call and seal into separate Activities. Each tool call
 also gets its own Activity.
 
-```
-runModelCall  ->  runToolCall (one per call)  ->  sealStep
-```
+<p align="center">
+  <img src="docs/steps.svg" alt="By default one runStep Activity holds the model call, its tools and the seal. With PI_TEMPORAL_STEPPED=1, runModelCall, one runToolCall per call and sealStep are separate Activities. Each tool call takes a dispatch claim before it runs, and the next step starts after the seal." width="100%">
+</p>
 
 Each tool call then has its own retry and timeout. In Worker sessions, a dispatch claim is
 written beside the session file before the tool runs. A retry that finds a claim without a result
