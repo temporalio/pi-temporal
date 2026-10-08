@@ -1,10 +1,10 @@
-// Names and shapes shared by the workflow, the client, and (type-only) the activities.
-// Keep this free of Pi SDK and Node imports. The workflow bundles it into the Temporal sandbox.
+// The Workflow bundles these shared types into the Temporal sandbox. Pi SDK and Node imports
+// would make this module unsafe to load there.
 
 export const WORKFLOW_TYPE = "piSession";
 export const WORKFLOW_ID_PREFIX = "pi-session-";
 // A tool call that failed before any attempt claimed it, so the tool never started and the
-// workflow may move a host-queue step.
+// Workflow may move a host-queue step.
 export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
 /**
  * Where a run's fences start. A run that started no later than the one it continued from counts

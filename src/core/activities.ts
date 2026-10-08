@@ -2,7 +2,7 @@
 // one Activity. `runModelCall`, `runToolCall` and `sealStep` split it so each tool call is its own
 // unit of work. Each one opens the session again, so any Worker that can reach the file runs it.
 //
-// The rules that make that safe live here, not in the agent:
+// These guards keep adapter implementations independent of Temporal's retry rules.
 // - Every unit that writes the session takes a fence token first (`fence.ts`), so a superseded
 //   attempt can't write after a newer one took over.
 // - A tool call takes a dispatch claim before the tool can act (`pending.ts`). A retry that finds
@@ -41,7 +41,7 @@ const QUARANTINED = "WorktreeQuarantined";
 // exit still counts the turns before it. The Workflow's own count only spans one run.
 const SESSION_SECONDS = "pi-temporal.session-seconds";
 
-// Whether Temporal asked this activity to stop. Only as fresh as the last heartbeat.
+// Whether Temporal asked this Activity to stop. Only as fresh as the last heartbeat.
 const stopRequested = () => {
   try {
     return Context.current().cancellationSignal.aborted;
@@ -51,7 +51,7 @@ const stopRequested = () => {
 };
 
 // The Activity logger, so each line carries its Workflow and Activity ids. Plain console when a
-// check calls an activity directly, with no Activity around it.
+// check calls an Activity directly, with no Activity around it.
 const say = (level: "info" | "warn", message: string) => {
   try {
     Context.current().log[level](message);

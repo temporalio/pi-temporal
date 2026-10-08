@@ -1,9 +1,8 @@
-// What the Temporal side needs from an agent, and nothing more. Implement `Agent` for your own
-// agent and the Workflow, the step driver, the fence, and the dispatch claims work unchanged. Pi's
-// implementation is `src/pi/agent.ts`.
+// An adapter keeps the agent's session format out of the Temporal core. Pi's adapter lives in
+// `src/pi/agent.ts`.
 //
-// The agent owns the conversation, kept in a session file it reads and appends to. The Workflow
-// holds only control state, so a turn can move to any Worker that can open that file.
+// The agent owns the conversation in a session file. The Workflow holds only control state,
+// so a turn can move to any Worker that can open that file.
 
 import type { AgentState, Spend } from "./protocol.js";
 

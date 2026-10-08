@@ -1,6 +1,6 @@
-// The `pi-temporal` CLI: start, watch, stop and schedule worker-owned sessions from any machine.
-// It talks only to Temporal and the session file, never to a pi process. The workflow holds the
-// control state and the file holds the conversation, so following a session is a query plus a tail.
+// The `pi-temporal` CLI starts, watches, stops and schedules Worker-owned sessions from anywhere.
+// It follows a session without a running Pi process. The Workflow holds control state, and the
+// session file holds the conversation. Queries and file reads expose both.
 // Usage: tsx src/cli.ts <command> ... (no command prints the list).
 
 import { randomUUID } from "node:crypto";
@@ -43,10 +43,10 @@ const emit = (line: string) => process.stdout.write(line + "\n");
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
-// Queries are answered by workers, so a session whose workers are all down never answers. Bound it.
+// Queries are answered by Workers, so a session whose Workers are all down never answers. Bound it.
 const QUERY_MS = 3_000;
 
-// "Unreachable" is what a worker restart looks like. Treating it as "gone" would end a follower
+// "Unreachable" is what a Worker restart looks like. Treating it as "gone" would end a follower
 // mid-handover and report the turn as finished.
 type Reached = { kind: "state"; state: TurnState } | { kind: "gone" } | { kind: "unreachable" };
 
@@ -66,7 +66,7 @@ async function turnStateOf(
     if (err instanceof QueryRejectedError) return { kind: "gone" };
     // Retired or never started. Match on the error type, not its message text.
     if (err instanceof WorkflowNotFoundError) return { kind: "gone" };
-    // Anything else (a deadline, a worker that cannot answer) must not read as "finished".
+    // Anything else (a deadline, a Worker that cannot answer) must not read as "finished".
     return { kind: "unreachable" };
   }
 }
@@ -85,7 +85,7 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
     );
   }
   const file = sessionFileFor(cfg.sessionDir, sessionId);
-  // Only the first prompt sends it. Later, the workers' tip is ahead of this client's copy.
+  // Only the first prompt sends it. Later, the Workers' tip is ahead of this client's copy.
   if (await worktree.established(file)) {
     say("  the session already has its project");
     return;

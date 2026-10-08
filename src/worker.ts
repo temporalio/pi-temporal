@@ -1,5 +1,5 @@
-// The standalone worker process. Run one or many on the same task queue, and any of them can drive
-// any session from the shared session directory. The pi extension runs the same worker in-process.
+// Workers share the session directory so any Worker on the queue can resume a session.
+// The Pi extension runs the same Worker in its own process.
 
 import { resolve } from "node:path";
 import { Runtime } from "@temporalio/worker";
@@ -43,8 +43,8 @@ async function main() {
     }
   }
   const problems = preflight(cfg);
-  // Not in `preflight` because only the worker reads `PI_PROJECT_DIR`. The cwd fallback differs per
-  // worker, so a fleet would restore trees into unrelated directories.
+  // Not in `preflight` because only the Worker reads `PI_PROJECT_DIR`. The cwd fallback differs per
+  // Worker, so a fleet would restore trees into unrelated directories.
   if (cfg.profile === "fleet" && !process.env.PI_PROJECT_DIR) {
     problems.push(
       "the fleet profile needs an explicit PI_PROJECT_DIR: the fallback is this worker's own " +

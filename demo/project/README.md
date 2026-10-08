@@ -1,5 +1,4 @@
 # Demo project
 
-The chaos demo hands this directory to the session as its project. The task writes its program,
-its output and its answer here, on whichever worker runs each step, and the files travel with the
-session from one worker to the next.
+The chaos demo sends this directory as the session's project. Each Worker writes the task's
+program and output here. The files travel with the session so the next Worker can continue.

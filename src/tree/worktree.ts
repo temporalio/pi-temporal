@@ -1,9 +1,9 @@
-// Moves a session's project files between hosts, so a step that resumes on another worker finds
+// Moves a session's project files between hosts, so a step that resumes on another Worker finds
 // the work the last one did. Each capture writes a git bundle beside the session log, and a host
 // that is behind unbundles what it has not seen. The shadow repository is host-local and points at
 // the work tree from outside, so the project's own `.git` is never touched.
 //
-// Rule: only a host standing on the tip may add to it, and nothing on a worker may establish it.
+// Rule: only a host standing on the tip may add to it, and nothing on a Worker may establish it.
 // The client sends the project. A stale tool that writes after its host is restored is not caught
 // here, which is why the driver won't move a step off a host whose attempt started.
 //

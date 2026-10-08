@@ -1,5 +1,4 @@
-// The Activities a Pi session's Workflow runs: the core ones, with Pi as the agent and, when the
-// project travels between hosts, the tree store.
+// Binding Pi and the optional tree store here keeps the core Activities independent of Pi.
 
 import { makeCoreActivities } from "../core/activities.js";
 import { treeStore } from "../tree/store.js";

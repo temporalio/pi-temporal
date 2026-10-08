@@ -1,14 +1,13 @@
 # Putting your own agent on it
 
-Everything in `src/core/` works for any agent that implements `Agent` from
-[`src/core/agent.ts`](../src/core/agent.ts). Pi's implementation is
-[`src/pi/agent.ts`](../src/pi/agent.ts), about 230 lines. This page is what yours must do, and what
-you can delete.
+Implement `Agent` from [`src/core/agent.ts`](../src/core/agent.ts) to use the Temporal loop with
+your own agent. Pi's implementation in [`src/pi/agent.ts`](../src/pi/agent.ts) is about 230 lines.
+The sections below describe the contract and the modules you can omit.
 
 ## What your agent must provide
 
-Your agent needs a session it can open again from a file, take one step at a time, and append to
-behind a guard. Most agent loops need some change for that. Pi needed its fork.
+Your agent must reopen a session from a file and run one step at a time. Each append must pass
+through a write guard. Most agent loops need changes to support this. Pi needed its fork.
 
 | method | what it does |
 |---|---|
@@ -24,7 +23,7 @@ behind a guard. Most agent loops need some change for that. Pi needed its fork.
 | `openRecord(file, guard)` | The session's record alone, without the model, for one bookkeeping entry. |
 | `unknownOutcome(call)`, `notRunOutcome(call)` | What the model is told about a call that may have run, or never started. |
 
-Then wire it the way [`src/pi/activities.ts`](../src/pi/activities.ts) does:
+Use [`src/pi/activities.ts`](../src/pi/activities.ts) as the wiring example.
 
 ```ts
 makeCoreActivities({ agent: yourAgent(options), hostQueue });
@@ -32,22 +31,22 @@ makeCoreActivities({ agent: yourAgent(options), hostQueue });
 
 ## What must hold
 
-- **Every append goes through the guard.** The fence works only if nothing writes the session
-  without asking it first.
-- **A tool call writes nothing to the session.** It reports an outcome, and the seal writes all of
-  a step's outcomes together. Siblings run in parallel, so two writers would conflict.
-- **An outcome survives `JSON.stringify`.** It waits in a file between the tool call and the seal.
-- **The prompt is recorded once.** `hasPrompt` must find a prompt `recordPrompt` wrote, even after
-  your agent compacts the conversation. Pi marks it with the prompt id.
-- **A model call that runs again reuses the response it recorded.** Temporal retries a model call
-  whose result was lost. If the response is already in the session, return it instead of asking
-  the model again, or the retry is billed and the step gets two responses.
-- **A seal is safe to repeat.** A retried seal must find the outcomes it already wrote and not
-  write them again. It must also give the same answer about whether the turn is over.
-- **A stop is a stop.** When `signal` aborts, end the model call or tool like a user stop and
-  report what happened.
-- **Your agent's state between steps goes in `agentState`.** A session is opened again for every
-  Activity, so a retry count kept in memory would reset each step.
+- Every append must call the guard first. An unguarded write can let a superseded attempt change
+  the session.
+- Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
+  the seal must write their results together to avoid conflicting writes.
+- Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.
+- `hasPrompt` must find a prompt written by `recordPrompt`, even after compaction. Otherwise a
+  retry could record the prompt twice. Pi marks each prompt with its ID.
+- A retried model call must reuse its recorded response. Temporal can lose the Activity's
+  completion after the response reaches the session file. Calling the model again would add a
+  second response and another charge.
+- A retried seal must recognize outcomes it already wrote. It must return the same decision
+  about whether the turn is over, so a lost completion doesn't change the next step.
+- When `signal` aborts, stop the model call or tool and report its outcome. The recovery seal
+  needs that outcome to record what happened.
+- Keep state between steps in `agentState`. Each Activity opens the session again, so a retry
+  count kept only in memory would reset at each step.
 
 ## What you can delete
 
