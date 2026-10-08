@@ -2,7 +2,7 @@
 // session record, and never lowers what the record already says. Needs neither a server nor a
 // model key.
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -54,10 +54,12 @@ assert.equal(latest()?.seconds, 5);
 console.log("PASS and never lowers what the record says");
 
 // A file that can't be read is not a missing one. The Activity fails, so Temporal retries it.
-const unreadable = join(file, "inside-a-file.jsonl");
+// A link to itself, so `access` fails with ELOOP rather than ENOENT.
+const unreadable = join(dir, "loop.jsonl");
+await symlink(unreadable, unreadable);
 const failed = await retireSession({ sessionFile: unreadable, turn: "t1", sessionSeconds: 5 }).then(
   () => "",
   (err: NodeJS.ErrnoException) => err.code ?? String(err),
 );
-assert.equal(failed, "ENOTDIR");
+assert.equal(failed, "ELOOP");
 console.log("PASS a session file that can't be read fails the retirement instead of skipping it");

@@ -6,7 +6,7 @@
 // The core Activities over the echo agent, under `MockActivityEnvironment`. No server and no model
 // key. Usage: npx tsx checks/session-root-check.mts
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationFailure } from "@temporalio/common";
@@ -49,8 +49,58 @@ try {
   check("a session file in the directory is used", inside === undefined, String(inside));
   const outside = await modelCall(join(root, "elsewhere.jsonl"));
   check("one outside it is refused, and not retried", refused(outside), String(outside));
-  const climbed = await modelCall(join(sessions, "..", "climbed.jsonl"));
+  // A plain string, since `join` would take the `..` out before the Activity saw it.
+  const climbed = await modelCall(`${sessions}/../climbed.jsonl`);
   check("so is one that climbs out with ..", refused(climbed), String(climbed));
+  const away = join(root, "away");
+  await mkdir(away);
+  await symlink(away, join(sessions, "link"));
+  const linked = await modelCall(join(sessions, "link", "escaped.jsonl"));
+  check("and one under a link that leads out", refused(linked), String(linked));
+  // Another session's own directories sit beside it, where a file could pre-empt its claims.
+  await mkdir(join(sessions, "a.jsonl.fence", "x"), { recursive: true });
+  const nested = await modelCall(join(sessions, "a.jsonl.fence", "x", "n.jsonl"));
+  check("and one nested below the directory", refused(nested), String(nested));
+  const named = await modelCall(join(sessions, "a.txt"));
+  check("and one that isn't a .jsonl file", refused(named), String(named));
+
+  // The directory reached through a link, as macOS's /var is /private/var, still takes its files
+  // by either path.
+  await symlink(sessions, join(root, "alias"));
+  const viaAlias = makeCoreActivities({ agent: echoAgent(), sessionRoot: join(root, "alias") });
+  const aliased = await new MockActivityEnvironment()
+    .run(viaAlias.runModelCall, {
+      sessionId: "s",
+      sessionFile: join(sessions, "c.jsonl"),
+      promptId: "p",
+      text: "hello",
+      step: 1,
+    })
+    .then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+  check("a directory reached through a link takes its real path", !aliased, String(aliased));
+
+  // The Worker makes the directory itself, so a fresh one doesn't refuse every session.
+  makeCoreActivities({ agent: echoAgent(), sessionRoot: join(root, "fresh", "sessions") });
+  const made = await stat(join(root, "fresh", "sessions")).then(
+    (s) => s.isDirectory(),
+    () => false,
+  );
+  check("a missing directory is made at setup", made);
+
+  // Without a store, adopting writes nothing, so the root can be `/` here.
+  const top = makeCoreActivities({ agent: echoAgent(), sessionRoot: "/" });
+  const adopt = (sessionFile: string) =>
+    new MockActivityEnvironment().run(top.adoptProject, { sessionFile, template: "/t.jsonl" }).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+  const atTop = await adopt("/s.jsonl");
+  check("a root of / takes its own files", atTop === undefined, String(atTop));
+  const belowTop = await adopt(join(sessions, "s.jsonl"));
+  check("and only those", refused(belowTop), String(belowTop));
   const template = await new MockActivityEnvironment()
     .run(activities.adoptProject, {
       sessionFile: join(sessions, "b.jsonl"),

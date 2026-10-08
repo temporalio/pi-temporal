@@ -9,8 +9,9 @@
 //   the claim reports an unknown outcome rather than run the tool twice.
 // - A tool call keeps its result beside the session, and only the seal writes results in.
 
+import { mkdirSync, realpathSync } from "node:fs";
 import { access } from "node:fs/promises";
-import { resolve as resolvePath, sep } from "node:path";
+import { basename, dirname } from "node:path";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import type {
   Agent,
@@ -115,7 +116,7 @@ export interface CoreActivityOptions {
   readonly store?: ProjectStore;
   // This Worker's host queue. The model call reports it, so the rest of the step runs here.
   readonly hostQueue?: string;
-  // Every session file must be under this directory. Anyone who can start a Workflow in the
+  // Every session file must be directly in this directory. Anyone who can start a Workflow in the
   // namespace picks its input, so a path from it is untrusted, and the Worker writes beside it.
   readonly sessionRoot: string;
 }
@@ -123,9 +124,23 @@ export interface CoreActivityOptions {
 export function makeCoreActivities(options: CoreActivityOptions) {
   const activities = makeUncheckedActivities(options);
   const { sessionRoot } = options;
-  const root = resolvePath(sessionRoot) + sep;
+  // Made here, once, so a fresh Worker takes its first session. Never a directory from input.
+  mkdirSync(sessionRoot, { recursive: true });
+  const root = realpathSync(sessionRoot);
+  // A direct child of the root, compared by real path. A link under the root can't lead out, a
+  // root reached through a link still takes its files, and a file can't hide in another
+  // session's claim or fence directory. The parent is resolved the way the file system will
+  // resolve it, so a `..` after a link goes where the link goes.
+  const direct = (path: string) => {
+    if (!/^[^/\\]+\.jsonl$/.test(basename(path))) return false;
+    try {
+      return realpathSync(dirname(path)) === root;
+    } catch {
+      return false;
+    }
+  };
   const inRoot = (path: string | undefined, what: string) => {
-    if (path === undefined || resolvePath(path).startsWith(root)) return;
+    if (path === undefined || direct(path)) return;
     // The same input fails the same way on every attempt, so a retry would only repeat this.
     throw ApplicationFailure.nonRetryable(
       `${what} ${path} is outside the session directory ${sessionRoot}`,

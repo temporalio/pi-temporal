@@ -260,9 +260,13 @@ the sink drops their spans. `tracing-check` shows one trace from the client to t
 
 Anyone who can start a Workflow in the namespace picks its input, and the client in this repo is
 only one way to do it. The session file in that input names where a Worker writes the session,
-its dispatch claims and its fence tokens. So the core Activities take a `sessionRoot` and refuse,
-without a retry, any session file or template outside it. Pi's Workers pass their session
-directory. `session-root-check` shows the refusal.
+its dispatch claims and its fence tokens. So the core Activities require a `sessionRoot` and
+refuse, without a retry, any session file or template that isn't a `*.jsonl` file directly in it.
+The parent is compared by real path, so a link under the root can't lead out, and a root reached
+through a link (macOS's `/var`, an NFS mount) still takes its files. A file nested deeper could sit
+in another session's claim or fence directory, so it's refused too. The Worker makes the root at
+setup if it's missing. Pi's Workers pass their session directory. `session-root-check` shows the
+refusal.
 
 ## Payloads can be encrypted
 
