@@ -9,9 +9,9 @@
 //   the claim reports an unknown outcome rather than run the tool twice.
 // - A tool call keeps its result beside the session, and only the seal writes results in.
 
-import { mkdirSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { access } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import type {
   Agent,
@@ -121,6 +121,9 @@ export interface CoreActivityOptions {
   readonly sessionRoot: string;
 }
 
+// The session file, then the claim, fence and tree directories the core keeps beside it.
+const SIBLINGS = ["", ".pending", ".fence", ".tree"];
+
 export function makeCoreActivities(options: CoreActivityOptions) {
   const activities = makeUncheckedActivities(options);
   const { sessionRoot } = options;
@@ -134,7 +137,16 @@ export function makeCoreActivities(options: CoreActivityOptions) {
   const direct = (path: string) => {
     if (!/^[^/\\]+\.jsonl$/.test(basename(path))) return false;
     try {
-      return realpathSync(dirname(path)) === root;
+      if (realpathSync(dirname(path)) !== root) return false;
+      // The session and what the core keeps beside it must be real files in the root. A link
+      // there would send its writes elsewhere. Input can't make one, but anything that writes the
+      // root can, as a tool on any host of a shared session directory. The check runs before the
+      // Activity does, so a link made after it still gets through. Only the agent's own open could
+      // close that gap, and making one needs that write access already.
+      const at = join(root, basename(path));
+      return SIBLINGS.every(
+        (suffix) => !lstatSync(at + suffix, { throwIfNoEntry: false })?.isSymbolicLink(),
+      );
     } catch {
       return false;
     }

@@ -63,6 +63,18 @@ try {
   check("and one nested below the directory", refused(nested), String(nested));
   const named = await modelCall(join(sessions, "a.txt"));
   check("and one that isn't a .jsonl file", refused(named), String(named));
+  // Links in the root itself. Input can't make them, but anything that writes the root can.
+  await symlink(join(away, "escaped.jsonl"), join(sessions, "s.jsonl"));
+  const fileLink = await modelCall(join(sessions, "s.jsonl"));
+  check("and a session file that is a link", refused(fileLink), String(fileLink));
+  await symlink(away, join(sessions, "t.jsonl.fence"));
+  const fenceLink = await modelCall(join(sessions, "t.jsonl"));
+  check("and one whose fence directory is a link", refused(fenceLink), String(fenceLink));
+  const leaked = await stat(join(away, "escaped.jsonl")).then(
+    () => true,
+    () => false,
+  );
+  check("and nothing was written where a link led", !leaked);
 
   // The directory reached through a link, as macOS's /var is /private/var, still takes its files
   // by either path.
