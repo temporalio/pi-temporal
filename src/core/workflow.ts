@@ -213,7 +213,8 @@ const SESSION_STATE = defineSearchAttributeKey(
   SearchAttributeType.KEYWORD,
 );
 
-// How many prompt ids a session remembers to refuse a resend. Far more than any client retries.
+// How many finished prompt ids a session remembers to refuse a resend. Far more than any client
+// retries. Queued and running prompts are refused too, however many there are.
 const SEEN_PROMPTS = 200;
 export const interrupt = defineSignal<[InterruptInput?]>(SIGNALS.interrupt);
 export const turnState = defineQuery<TurnState>(QUERIES.turnState);
@@ -335,6 +336,12 @@ export async function piSession(input: SessionInput): Promise<void> {
         : p.text.length > MAX_PROMPT_CHARS
           ? `a prompt can't be longer than ${MAX_PROMPT_CHARS} characters`
           : undefined;
+  // The cap on `seen` can drop an id that's still queued when the backlog is long. The queue and
+  // the running turn are checked too, so a resend of work not yet done never runs twice.
+  const known = (promptId: string) =>
+    seen.includes(promptId) ||
+    running?.promptId === promptId ||
+    queue.some((p) => p.promptId === promptId);
   const enqueue = (p: PromptInput) => {
     seen.push(p.promptId);
     if (seen.length > SEEN_PROMPTS) seen.splice(0, seen.length - SEEN_PROMPTS);
@@ -347,7 +354,7 @@ export async function piSession(input: SessionInput): Promise<void> {
 
   // A Signal can't answer, so a refused prompt is only logged. `submit` reports it instead.
   setHandler(submitPrompt, (p) => {
-    const problem = problemWith(p) ?? (seen.includes(p.promptId) ? "already seen" : undefined);
+    const problem = problemWith(p) ?? (known(p.promptId) ? "already seen" : undefined);
     if (problem === undefined) enqueue(p);
     else log.warn("dropped a prompt sent as a signal", { promptId: p?.promptId, problem });
   });
@@ -361,7 +368,7 @@ export async function piSession(input: SessionInput): Promise<void> {
       validator: (p) => {
         const problem = problemWith(p);
         if (problem) throw ApplicationFailure.nonRetryable(problem, "BadPrompt");
-        if (seen.includes(p.promptId)) {
+        if (known(p.promptId)) {
           throw ApplicationFailure.nonRetryable(
             `prompt ${p.promptId} is already in this session`,
             DUPLICATE_PROMPT,
