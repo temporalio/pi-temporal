@@ -16,7 +16,7 @@ const HEARTBEAT_THROTTLE = "3 seconds";
 
 export interface SessionWorkerOptions {
   readonly address: string;
-  // API key or mTLS settings, built by `connectionOptions` so client and worker always agree.
+  // API key or mTLS settings, built by `connectionOptions` so client and Worker always agree.
   readonly connect?: Parameters<typeof NativeConnection.connect>[0];
   readonly namespace: string;
   readonly taskQueue: string;
@@ -30,14 +30,14 @@ export interface SessionWorkerOptions {
   readonly workflowBundlePath?: string;
   // The same codec as the clients, or they can't read each other's payloads.
   readonly dataConverter?: WorkerOptions["dataConverter"];
-  // How long `stop()` waits for in-flight activities before it gives up on them. Unset, it waits
-  // for them all. An embedded worker sets it, so quitting pi can't hang on a long tool.
+  // How long `stop()` waits for in-flight Activities before it gives up on them. Unset, it waits
+  // for them all. An embedded Worker sets it, so quitting pi can't hang on a long tool.
   readonly shutdownForceTime?: WorkerOptions["shutdownForceTime"];
 }
 
 export interface SessionWorker {
   readonly worker: Worker;
-  // Runs the worker and resolves when it has drained. Call stop() to end it.
+  // Runs the Worker and resolves when it has drained. Call stop() to end it.
   readonly run: () => Promise<void>;
   readonly stop: () => Promise<void>;
 }
@@ -108,7 +108,7 @@ export async function createSessionWorker(
       running ??= shared.run();
       return Promise.all([running, runningHost]).then(() => undefined);
     },
-    // Once only. A worker that died is stopped by its owner, which may also stop it on exit.
+    // Once only. A Worker that died is stopped by its owner, which may also stop it on exit.
     stop: () => (stopping ??= stopOnce()),
   };
 
@@ -122,10 +122,10 @@ export async function createSessionWorker(
         failure ??= err;
       }
     };
-    // `shutdown()` throws unless the worker is running, e.g. when it already died.
+    // `shutdown()` throws unless the Worker is running, e.g. when it already died.
     await attempt(() => shared.getState() === "RUNNING" && shared.shutdown());
     await attempt(() => hostWorker?.getState() === "RUNNING" && hostWorker.shutdown());
-    // A worker shut down mid-poll, or forced past `shutdownForceTime`, rejects. That's the
+    // A Worker shut down mid-poll, or forced past `shutdownForceTime`, rejects. That's the
     // shutdown, not a failure.
     await running?.catch(() => {});
     await runningHost?.catch(() => {});

@@ -1,5 +1,4 @@
-// Pi as an `Agent`. Everything Pi-specific the Activities need is here: how a session opens, how a
-// prompt is marked, how the transcript is read, and what Pi's retry state is between steps.
+// Pi's session format and retry state stay in this adapter so the core can serve other agents.
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";

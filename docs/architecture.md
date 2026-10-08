@@ -1,9 +1,11 @@
 # How it fits together
 
-This repo runs an AI coding agent's turn loop on Temporal. Pi is the agent here, but everything in
-`src/core/` works for any agent that implements one small interface. This page is the map. For why
-each piece is built the way it is, read [design-decisions.md](design-decisions.md). To put your own
-agent on it, read [adapting.md](adapting.md).
+The agent's session file survives a Worker crash. Temporal tracks the turn's progress and
+dispatches work to another Worker. Pi is the agent here. The code in `src/core/` uses the `Agent`
+interface, so you can use it with another agent.
+
+[design-decisions.md](design-decisions.md) explains the choices behind this split.
+[adapting.md](adapting.md) describes the interface your agent must implement.
 
 ## The split
 
@@ -30,12 +32,14 @@ flowchart LR
   act -. "optional: project files" .-> tree
 ```
 
-The conversation stays out of Workflow history, but not all of it. A prompt's text and a turn's
-final answer go into history, in Update, Signal, and Activity payloads, and so does error text.
-Tool arguments, tool output, and the model's other responses stay in the session file. Prompts are
-capped at 64K characters, and the answer kept in history at 16K, so large tool outputs and long
-sessions don't run into Temporal's payload and history limits. What does go
-into history can hold code or secrets, so set `PI_TEMPORAL_CODEC_KEY` to store it encrypted.
+Prompt text and final answers enter Workflow history as payloads. Error text enters history too.
+Tool arguments and output stay in the session file, along with the model's other responses.
+
+Prompts are capped at 64K characters. The answer kept in history is capped at 16K characters,
+while the session file keeps the full answer. These bounds keep large tool output out of Activity
+payloads. A long turn can still hit history limits, as described in
+[guarantees.md](guarantees.md). Payloads can hold code or secrets. Set `PI_TEMPORAL_CODEC_KEY` to
+store them encrypted.
 
 ## Reading order
 
@@ -65,16 +69,18 @@ into history can hold code or secrets, so set `PI_TEMPORAL_CODEC_KEY` to store i
 
 ## Two Workflows
 
-`piSession` is the one to copy. A Worker on any host drives it, and it outlives the client.
+`piSession` is the template for a Worker session. It outlives the client, and Workers with access
+to the session file can drive it.
 
-`piLocalTurn` wraps one live turn of an open `pi` session. The turn runs in that process's memory,
-on a Task Queue only that process polls. Temporal gives it a record, retries, and a stop, but it
-can't move the turn to another process. It's Pi UX, kept in `src/pi/`.
+`piLocalTurn` wraps one live turn of an open `pi` session. The turn runs in memory on a Task Queue
+that only its process polls. Temporal records the turn and can retry or cancel its Activities.
+The turn can't move to another process. This part supports Pi's terminal interface and lives in
+`src/pi/`.
 
 ## Optional modules
 
-The default path is one Worker, `piSession`, and whole steps (`runStep`). Each of these is
-switched on separately and can be deleted if you don't need it.
+The default setup uses one Worker. Its `piSession` Workflow runs whole steps through `runStep`.
+You can omit the optional modules below when your agent doesn't need them.
 
 | module | switch | needed when |
 |---|---|---|

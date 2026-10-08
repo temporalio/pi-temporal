@@ -1,9 +1,8 @@
-// The per-session durable executor. One workflow per Pi session. It owns the small control state
-// (prompt queue, current step). The conversation lives in Pi's session JSONL. A step is one
-// activity, or in stepped mode a model call, one activity per tool call, and a seal. A worker
-// crash re-drives only the unit it was running.
+// The conversation stays in the agent's session file, so Workflow history holds control state
+// plus capped prompts and answers. Activities divide the turn into units that can retry after a
+// Worker crash.
 //
-// Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
+// The sandbox loads this file, so it must not import the Pi SDK or Node modules.
 
 import { defineSearchAttributeKey, SearchAttributeType } from "@temporalio/common";
 import {
@@ -62,7 +61,7 @@ const activityOptions = {
   // A step is one model call plus its tools. The heartbeat is the real liveness bound.
   startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
-  // For a lost worker or a storage error. Pi retries the provider itself, inside the step, and
+  // For a lost Worker or a storage error. Pi retries the provider itself, inside the step, and
   // counts those retries in the transcript, so this layer doesn't need many.
   retry: { maximumAttempts: 10, initialInterval: "1 second", maximumInterval: "1 minute" },
 } as const;

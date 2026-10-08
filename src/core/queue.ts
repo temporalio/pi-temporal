@@ -1,7 +1,7 @@
-// The queue one worker polls on its own, next to the shared one. A step's tool calls and seal go
-// back to the worker that made the model call, so they share its project directory on disk.
+// The queue one Worker polls on its own, next to the shared one. A step's tool calls and seal go
+// back to the Worker that made the model call, so they share its project directory on disk.
 // Keyed by host and directory, since two containers can both serve `/project` with different files.
-// Not for workflow code (uses `node:crypto`, `node:os`). Workflows get the name from an activity.
+// Not for Workflow code (uses `node:crypto`, `node:os`). Workflows get the name from an Activity.
 
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
