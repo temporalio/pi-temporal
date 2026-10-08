@@ -1,0 +1,558 @@
+// The Activities of a turn, for any agent that implements `Agent`. `runStep` runs a whole step in
+// one Activity. `runModelCall`, `runToolCall` and `sealStep` split it so each tool call is its own
+// unit of work. Each one opens the session again, so any Worker that can reach the file runs it.
+//
+// The rules that make that safe live here, not in the agent:
+// - Every unit that writes the session takes a fence token first (`fence.ts`), so a superseded
+//   attempt can't write after a newer one took over.
+// - A tool call takes a dispatch claim before the tool can act (`pending.ts`). A retry that finds
+//   the claim reports an unknown outcome rather than run the tool twice.
+// - A tool call keeps its result beside the session, and only the seal writes results in.
+
+import { access } from "node:fs/promises";
+import { ApplicationFailure, Context } from "@temporalio/activity";
+import type {
+  Agent,
+  AgentSession,
+  ProjectStore,
+  ToolCallRef,
+  ToolOutcome,
+  Writer,
+} from "./agent.js";
+import type {
+  ModelCallResult,
+  RetireInput,
+  RunStepInput,
+  RunStepResult,
+  SealStepInput,
+  Spend,
+  ToolCallInput,
+  ToolCallResult,
+} from "./protocol.js";
+import { FAILED_AFTER_CLAIM, FAILED_BEFORE_CLAIM, fencePrefix } from "./protocol.js";
+import * as pending from "./pending.js";
+import { takeFence, fenceToken } from "./fence.js";
+
+// Retry delay after a host refuses the project directory. Short, so the work finds a free host.
+const REFUSAL_RETRY = "2 seconds";
+const QUARANTINED = "WorktreeQuarantined";
+
+// The session's turn time lives in its record, like its token count, so a run woken after an idle
+// exit still counts the turns before it. The Workflow's own count only spans one run.
+const SESSION_SECONDS = "pi-temporal.session-seconds";
+
+// Whether Temporal asked this activity to stop. Only as fresh as the last heartbeat.
+const stopRequested = () => {
+  try {
+    return Context.current().cancellationSignal.aborted;
+  } catch {
+    return false;
+  }
+};
+
+// The Activity logger, so each line carries its Workflow and Activity ids. Plain console when a
+// check calls an activity directly, with no Activity around it.
+const say = (level: "info" | "warn", message: string) => {
+  try {
+    Context.current().log[level](message);
+  } catch {
+    console[level](message);
+  }
+};
+
+// Passed to a running tool or model call, so a cancelled Activity stops it like a user stop. It
+// reports what it did, and the seal records that instead of an unknown outcome. Cancellation
+// arrives with a heartbeat, so it takes up to one heartbeat to get there.
+const cancellation = (): AbortSignal | undefined => {
+  try {
+    return Context.current().cancellationSignal;
+  } catch {
+    return undefined;
+  }
+};
+
+const heartbeatEvery = (ms: number) => {
+  const timer = setInterval(() => {
+    try {
+      Context.current().heartbeat();
+    } catch {
+      // No Activity around it, as in a check.
+    }
+  }, ms);
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
+
+export interface CoreActivityOptions {
+  readonly agent: Agent;
+  // Ships the project between hosts. Without one, every Worker must see the same directory.
+  readonly store?: ProjectStore;
+  // This Worker's host queue. The model call reports it, so the rest of the step runs here.
+  readonly hostQueue?: string;
+}
+
+export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOptions) {
+  // Restore the project before work runs here. A step must not run against the wrong files, so
+  // errors go up and send the work to a host that can do it.
+  const bringTree = async (sessionFile: string, writer?: Writer) => {
+    await store?.ensure(sessionFile, writer).catch((err: unknown) => {
+      // This host saying no, not a failing unit. A fixed delay, so the backoff doesn't grow while
+      // a free host sits idle.
+      if (store.isQuarantine(err)) {
+        throw ApplicationFailure.create({
+          message: err instanceof Error ? err.message : String(err),
+          type: QUARANTINED,
+          nextRetryDelay: REFUSAL_RETRY,
+        });
+      }
+      throw err;
+    });
+  };
+
+  // The files are set aside either way, since they're the only record of what the tool did. A
+  // refusal by design (behind the tip, step closed) doesn't fail the Activity. Anything else does
+  // when `retryable`, because the seal is the last capture before another Worker reads the tip.
+  const shipTree = async (
+    sessionFile: string,
+    of: { readonly current?: Writer; readonly fence?: { turn: string; step: number } } = {},
+    retryable = false,
+  ) => {
+    if (!store) return;
+    await store.capture(sessionFile, of).catch(async (err: unknown) => {
+      say("warn", `could not ship the project tree: ${String(err)}`);
+      await store.setAside(sessionFile).catch((keepErr: unknown) => {
+        say("warn", `and could not set it aside either: ${String(keepErr)}`);
+      });
+      if (retryable && !store.isRefusal(err)) throw err;
+    });
+  };
+
+  // Runs `body` as the session file's writer, with the guard the agent asks before each append.
+  // The model's response lands at the end of a stream that can run for minutes, so the guard, not
+  // a check up front, is what keeps a superseded attempt out.
+  //
+  // An Activity with no fence was scheduled by an older Workflow. It sorts below every fenced one,
+  // so it can't block the run that follows. A check calling an Activity directly, with no Activity
+  // around it, gets one from this host's clock.
+  const withFence = async <T>(
+    sessionFile: string,
+    prefix: string | undefined,
+    body: (guard: () => void) => Promise<T>,
+  ) => {
+    let attempt: number | undefined;
+    try {
+      attempt = Context.current().info.attempt;
+    } catch {
+      // No Activity around it.
+    }
+    const fallback = attempt === undefined ? fencePrefix(Date.now(), 0) : fencePrefix(0, 0);
+    return await body(await takeFence(sessionFile, fenceToken(prefix ?? fallback, attempt ?? 1)));
+  };
+
+  // The session's time before `turn`, from the latest total another turn wrote. This turn's own
+  // entries are skipped, so a step that runs again can't count the turn twice.
+  const secondsBefore = (session: AgentSession, turn: string) => {
+    const latest = session.latestEntry(
+      SESSION_SECONDS,
+      (data) => (data as { turn?: unknown } | undefined)?.turn === turn,
+    ) as { seconds?: unknown } | undefined;
+    return typeof latest?.seconds === "number" ? { sessionSeconds: latest.seconds } : {};
+  };
+  // Every step writes the total so far, so a turn that's stopped, runs out of budget, or fails
+  // still counts up to its last step. Fenced, like any other append.
+  const recordSeconds = (session: AgentSession, turn: string, seconds: number | undefined) => {
+    if (seconds !== undefined) session.appendEntry(SESSION_SECONDS, { turn, seconds });
+  };
+
+  // What one unit spent, from the session's own totals before and after.
+  const spentSince = (before: Spend | undefined, session: AgentSession): Spend | undefined => {
+    const after = session.spend();
+    if (!before || !after) return undefined;
+    return { tokens: after.tokens - before.tokens, cost: (after.cost ?? 0) - (before.cost ?? 0) };
+  };
+  const totals = (before: Spend | undefined, session: AgentSession) => {
+    const spent = spentSince(before, session);
+    const total = session.spend();
+    return { ...(spent ? { spent } : {}), ...(total ? { total } : {}) };
+  };
+
+  /** Whether the session has work, after settling what a stopped turn left behind. */
+  const settleWhatStopped = (session: AgentSession): boolean => {
+    const settled = session.prepareStep();
+    // A freshly opened session that's busy means something else is driving it.
+    if (settled === "busy") throw new Error("the session is already running a unit of work");
+    return settled;
+  };
+
+  const noDispatchStarted = async (input: RunStepInput, callIds: readonly string[]) => {
+    if (callIds.length === 0) return false;
+    for (const callId of callIds) {
+      if (await pending.dispatchClaimed(input.sessionFile, input.promptId, input.step, callId)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  /** Record the prompt, or settle what an earlier attempt left. Returns the answer when nothing is
+   * left to run. Only stepped mode has dispatch claims to tell interrupted calls from unstarted. */
+  async function readyForStep(
+    session: AgentSession,
+    input: RunStepInput,
+    stepped: boolean,
+  ): Promise<RunStepResult | undefined> {
+    // Drop earlier steps' results. This step's stay so a retried seal still reads them.
+    if (stepped) await pending.sweep(input.sessionFile, input.promptId, input.step);
+
+    // Past the first step the prompt is in, whatever a lookup says. Recording it again would put
+    // a second prompt in the middle of the turn.
+    if (input.step <= 1 && !session.hasPrompt(input.promptId)) {
+      // New turn. Drop every earlier turn's results, which a per-step sweep may not reach.
+      if (stepped) await pending.sweepResults(input.sessionFile);
+      // Settle a stopped turn's open calls first. Providers reject unanswered calls, so a prompt
+      // recorded after one breaks every later turn.
+      settleWhatStopped(session);
+      // Record without running, so the first step is a normal step that Temporal can retry.
+      if (!(await session.recordPrompt(input.promptId, input.text))) {
+        throw ApplicationFailure.nonRetryable("the agent did not record the prompt");
+      }
+      return undefined;
+    }
+
+    // A retry. Recorded calls that no dispatch started are handed back by the model call, not
+    // settled as unknown. Only when their response is still the latest entry.
+    if (stepped && session.endsWithResponse()) {
+      if (await noDispatchStarted(input, session.unanswered())) return undefined;
+    }
+
+    // Already answered. A retry that landed after the last step finished.
+    if (!settleWhatStopped(session)) return { done: true, finalText: session.lastAnswer() };
+    return undefined;
+  }
+
+  /** A model call, stopped like a user stop when the Activity is cancelled. The agent records an
+   * aborted response, and the turn ends as stopped instead of waiting out a slow provider. */
+  const modelCall = (session: AgentSession) => session.modelCall(cancellation());
+
+  async function runStep(input: RunStepInput): Promise<RunStepResult> {
+    // The step's own time goes into the session's, since the step that ends a turn records it.
+    const stepStartedAt = Date.now();
+    // Shipping the project needs stepped mode's claims and fences. A retry can't fix that.
+    if (store) {
+      throw ApplicationFailure.nonRetryable(
+        "a whole-step session reached a Worker that ships the project, which needs stepped mode",
+        "ConfigConflict",
+      );
+    }
+    const stop = heartbeatEvery(3000);
+    try {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
+        const session = await agent.open(input.sessionFile, guard);
+        try {
+          guard();
+          const settled = await readyForStep(session, input, false);
+          if (settled) return settled;
+
+          // The stepped mode's three units in one Activity. A stop is honoured between units.
+          if (stopRequested()) throw Context.current().cancellationSignal.reason;
+          const before = session.spend();
+          const model = await modelCall(session);
+          const calls = model.ended ? [] : model.toolCalls;
+          const results = new Map<string, ToolOutcome>();
+          let stopped = false;
+          const notStarted = new Set<string>();
+          for (const call of calls) {
+            if (stopped || stopRequested()) {
+              stopped = true;
+              notStarted.add(call.id);
+              continue;
+            }
+            // One at a time. The session admits a single unit of work.
+            const outcome = await session.runToolCall(call.id, cancellation());
+            if (outcome !== undefined) results.set(call.id, outcome);
+          }
+          stopped ||= stopRequested();
+          const sealed = await session.sealStep(
+            // Calls with no outcome are already in the session. Calls the stop kept from starting
+            // get an outcome saying so, so the step still closes.
+            calls.flatMap((call) =>
+              notStarted.has(call.id)
+                ? [agent.notRunOutcome(call)]
+                : results.has(call.id)
+                  ? [results.get(call.id)]
+                  : [],
+            ),
+            {
+              expectCalls: calls.map((call) => call.id),
+              agentState: input.agentState,
+              // A stopped turn records results only. No retry, no compaction.
+              postRun: !stopped,
+            },
+          );
+          await session.waitForIdle();
+          const seconds = secondsBefore(session, input.promptId);
+          if (input.sessionSeconds !== undefined) {
+            const total = input.sessionSeconds + (Date.now() - stepStartedAt) / 1000;
+            recordSeconds(session, input.promptId, total);
+          }
+          if (stopped) throw Context.current().cancellationSignal.reason;
+          return {
+            done: sealed.done,
+            ...(sealed.agentState ? { agentState: sealed.agentState } : {}),
+            finalText: sealed.done ? session.lastAnswer() : "",
+            ...totals(before, session),
+            ...seconds,
+          };
+        } finally {
+          session.dispose();
+        }
+      });
+    } finally {
+      stop();
+    }
+  }
+
+  // With a project store and no host queue, parallel tools on different hosts would overwrite each
+  // other's captures, so they run in order. A host queue keeps them on one directory.
+  const mustSerialize = (sequential: boolean) =>
+    sequential || (store !== undefined && hostQueue === undefined);
+
+  /** The model call of one step. The calls it reports are recorded and left for the Workflow to
+   * dispatch, one Activity each. */
+  async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
+    const stop = heartbeatEvery(3000);
+    try {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
+        await bringTree(input.sessionFile);
+        const session = await agent.open(input.sessionFile, guard);
+        try {
+          // Before the first write (recording the prompt).
+          guard();
+          const settled = await readyForStep(session, input, true);
+          if (settled) return { settled, calls: [], sequential: false, ended: true };
+
+          const before = session.spend();
+          const outcome = await modelCall(session);
+          return {
+            calls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
+            sequential: mustSerialize(outcome.sequential),
+            ended: outcome.ended,
+            ...(hostQueue === undefined ? {} : { queue: hostQueue }),
+            ...totals(before, session),
+            ...secondsBefore(session, input.promptId),
+          };
+        } finally {
+          session.dispose();
+        }
+      });
+    } finally {
+      stop();
+    }
+  }
+
+  // Typed only when no attempt left a dispatch claim. An earlier attempt may still run the tool.
+  const beforeClaim = async (err: unknown, input: ToolCallInput): Promise<unknown> => {
+    // A refusal comes from `bringTree`, which always runs before the claim. Typed like any other
+    // failure before the claim, so a host-queue step moves to a free host.
+    const refused = err instanceof ApplicationFailure && err.type === QUARANTINED;
+    if (err instanceof ApplicationFailure && !refused) return err;
+    const { sessionFile, turn, step, call } = input;
+    const claimed = await pending
+      .dispatchClaimed(sessionFile, turn, step, call.id)
+      .catch(() => true);
+    if (claimed) return err;
+    return ApplicationFailure.create({
+      message: err instanceof Error ? err.message : String(err),
+      type: FAILED_BEFORE_CLAIM,
+      cause: err instanceof Error ? err : undefined,
+      ...(refused ? { details: [QUARANTINED], nextRetryDelay: REFUSAL_RETRY } : {}),
+    });
+  };
+
+  /** One recorded call of the current step. Its result is kept beside the session file until the
+   * seal records it, so a tool that ran is not asked to run again. */
+  async function runToolCall(input: ToolCallInput): Promise<ToolCallResult> {
+    const stop = heartbeatEvery(3000);
+    let claimed = false;
+    try {
+      // This host may not have run the model call, so restore the project first.
+      const writer: Writer = { turn: input.turn, step: input.step, callId: input.call.id };
+      await bringTree(input.sessionFile, writer);
+      // A tool call never writes the session, so siblings need no order between them. What opening
+      // could add, the model call already wrote. The seal records what the step produced.
+      const session = await agent.open(input.sessionFile, () => {
+        throw new Error(
+          "a tool activity must not write to the session: the seal records what the step produced",
+        );
+      });
+      try {
+        const { turn, step, call } = input;
+        // Already sealed. Clean up the leftover kept result.
+        if (session.answered(call.id)) {
+          await pending.forgetResults(input.sessionFile, turn, step, [call.id]);
+          return { outcome: "already-settled" };
+        }
+        if ((await pending.readResult(input.sessionFile, turn, step, call.id)) !== undefined) {
+          return { outcome: "already-settled" };
+        }
+        // Retryable on purpose. Shared storage may not show the recorded call on this host yet.
+        if (!session.asked(call.id)) {
+          throw new Error(`no recorded tool call ${call.id} in ${input.sessionId}`);
+        }
+
+        // A stopped turn's seal may be about to take this claim. Don't race it.
+        if (stopRequested()) throw Context.current().cancellationSignal.reason;
+        if (!(await pending.claimDispatch(input.sessionFile, turn, step, call.id))) {
+          // An earlier dispatch started this tool, so it may have taken effect. Report unknown
+          // rather than run a push or a delete again. The first attempt may still return, and
+          // the seal supplies unknown if no result arrives.
+          return { outcome: "unknown" };
+        }
+        claimed = true;
+
+        // A marker that a tool is running here. A later turn checks it before reusing this
+        // directory, since a timed-out attempt may still be running.
+        await store?.beginWrite(writer);
+        const outcome = await session.runToolCall(call.id, cancellation()).finally(async () => {
+          await store?.endWrite(writer);
+        });
+        if (outcome === undefined) return { outcome: "already-settled" };
+
+        await pending.keepResult(input.sessionFile, turn, step, call.id, outcome);
+        // Ship from here. Only this host has the tool's changes, and the seal may land elsewhere.
+        // The result is kept, so a failure here must not fail the call. The next step's restore or
+        // a later capture can carry the files.
+        await shipTree(input.sessionFile, { current: writer, fence: { turn, step } }).catch(
+          (err: unknown) => say("warn", `could not ship the project after ${call.id}: ${err}`),
+        );
+        return { outcome: "settled" };
+      } finally {
+        session.dispose();
+      }
+    } catch (err) {
+      // A stop stays a stop. Typed as a failure, it would hide the cancellation.
+      if (stopRequested()) throw err;
+      if (!claimed) throw await beforeClaim(err, input);
+      throw ApplicationFailure.nonRetryable(
+        `tool call ${input.call.id} failed after it started: ${String(err)}`,
+        FAILED_AFTER_CLAIM,
+      );
+    } finally {
+      stop();
+    }
+  }
+
+  /** Close the step with what its calls produced, in the order the model asked for them. */
+  async function sealStep(input: SealStepInput): Promise<RunStepResult> {
+    const stop = heartbeatEvery(3000);
+    try {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
+        // Close the step first. The lost host, or a stopped tool still running there, may publish
+        // from a stale tip later, and this lets that capture be refused.
+        if (input.interrupted) await store?.closeStep(input.sessionFile, input);
+        // A cancelled tool may still be writing on another host.
+        if (!input.interrupted) await bringTree(input.sessionFile);
+        const session = await agent.open(input.sessionFile, guard);
+        try {
+          const outcomes: ToolOutcome[] = [];
+          for (const call of input.calls) {
+            const { turn, step } = input;
+            const kept = await pending.readResult(input.sessionFile, turn, step, call.id);
+            if (kept !== undefined) {
+              outcomes.push(kept);
+              continue;
+            }
+            // No kept result. Take the claim, so a late attempt can't run the tool after the step
+            // closed. If the seal gets it, nothing started the call. Otherwise it's unknown, since
+            // providers reject unanswered calls.
+            const unstarted = await pending.claimDispatch(input.sessionFile, turn, step, call.id);
+            outcomes.push(unstarted ? agent.notRunOutcome(call) : agent.unknownOutcome(call));
+          }
+
+          // `expectCalls` stops results being attached to a response appended since the model call.
+          guard();
+          const before = session.spend();
+          const sealed = await session.sealStep(outcomes, {
+            expectCalls: input.calls.map((call) => call.id),
+            agentState: input.agentState,
+            // A stopped turn records results only. No retry, no compaction.
+            postRun: !input.interrupted,
+          });
+          await session.waitForIdle();
+          const seconds = secondsBefore(session, input.turn);
+          recordSeconds(session, input.turn, input.sessionSeconds);
+          // Kept results stay until the next step sweeps them, so a retried seal can read them.
+          const answer = session.lastAnswer();
+          // Ship after the seal, so the project matches the session.
+          if (!input.interrupted) {
+            const fence = { turn: input.turn, step: input.step };
+            await shipTree(input.sessionFile, { fence }, true);
+          }
+          return {
+            done: sealed.done,
+            ...(sealed.agentState ? { agentState: sealed.agentState } : {}),
+            finalText: sealed.done ? answer : "",
+            ...totals(before, session),
+            ...seconds,
+          };
+        } finally {
+          session.dispose();
+        }
+      });
+    } finally {
+      stop();
+    }
+  }
+
+  // The steps record the session's time as they go, but the last one of a turn writes before its
+  // seal ends, and failed attempts never write. The Workflow counted all of it, and its run is
+  // about to end, so its total goes in the record. Only ever raised, never lowered.
+  async function keepSeconds(input: RetireInput): Promise<void> {
+    const { sessionFile, turn, sessionSeconds } = input;
+    if (turn === undefined || sessionSeconds === undefined) return;
+    // Only a missing file means nothing to add to. Any other error is thrown, so Temporal retries
+    // and the record still gets the Workflow's total.
+    const exists = await access(sessionFile).then(
+      () => true,
+      (err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") return false;
+        throw err;
+      },
+    );
+    if (!exists) return;
+    await withFence(sessionFile, input.fence, async (guard) => {
+      const record = await agent.openRecord(sessionFile, guard);
+      if (!record) return;
+      const known = (record.latestEntry(SESSION_SECONDS) as { seconds?: unknown } | undefined)
+        ?.seconds;
+      if (typeof known === "number" && known >= sessionSeconds) return;
+      record.appendEntry(SESSION_SECONDS, { turn, seconds: sessionSeconds });
+    });
+  }
+
+  /** Release the project directory when the session goes idle, or this Worker refuses every
+   * other session. Also records the session as over, so other hosts can release theirs. */
+  async function retireSession(input: RetireInput): Promise<void> {
+    await keepSeconds(input);
+    // Thrown, so Temporal retries. The Workflow gives up quietly once retries run out.
+    if (await store?.retire(input.sessionFile)) {
+      say("info", `handed the project back: ${input.sessionFile} went idle`);
+    }
+  }
+
+  /** Copy a template project into a scheduled session before its first step. A no-op once the
+   * session has its own, so a retry does not copy twice. */
+  async function adoptProject(input: {
+    readonly sessionFile: string;
+    readonly template: string;
+  }): Promise<void> {
+    if (await store?.adopt(input.template, input.sessionFile)) {
+      say("info", `took the project from ${input.template} for ${input.sessionFile}`);
+    }
+  }
+
+  return { runStep, runModelCall, runToolCall, sealStep, retireSession, adoptProject };
+}
+
+export type CoreActivities = ReturnType<typeof makeCoreActivities>;
+export type { ToolCallRef };

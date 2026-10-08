@@ -242,8 +242,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         turn: input.promptId,
         step: input.step,
         calls: model.calls,
-        retryAttempt: input.retryAttempt,
-        overflowRecoveryAttempted: input.overflowRecoveryAttempted,
+        agentState: input.agentState,
         sessionSeconds:
           input.sessionSeconds === undefined
             ? undefined
@@ -278,8 +277,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         // Always not done. If the transcript is already complete, the next model call settles it.
         return withSpend({
           done: false,
-          retryAttempt: sealed.retryAttempt,
-          overflowRecoveryAttempted: sealed.overflowRecoveryAttempted,
+          ...(sealed.agentState ? { agentState: sealed.agentState } : {}),
           finalText: "",
         });
       }

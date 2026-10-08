@@ -16,8 +16,8 @@ import {
   log,
   proxyActivities,
 } from "@temporalio/workflow";
-import { dispatchStepCalls } from "./stepped-step.js";
-import { MAX_STEPS_PER_TURN, TURN_STOPPED } from "./protocol.js";
+import { dispatchStepCalls } from "../core/stepped-step.js";
+import { MAX_STEPS_PER_TURN, TURN_STOPPED } from "../core/protocol.js";
 import type {
   LocalModelCallResult,
   LocalSealInput,
@@ -25,7 +25,7 @@ import type {
   LocalToolCallInput,
   LocalTurnInput,
   ToolCallResult,
-} from "./protocol.js";
+} from "../core/protocol.js";
 
 interface LocalActivities {
   runLocalTurn(input: LocalTurnInput): Promise<void>;

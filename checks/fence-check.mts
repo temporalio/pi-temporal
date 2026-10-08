@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { files, SCENARIO } from "./faux-worker.mjs";
-import { QUERIES, type TurnState } from "../src/protocol.js";
+import { QUERIES, type TurnState } from "../src/core/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const failures: string[] = [];
@@ -69,7 +69,7 @@ async function main() {
     const handle = await client.workflow.signalWithStart("piSession", {
       workflowId: queue,
       taskQueue: queue,
-      args: [queue, file, { idleTimeout: "5 seconds", stepped: true }],
+      args: [{ sessionId: queue, sessionFile: file, idleTimeout: "5 seconds", stepped: true }],
       signal: "submitPrompt",
       signalArgs: [{ promptId: `${queue}-prompt`, text: `run the probe ${SCENARIO.pauseModel}` }],
     });

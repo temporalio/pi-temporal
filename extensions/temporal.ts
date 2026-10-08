@@ -27,16 +27,17 @@ import {
   QUERIES,
   SIGNALS,
   workflowId,
-} from "../src/protocol.js";
+} from "../src/core/protocol.js";
 import type {
   LocalTurnInput,
   PromptInput,
   TurnState,
-} from "../src/protocol.js";
-import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
-import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
+} from "../src/core/protocol.js";
+import { type LiveTurns, makeLocalTurnActivities } from "../src/pi/local-turn-activity.js";
+import { createSessionWorker, type SessionWorker } from "../src/core/session-worker.js";
+import { makeActivities } from "../src/pi/activities.js";
 import * as worktree from "../src/tree/worktree.js";
-import { openClient, sendPrompt, sessionExists } from "../src/client.js";
+import { openClient, sendPrompt, sessionExists } from "../src/core/client.js";
 import {
   clientProblems,
   type Config,
@@ -124,12 +125,17 @@ export default function (pi: ExtensionAPI) {
         connect: connectionOptions(cfg),
         namespace: cfg.namespace,
         taskQueue: cfg.taskQueue,
-        // Tools run where you are, so a background task sees the project you asked from.
-        projectDir: ctx.cwd,
-        provider: cfg.provider ?? ctx.model?.provider,
-        modelHint: cfg.modelHint ?? ctx.model?.id,
-        apiKey: modelApiKey(cfg.provider ?? ctx.model?.provider),
-        shipTree: cfg.shipTree,
+        hostQueueFor: ctx.cwd,
+        activities: (hostQueue) =>
+          makeActivities({
+            // Tools run where you are, so a background task sees the project you asked from.
+            projectDir: ctx.cwd,
+            provider: cfg.provider ?? ctx.model?.provider,
+            modelHint: cfg.modelHint ?? ctx.model?.id,
+            apiKey: modelApiKey(cfg.provider ?? ctx.model?.provider),
+            shipTree: cfg.shipTree,
+            hostQueue,
+          }),
         shutdownForceTime: EMBEDDED_STOP,
       });
       worker
@@ -244,8 +250,8 @@ export default function (pi: ExtensionAPI) {
         connect: connectionOptions(cfg),
         namespace: cfg.namespace,
         taskQueue: turnQueue,
-        projectDir: process.cwd(),
-        activities: makeLocalTurnActivities(liveTurns),
+        // Only this process's live turns. The queue is already this process's own.
+        activities: () => makeLocalTurnActivities(liveTurns),
         shutdownForceTime: EMBEDDED_STOP,
       });
       worker

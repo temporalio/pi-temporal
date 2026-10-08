@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { Context } from "@temporalio/activity";
-import type { RunStepInput, TurnState } from "../src/protocol.js";
+import type { RunStepInput, TurnState } from "../src/core/protocol.js";
 
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const namespace = process.env.TEMPORAL_NAMESPACE ?? "default";
@@ -39,7 +39,7 @@ const activities = {
   async retireSession() {},
   async runStep(_input: RunStepInput) {
     modelCalls++;
-    return { done: true, retryAttempt: 0, finalText: "answered" };
+    return { done: true, finalText: "answered" };
   },
   async runModelCall() {
     return {
@@ -53,14 +53,14 @@ const activities = {
     throw new Error("a tool call must be answered by the queue it was addressed to");
   },
   async sealStep() {
-    return { done: true, retryAttempt: 0, finalText: "closed" };
+    return { done: true, finalText: "closed" };
   },
 };
 const worker = await Worker.create({
   connection: native,
   namespace,
   taskQueue: queue,
-  workflowsPath: fileURLToPath(new URL("../src/workflow.ts", import.meta.url)),
+  workflowsPath: fileURLToPath(new URL("../src/core/workflow.ts", import.meta.url)),
   activities: {
     ...activities,
     async runToolCall() {
@@ -90,7 +90,9 @@ try {
   const initialized = await client.workflow.start("piSession", {
     workflowId: `${queue}-adopt`,
     taskQueue: queue,
-    args: ["scheduled", "/unused/session.jsonl", {
+    args: [{
+      sessionId: "scheduled",
+      sessionFile: "/unused/session.jsonl",
       idleTimeout: "100 milliseconds",
       template: "/unused/template",
       initialPrompt: { promptId: "scheduled", text: "run" },
@@ -117,7 +119,9 @@ try {
   const retried = await client.workflow.start("piSession", {
     workflowId: `${queue}-retry`,
     taskQueue: queue,
-    args: ["retry", "/unused/retry.jsonl", {
+    args: [{
+      sessionId: "retry",
+      sessionFile: "/unused/retry.jsonl",
       stepped: true,
       idleTimeout: "100 milliseconds",
       initialPrompt: { promptId: "retry", text: "run" },

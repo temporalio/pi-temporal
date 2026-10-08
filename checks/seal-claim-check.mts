@@ -13,10 +13,10 @@ import {
   type AgentSession,
   type TurnToolCallOutcome,
 } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/activities.js";
-import * as pending from "../src/pending.js";
-import type { ToolCallInput, ToolCallResult } from "../src/protocol.js";
-import { textOf } from "../src/messages.js";
+import { makeActivities } from "../src/pi/activities.js";
+import * as pending from "../src/core/pending.js";
+import type { ToolCallInput, ToolCallResult } from "../src/core/protocol.js";
+import { textOf } from "../src/pi/messages.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-seal-claim-"));
 const file = join(root, "session.jsonl");

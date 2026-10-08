@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as pending from "../src/pending.js";
+import * as pending from "../src/core/pending.js";
 import * as worktree from "../src/tree/worktree.js";
 import { withLease } from "../src/tree/lease.js";
 

@@ -9,8 +9,8 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationFailure } from "@temporalio/common";
-import { takeFence, fenceToken, SUPERSEDED } from "../src/fence.js";
-import { fencePrefix } from "../src/protocol.js";
+import { takeFence, fenceToken, SUPERSEDED } from "../src/core/fence.js";
+import { fencePrefix } from "../src/core/protocol.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-take-fence-"));
 const file = join(root, "s.jsonl");

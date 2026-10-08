@@ -9,9 +9,9 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/activities.js";
-import * as pending from "../src/pending.js";
-import type { ToolCallInput, ToolCallResult } from "../src/protocol.js";
+import { makeActivities } from "../src/pi/activities.js";
+import * as pending from "../src/core/pending.js";
+import type { ToolCallInput, ToolCallResult } from "../src/core/protocol.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-stale-dispatch-"));
 const file = join(root, "session.jsonl");

@@ -11,7 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
-import { makeActivities } from "../src/activities.js";
+import { makeActivities } from "../src/pi/activities.js";
 import * as worktree from "../src/tree/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-unschedule-"));
@@ -47,7 +47,7 @@ try {
   // Each creation names its own template, and a firing carries it in its arguments.
   const { action } = await scheduled.describe();
   const template = action.type === "startWorkflow"
-    ? (action.args?.[2] as { template?: string } | undefined)?.template
+    ? (action.args?.[0] as { template?: string } | undefined)?.template
     : undefined;
   assert.ok(template, "the schedule must name its template");
   await scheduled.trigger();

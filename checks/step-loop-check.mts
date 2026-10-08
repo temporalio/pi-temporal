@@ -11,7 +11,7 @@ import { Client, Connection } from "@temporalio/client";
 import { Context } from "@temporalio/activity";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { fromEnv, sessionFileFor } from "../src/config.js";
-import { WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
+import { WORKFLOW_TYPE, workflowId } from "../src/core/protocol.js";
 import type {
   ModelCallResult,
   PromptInput,
@@ -21,7 +21,7 @@ import type {
   SessionTurnOptions,
   ToolCallInput,
   ToolCallResult,
-} from "../src/protocol.js";
+} from "../src/core/protocol.js";
 
 const STEPS_TO_ANSWER = 3;
 const cfg = fromEnv();
@@ -71,10 +71,10 @@ function stubs(stepped: boolean) {
       const count = note(input);
       if (input.text === "hang") {
         await stoppable(60_000);
-        return { done: true, retryAttempt: 0, finalText: "" };
+        return { done: true, finalText: "" };
       }
       const done = count === STEPS_TO_ANSWER;
-      return { done, retryAttempt: 0, finalText: done ? "answer" : "" };
+      return { done, finalText: done ? "answer" : "" };
     },
   };
 
@@ -95,7 +95,7 @@ function stubs(stepped: boolean) {
     },
     async sealStep(input: SealStepInput): Promise<RunStepResult> {
       const done = input.step === STEPS_TO_ANSWER;
-      return { done, retryAttempt: 0, finalText: done ? "answer" : "" };
+      return { done, finalText: done ? "answer" : "" };
     },
   };
 
@@ -115,7 +115,7 @@ async function runMode(stepped: boolean) {
     connection: nativeConnection,
     namespace: cfg.namespace,
     taskQueue,
-    workflowsPath: fileURLToPath(new URL("../src/workflow.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/core/workflow.ts", import.meta.url)),
     activities,
     maxHeartbeatThrottleInterval: "1 second",
   });
@@ -129,7 +129,7 @@ async function runMode(stepped: boolean) {
     client.workflow.signalWithStart(WORKFLOW_TYPE, {
       taskQueue,
       workflowId: workflowId(sessionId),
-      args: [sessionId, sessionFileFor(cfg.sessionDir, sessionId), options],
+      args: [{ sessionId, sessionFile: sessionFileFor(cfg.sessionDir, sessionId), ...options }],
       signal: "submitPrompt",
       signalArgs: [prompt],
     });

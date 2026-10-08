@@ -10,8 +10,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/activities.js";
-import { makeSteppedStep } from "../src/stepped-step.js";
+import { makeActivities } from "../src/pi/activities.js";
+import { makeSteppedStep } from "../src/core/stepped-step.js";
 import * as worktree from "../src/tree/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-lost-host-"));
@@ -83,7 +83,7 @@ try {
   const shipped = await bundles();
 
   const result = await step({
-    sessionId: "session", sessionFile, promptId: turn, text: "task", step: 1, retryAttempt: 0,
+    sessionId: "session", sessionFile, promptId: turn, text: "task", step: 1,
   });
   assert.equal(seals, 1, "the step records what it had before it hands the turn back");
   assert.equal(result.done, false, "the turn goes on rather than ending with the worker");

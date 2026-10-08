@@ -10,13 +10,13 @@ import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { fromEnv, sessionFileFor } from "../src/config.js";
-import { WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
+import { WORKFLOW_TYPE, workflowId } from "../src/core/protocol.js";
 import type {
   PromptInput,
   RunStepInput,
   RunStepResult,
   SessionTurnOptions,
-} from "../src/protocol.js";
+} from "../src/core/protocol.js";
 
 const cfg = fromEnv();
 const failures: string[] = [];
@@ -38,11 +38,11 @@ async function main() {
     connection: nativeConnection,
     namespace: cfg.namespace,
     taskQueue,
-    workflowsPath: fileURLToPath(new URL("../src/workflow.ts", import.meta.url)),
+    workflowsPath: fileURLToPath(new URL("../src/core/workflow.ts", import.meta.url)),
     activities: {
       async runStep(input: RunStepInput): Promise<RunStepResult> {
         answered.push(input.text);
-        return { done: true, retryAttempt: 0, finalText: `answered ${input.text}` };
+        return { done: true, finalText: `answered ${input.text}` };
       },
     },
   });
@@ -55,7 +55,7 @@ async function main() {
     client.workflow.signalWithStart(WORKFLOW_TYPE, {
       taskQueue,
       workflowId: workflowId(sessionId),
-      args: [sessionId, sessionFileFor(cfg.sessionDir, sessionId), options],
+      args: [{ sessionId, sessionFile: sessionFileFor(cfg.sessionDir, sessionId), ...options }],
       signal: "submitPrompt",
       signalArgs: [{ promptId: randomUUID(), text } satisfies PromptInput],
     });
