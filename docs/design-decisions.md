@@ -231,6 +231,14 @@ by default because the namespace must register the attribute first. `PI_TEMPORAL
 on the SDK's Prometheus metrics. Activities log through the Activity logger, so each line carries
 its Workflow and Activity ids.
 
+`PI_TEMPORAL_TRACING=1` adds OpenTelemetry traces through the SDK's interceptors
+(`src/core/tracing.ts`). The client starts a trace and passes it on in the call's headers. The
+Workflow's interceptors run in the sandbox and hand finished spans to the Worker through a sink,
+and the Activity interceptors continue the trace. So one trace shows a prompt's turn, step by
+step, across Workers. The prebuilt bundle always has the Workflow interceptors, which makes it
+about twice the size. The same image then traces or not by the variable alone. Without tracing,
+the sink drops their spans. `tracing-check` shows one trace from the client to the Activity.
+
 ## Payloads can be encrypted
 
 Prompt and answer payloads pass through history, along with error text. Coding tasks can put
@@ -242,3 +250,13 @@ encrypted.
 The codec still reads a plain payload, so history written before the key was set stays readable.
 That also means it doesn't guard against someone who can write history directly. It protects
 what the server stores, not the server's write path.
+
+Each payload names the key that sealed it, by a hash of the key. To rotate, set the new key as
+`PI_TEMPORAL_CODEC_KEY` and move the old one to `PI_TEMPORAL_CODEC_OLD_KEYS` on every client and
+Worker. New payloads use the new key, and old ones still open. `codec-check` covers a rotation.
+
+Keep an old key while any history that holds its payloads can still be read. Retention starts only
+when a run closes, so the clock starts at the last close, not at the rotation. A session's runs
+close at each idle exit and each Continue-As-New. Drop the key once every run that started before
+the rotation has closed and the namespace's retention has passed since the last of them closed.
+Archived histories need the key for as long as you keep the archive.

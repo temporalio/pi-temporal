@@ -16,6 +16,7 @@ import {
 import { createSessionWorker } from "./core/session-worker.js";
 import { makeActivities } from "./pi/activities.js";
 import { dataConverterFor } from "./core/codec.js";
+import { flushTracing, startTracing } from "./core/tracing.js";
 import * as worktree from "./tree/worktree.js";
 
 async function main() {
@@ -73,6 +74,7 @@ async function main() {
     "ANTHROPIC_API_KEY_FILE",
   ]);
 
+  const tracing = cfg.tracing ? startTracing("pi-temporal-worker") : undefined;
   const { run } = await createSessionWorker({
     address: cfg.address,
     connect: connectionOptions(cfg),
@@ -81,11 +83,12 @@ async function main() {
     // A host queue matters only when each host has its own copy of the project. With one shared
     // directory, any Worker can run any unit.
     ...(cfg.shipTree ? { hostQueueFor: projectDir } : {}),
-    dataConverter: dataConverterFor(cfg.codecKey),
+    dataConverter: dataConverterFor(cfg),
     workflowBundlePath: process.env.PI_TEMPORAL_WORKFLOW_BUNDLE,
     shutdownGraceTime: cfg.shutdownGrace,
     maxConcurrentActivities: cfg.maxActivities,
     deployment: cfg.deployment,
+    tracing,
     activities: (hostQueue) =>
       makeActivities({
         projectDir,
@@ -101,9 +104,13 @@ async function main() {
   for (const [name, value] of Object.entries(describe(cfg))) console.log(`  ${name}: ${value}`);
   console.log(`  project: ${projectDir}`);
   await run();
+  // The Worker drained. Send the spans still buffered before the process ends.
+  await tracing?.shutdown();
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err);
+  // The spans of a failed start or a Worker that died are the ones worth seeing.
+  await flushTracing();
   process.exit(1);
 });

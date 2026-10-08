@@ -6,6 +6,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 
 const dir = await mkdtemp(join(tmpdir(), "pi-retire-seconds-"));
@@ -19,7 +20,9 @@ const latest = () => {
   return entries.filter((e) => e.customType === "pi-temporal.session-seconds").at(-1)?.data;
 };
 
-const { retireSession } = makeActivities({ projectDir: dir, shipTree: false });
+const { retireSession: retire } = makeActivities({ projectDir: dir, shipTree: false });
+const env = new MockActivityEnvironment();
+const retireSession = (input: Parameters<typeof retire>[0]) => env.run(retire, input);
 // A session with no record yet has nothing to add to.
 await retireSession({ sessionFile: file, turn: "t1", sessionSeconds: 5 });
 assert.equal(latest(), undefined);

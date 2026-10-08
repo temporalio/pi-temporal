@@ -87,3 +87,13 @@ process.env.PI_TEMPORAL_MAX_ACTIVITIES = "0";
 assert.throws(() => fromEnv(), /whole number of Activities/);
 delete process.env.PI_TEMPORAL_MAX_ACTIVITIES;
 console.log("PASS Worker slots and shutdown grace have bounded defaults");
+
+// Old codec keys only decrypt, so they need a current key that encrypts.
+const oldKey = Buffer.alloc(32, 1).toString("base64");
+process.env.PI_TEMPORAL_CODEC_OLD_KEYS = oldKey;
+assert.throws(() => fromEnv(), /needs PI_TEMPORAL_CODEC_KEY/);
+process.env.PI_TEMPORAL_CODEC_KEY = Buffer.alloc(32, 2).toString("base64");
+assert.equal(fromEnv().codecOldKeys?.length, 1);
+delete process.env.PI_TEMPORAL_CODEC_OLD_KEYS;
+delete process.env.PI_TEMPORAL_CODEC_KEY;
+console.log("PASS old codec keys need a current one");

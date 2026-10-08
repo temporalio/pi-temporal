@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { ApplicationFailure } from "@temporalio/activity";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { unknownToolCallOutcome } from "@earendil-works/pi-coding-agent";
 import { fromEnv } from "../src/config.js";
 import {
@@ -188,20 +189,48 @@ async function main() {
   check("stepped: a stop before the first call still records the prompt", kept, early.seen);
   check("stepped: and asks the model nothing", !early.seen.includes("model:1"), early.seen);
 
-  // Calls the activity twice directly to stand in for a retry. The prompt must be recorded once.
+  // The activity checks below give each call its own Activity context, numbered like a retry.
+  const attempt = (n: number) => new MockActivityEnvironment({ attempt: n });
+
+  // Calls the activity twice to stand in for a retry. The prompt must be recorded once.
   {
     const turnId = randomUUID();
     const { turn, seen } = fakeTurn({ interruptAfter: 0 });
     live.set(turnId, turn);
     const activities = makeLocalTurnActivities(live);
     try {
-      await activities.runLocalModelCall({ turnId, step: 1 });
-      await activities.runLocalModelCall({ turnId, step: 1 });
+      await attempt(1).run(activities.runLocalModelCall, { turnId, step: 1 });
+      await attempt(2).run(activities.runLocalModelCall, { turnId, step: 1 });
     } finally {
       live.delete(turnId);
     }
     const records = seen.filter((s) => s === "record").length;
     check("a retried model call does not record the prompt twice", records === 1, seen);
+  }
+
+  // A cancelled model call Activity must stop the provider request, not leave it running billed.
+  {
+    const turnId = randomUUID();
+    const { turn } = fakeTurn();
+    let stopped = false;
+    turn.steps.modelCall = async (options) => {
+      await new Promise<void>((resolve) => {
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+        setTimeout(resolve, 2_000);
+      });
+      stopped = options?.signal?.aborted === true;
+      return { toolCalls: [], sequential: false, ended: true };
+    };
+    live.set(turnId, turn);
+    const activities = makeLocalTurnActivities(live);
+    const env = attempt(1);
+    setTimeout(() => env.cancel(), 50);
+    try {
+      await env.run(activities.runLocalModelCall, { turnId, step: 1 }).catch(() => undefined);
+    } finally {
+      live.delete(turnId);
+    }
+    check("a cancelled live model call gets the stop", stopped, { stopped });
   }
 
   // A retry after a lost completion joins the attempt that ran, so nothing runs twice: no second
@@ -214,17 +243,17 @@ async function main() {
     const activities = makeLocalTurnActivities(live);
     try {
       await Promise.all([
-        activities.runLocalModelCall({ turnId, step: 1 }),
-        activities.runLocalModelCall({ turnId, step: 1 }),
+        attempt(1).run(activities.runLocalModelCall, { turnId, step: 1 }),
+        attempt(2).run(activities.runLocalModelCall, { turnId, step: 1 }),
       ]);
       const call = { id: "c1a", name: "probe" };
       await Promise.all([
-        activities.runLocalToolCall({ turnId, step: 1, call }),
-        activities.runLocalToolCall({ turnId, step: 1, call }),
+        attempt(1).run(activities.runLocalToolCall, { turnId, step: 1, call }),
+        attempt(2).run(activities.runLocalToolCall, { turnId, step: 1, call }),
       ]);
       const seal = { turnId, step: 1, calls: [call], interrupted: false };
-      await activities.runLocalSeal(seal);
-      await activities.runLocalSeal(seal);
+      await attempt(1).run(activities.runLocalSeal, seal);
+      await attempt(2).run(activities.runLocalSeal, seal);
     } finally {
       live.delete(turnId);
     }
@@ -251,7 +280,8 @@ async function main() {
     const activities = makeLocalTurnActivities(live);
     let failure: unknown;
     try {
-      await activities.runLocalToolCall({ turnId, step: 1, call: { id: "c1", name: "bash" } });
+      const call = { id: "c1", name: "bash" };
+      await attempt(1).run(activities.runLocalToolCall, { turnId, step: 1, call });
     } catch (err) {
       failure = err;
     } finally {

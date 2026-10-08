@@ -28,6 +28,10 @@ export interface Config {
   readonly searchAttribute: boolean;
   // Encrypts payloads in history (`core/codec.ts`). 32 bytes, from base64.
   readonly codecKey?: Buffer;
+  // OpenTelemetry tracing (`core/tracing.ts`). The standard `OTEL_*` variables configure it.
+  readonly tracing: boolean;
+  // Retired keys that still decrypt payloads sealed before a rotation. Never used to encrypt.
+  readonly codecOldKeys?: readonly Buffer[];
   // API key for Temporal Cloud, or a certificate pair for mTLS. Never printed by `describe`.
   readonly apiKey?: string;
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
@@ -105,6 +109,7 @@ export function fromEnv(): Config {
     // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
     searchAttribute: onOff("PI_TEMPORAL_SEARCH_ATTRIBUTE", false),
+    tracing: onOff("PI_TEMPORAL_TRACING", false),
     ...codecKeyFromEnv(),
     toolTimeoutMinutes: minutesFromEnv("PI_TEMPORAL_TOOL_TIMEOUT_MINUTES"),
     shutdownGrace: (wholeFromEnv("PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS", "seconds") ?? 60) * 1000,
@@ -146,17 +151,34 @@ export const TEMPORAL_CREDENTIAL_VARS = [
   "TEMPORAL_CODEC_AUTH",
   "PI_TEMPORAL_CODEC_KEY",
   "PI_TEMPORAL_CODEC_KEY_FILE",
+  "PI_TEMPORAL_CODEC_OLD_KEYS",
+  "PI_TEMPORAL_CODEC_OLD_KEYS_FILE",
 ];
 
 // A bad key must fail at start, not as payloads nobody can read.
-function codecKeyFromEnv(): { codecKey?: Buffer } {
+function codecKeyFromEnv(): { codecKey?: Buffer; codecOldKeys?: Buffer[] } {
+  const decoded = (name: string, encoded: string) => {
+    const key = Buffer.from(encoded.trim(), "base64");
+    if (key.length !== 32) throw new Error(`${name} must hold 32-byte keys, base64 encoded`);
+    return key;
+  };
   const encoded = secret("PI_TEMPORAL_CODEC_KEY");
-  if (encoded === undefined) return {};
-  const codecKey = Buffer.from(encoded, "base64");
-  if (codecKey.length !== 32) {
-    throw new Error("PI_TEMPORAL_CODEC_KEY must be 32 bytes, base64 encoded");
+  const old = secret("PI_TEMPORAL_CODEC_OLD_KEYS");
+  // Old keys only decrypt. Without a current key nothing is encrypted, which a rotation never
+  // means, so the pair is refused.
+  if (encoded === undefined) {
+    if (old !== undefined) {
+      throw new Error("PI_TEMPORAL_CODEC_OLD_KEYS needs PI_TEMPORAL_CODEC_KEY");
+    }
+    return {};
   }
-  return { codecKey };
+  return {
+    codecKey: decoded("PI_TEMPORAL_CODEC_KEY", encoded),
+    codecOldKeys: (old ?? "")
+      .split(",")
+      .filter((each) => each.trim() !== "")
+      .map((each) => decoded("PI_TEMPORAL_CODEC_OLD_KEYS", each)),
+  };
 }
 
 export function dropFromEnv(names: readonly string[]): void {
@@ -284,6 +306,7 @@ export function describe(cfg: Config): Record<string, string> {
     toolTimeoutMinutes: cfg.toolTimeoutMinutes ? `${cfg.toolTimeoutMinutes} minutes` : "default",
     shipTree: String(cfg.shipTree),
     maxActivities: String(cfg.maxActivities),
+    tracing: String(cfg.tracing),
     deployment: cfg.deployment
       ? `${cfg.deployment.name}.${cfg.deployment.buildId}`
       : "unversioned",

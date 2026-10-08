@@ -4,4 +4,4 @@
 # To bump it, set PI_FORK_REF to the new fork commit, then re-run scripts/setup-fork.sh.
 
 PI_FORK_REPO=https://github.com/temporalio/pi.git
-PI_FORK_REF=aedfc88954c89c87e403ad6203568845f76dd461
+PI_FORK_REF=4fa847531316ce05dc8b974f393d8e28eab43f62

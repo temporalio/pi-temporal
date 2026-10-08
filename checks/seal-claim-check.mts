@@ -13,6 +13,7 @@ import {
   type AgentSession,
   type TurnToolCallOutcome,
 } from "@earendil-works/pi-coding-agent";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import * as pending from "../src/core/pending.js";
 import type { ToolCallInput, ToolCallResult } from "../src/core/protocol.js";
@@ -62,10 +63,11 @@ try {
     return originalMkdir(...args);
   }) as typeof fs.mkdir;
   syncBuiltinESMExports();
-  attempt = activities.runToolCall(input);
+  const tool = new MockActivityEnvironment();
+  attempt = tool.run(activities.runToolCall, input) as Promise<ToolCallResult>;
   await waiting;
 
-  await activities.sealStep({
+  await new MockActivityEnvironment().run(activities.sealStep, {
     sessionId: input.sessionId,
     sessionFile: file,
     turn: input.turn,

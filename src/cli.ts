@@ -8,6 +8,7 @@ import { open, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { connect, interrupt, sessionExists, submitPrompt } from "./core/client.js";
+import { flushTracing } from "./core/tracing.js";
 import {
   clientProblems,
   describe,
@@ -562,7 +563,8 @@ async function main() {
   }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   say(`error: ${err instanceof Error ? err.message : String(err)}`);
+  await flushTracing();
   process.exit(1);
 });

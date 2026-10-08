@@ -11,6 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import * as worktree from "../src/tree/worktree.js";
 
@@ -63,10 +64,8 @@ try {
   );
   await cli(["unschedule", id]);
   const target = join(sessionDir, "firing.jsonl");
-  await makeActivities({ projectDir: project, shipTree: true }).adoptProject({
-    sessionFile: target,
-    template,
-  });
+  const { adoptProject } = makeActivities({ projectDir: project, shipTree: true });
+  await new MockActivityEnvironment().run(adoptProject, { sessionFile: target, template });
   assert.equal(await worktree.established(target), true);
   console.log("PASS a queued firing can adopt after the schedule is deleted");
 } finally {

@@ -20,8 +20,10 @@ import {
   type AgentSession,
   type TurnToolCallOutcome,
 } from "@earendil-works/pi-coding-agent";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import { makeSteppedStep } from "../src/core/stepped-step.js";
+import type { RunStepResult } from "../src/core/protocol.js";
 import * as pending from "../src/core/pending.js";
 
 class Cancelled extends Error {}
@@ -93,13 +95,14 @@ for (const { failure, atSeal } of [
         try { return await fn(); } finally { nonCancellable = false; }
       },
     });
-    const ran = step({
+    // The step calls the real `sealStep` in this process, so it shares this Activity context.
+    const ran = new MockActivityEnvironment().run(step, {
       sessionId: "session",
       sessionFile: file,
       step: 1,
       promptId: "prompt",
       text: "run",
-    });
+    }) as Promise<RunStepResult>;
     // A stop ends the turn. A lost host doesn't: the step is recorded and the turn goes on.
     if (failure instanceof Cancelled) await assert.rejects(ran, (error) => error === failure);
     else assert.equal((await ran).done, false);

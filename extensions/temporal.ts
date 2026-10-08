@@ -38,6 +38,7 @@ import { type LiveTurns, makeLocalTurnActivities } from "../src/pi/local-turn-ac
 import { createSessionWorker, type SessionWorker } from "../src/core/session-worker.js";
 import { makeActivities } from "../src/pi/activities.js";
 import { dataConverterFor } from "../src/core/codec.js";
+import { startTracing } from "../src/core/tracing.js";
 import * as worktree from "../src/tree/worktree.js";
 import { openClient, sendPrompt, sessionExists } from "../src/core/client.js";
 import {
@@ -148,7 +149,8 @@ export default function (pi: ExtensionAPI) {
           }),
         shutdownForceTime: EMBEDDED_STOP,
         maxConcurrentActivities: cfg.maxActivities,
-        dataConverter: dataConverterFor(cfg.codecKey),
+        dataConverter: dataConverterFor(cfg),
+        tracing: cfg.tracing ? startTracing("pi") : undefined,
       });
       worker
         .run()
@@ -265,7 +267,10 @@ export default function (pi: ExtensionAPI) {
         // Only this process's live turns. The queue is already this process's own.
         activities: () => makeLocalTurnActivities(liveTurns),
         shutdownForceTime: EMBEDDED_STOP,
-        dataConverter: dataConverterFor(cfg.codecKey),
+        dataConverter: dataConverterFor(cfg),
+        // The same tracing as the client that starts each turn, so a foreground prompt's trace
+        // goes on into its Workflow and Activities.
+        tracing: cfg.tracing ? startTracing("pi") : undefined,
       });
       worker
         .run()
@@ -316,8 +321,9 @@ export default function (pi: ExtensionAPI) {
         record: () => ranHere(() => turn.steps.record()),
         // Not wrapped. Checking for an interrupt doesn't run the turn.
         interrupted: () => turn.steps.interrupted(),
-        modelCall: () => ranHere(() => turn.steps.modelCall()),
-        // The options carry the Activity's abort signal, so a stop reaches the running tool.
+        // The options carry the Activity's abort signal, so a stop reaches the running model call
+        // or tool.
+        modelCall: (options) => ranHere(() => turn.steps.modelCall(options)),
         runToolCall: (id, options) => ranHere(() => turn.steps.runToolCall(id, options)),
         sealStep: (results, options) => ranHere(() => turn.steps.sealStep(results, options)),
       },

@@ -7,6 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import { textOf } from "../src/pi/messages.js";
 
@@ -75,7 +76,7 @@ try {
         dispose() {},
       }) as unknown as AgentSession,
     });
-    await activities.runModelCall({
+    await new MockActivityEnvironment().run(activities.runModelCall, {
       sessionId: "session",
       sessionFile: file,
       step,

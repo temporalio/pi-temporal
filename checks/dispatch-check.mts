@@ -9,9 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { ApplicationFailure } from "@temporalio/activity";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import * as pending from "../src/core/pending.js";
-import { FAILED_BEFORE_CLAIM, type ToolCallInput } from "../src/core/protocol.js";
+import {
+  FAILED_BEFORE_CLAIM,
+  type ToolCallInput,
+  type ToolCallResult,
+} from "../src/core/protocol.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-dispatch-"));
 const effectFile = join(root, "effects");
@@ -33,6 +38,8 @@ const activities = makeActivities({ projectDir: root }, {
   }) as unknown as AgentSession,
 });
 
+const env = new MockActivityEnvironment();
+
 const originalWriteFile = fs.writeFile;
 try {
   let arrivals = 0;
@@ -48,10 +55,11 @@ try {
     return originalWriteFile(...args);
   }) as typeof fs.writeFile;
   syncBuiltinESMExports();
-  const results = await Promise.all([
-    activities.runToolCall(input),
-    activities.runToolCall(input),
-  ]);
+  // Each attempt gets its own Activity context, as on two Workers.
+  const results = (await Promise.all([
+    new MockActivityEnvironment({ attempt: 1 }).run(activities.runToolCall, input),
+    new MockActivityEnvironment({ attempt: 2 }).run(activities.runToolCall, input),
+  ])) as ToolCallResult[];
   clearTimeout(timer);
   fs.writeFile = originalWriteFile;
   syncBuiltinESMExports();
@@ -66,7 +74,7 @@ try {
 
   const refused = { ...input, sessionFile: join(root, "refused.jsonl") };
   await writeFile(`${refused.sessionFile}.pending`, "not a directory");
-  await assert.rejects(activities.runToolCall(refused));
+  await assert.rejects(env.run(activities.runToolCall, refused));
   assert.equal(
     await readFile(effectFile, "utf8"),
     "effect\n",
@@ -84,9 +92,12 @@ try {
   const beforeClaim = (err: unknown) =>
     err instanceof ApplicationFailure && err.type === FAILED_BEFORE_CLAIM;
   const fresh = { ...input, sessionFile: join(root, "fresh.jsonl") };
-  await assert.rejects(cannotOpen.runToolCall(fresh), beforeClaim);
+  await assert.rejects(env.run(cannotOpen.runToolCall, fresh), beforeClaim);
   console.log("PASS a call that failed before any claim says so");
-  await assert.rejects(cannotOpen.runToolCall(input), (err: unknown) => !beforeClaim(err));
+  await assert.rejects(
+    env.run(cannotOpen.runToolCall, input),
+    (err: unknown) => !beforeClaim(err),
+  );
   console.log("PASS a call an earlier attempt claimed does not");
 
   // A host refusing the project comes before the claim, so it also lets the host-queue step move.
@@ -97,7 +108,7 @@ try {
   });
   const quarantined = { ...input, sessionFile: join(root, "quarantined.jsonl") };
   await assert.rejects(
-    refusing.runToolCall(quarantined),
+    env.run(refusing.runToolCall, quarantined),
     (err: unknown) =>
       beforeClaim(err) && (err as ApplicationFailure).details?.[0] === "WorktreeQuarantined",
   );
