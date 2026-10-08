@@ -29,6 +29,10 @@ export type LiveTurns = Map<string, LiveTurn>;
 interface TurnProgress {
   recorded: boolean;
   readonly results: Map<string, TurnToolCallOutcome>;
+  // Each unit's attempt, running or done, by unit. A retry joins it instead of running the unit
+  // again, so a model call isn't billed twice and a tool doesn't act twice. Only a failure is
+  // forgotten, so a retry after it runs the unit again.
+  readonly units: Map<string, Promise<unknown>>;
 }
 
 // No Activity around it when a check calls it directly.
@@ -59,9 +63,23 @@ export function makeLocalTurnActivities(live: LiveTurns) {
     }
     const existing = progress.get(turnId);
     if (existing) return existing;
-    const fresh: TurnProgress = { recorded: false, results: new Map() };
+    const fresh: TurnProgress = { recorded: false, results: new Map(), units: new Map() };
     progress.set(turnId, fresh);
     return fresh;
+  };
+
+  // These Activities run only in the process that holds the turn, so an attempt's completion can
+  // be lost while the work itself finished here. Temporal then retries, and this joins the
+  // attempt that's already running or done.
+  const once = <T>(state: TurnProgress, unit: string, body: () => Promise<T>): Promise<T> => {
+    const known = state.units.get(unit);
+    if (known) return known as Promise<T>;
+    const attempt = body();
+    state.units.set(unit, attempt);
+    attempt.catch(() => {
+      if (state.units.get(unit) === attempt) state.units.delete(unit);
+    });
+    return attempt;
   };
 
   const heartbeating = async <T>(body: () => Promise<T>): Promise<T> => {
@@ -82,13 +100,14 @@ export function makeLocalTurnActivities(live: LiveTurns) {
 
   async function runLocalTurn(input: LocalTurnInput): Promise<void> {
     const turn = turnFor(input.turnId);
-    await heartbeating(() => turn.run());
+    const state = progressFor(input.turnId);
+    await heartbeating(() => once(state, "turn", () => turn.run()));
   }
 
   async function runLocalModelCall(input: LocalStepInput): Promise<LocalModelCallResult> {
     const turn = turnFor(input.turnId);
     const state = progressFor(input.turnId);
-    return heartbeating(async () => {
+    return heartbeating(() => once(state, `model:${input.step}`, async () => {
       // Record before checking for a stop, or an early stop loses the user's prompt. Resume
       // handles a recorded, unanswered prompt.
       if (!state.recorded) {
@@ -110,13 +129,14 @@ export function makeLocalTurnActivities(live: LiveTurns) {
         sequential: model.sequential,
         ended: model.ended,
       };
-    });
+    }));
   }
 
   async function runLocalToolCall(input: LocalToolCallInput): Promise<ToolCallResult> {
     const turn = turnFor(input.turnId);
     const state = progressFor(input.turnId);
-    return heartbeating(async () => {
+    const unit = `tool:${input.step}:${input.call.id}`;
+    return heartbeating(() => once(state, unit, async (): Promise<ToolCallResult> => {
       if (state.results.has(input.call.id)) return { outcome: "already-settled" };
 
       let outcome: TurnToolCallOutcome | undefined;
@@ -134,13 +154,13 @@ export function makeLocalTurnActivities(live: LiveTurns) {
 
       state.results.set(input.call.id, outcome);
       return { outcome: "settled" };
-    });
+    }));
   }
 
   async function runLocalSeal(input: LocalSealInput): Promise<{ done: boolean }> {
     const turn = turnFor(input.turnId);
     const state = progressFor(input.turnId);
-    return heartbeating(async () => {
+    return heartbeating(() => once(state, `seal:${input.step}`, async () => {
       const results = input.calls.map(
         // Every call needs a result, or the next model call has an invalid transcript.
         (call) => state.results.get(call.id) ?? unknownToolCallOutcome(call),
@@ -153,7 +173,7 @@ export function makeLocalTurnActivities(live: LiveTurns) {
       for (const call of input.calls) state.results.delete(call.id);
       if (sealed.done) progress.delete(input.turnId);
       return sealed;
-    });
+    }));
   }
 
   return { runLocalTurn, runLocalModelCall, runLocalToolCall, runLocalSeal };

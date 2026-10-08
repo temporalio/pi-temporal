@@ -204,6 +204,40 @@ async function main() {
     check("a retried model call does not record the prompt twice", records === 1, seen);
   }
 
+  // A retry after a lost completion joins the attempt that ran, so nothing runs twice: no second
+  // billed model call, no tool acting twice, no step sealed twice. Two at once stand in for a
+  // retry that overlaps an attempt still running.
+  {
+    const turnId = randomUUID();
+    const { turn, seen } = fakeTurn();
+    live.set(turnId, turn);
+    const activities = makeLocalTurnActivities(live);
+    try {
+      await Promise.all([
+        activities.runLocalModelCall({ turnId, step: 1 }),
+        activities.runLocalModelCall({ turnId, step: 1 }),
+      ]);
+      const call = { id: "c1a", name: "probe" };
+      await Promise.all([
+        activities.runLocalToolCall({ turnId, step: 1, call }),
+        activities.runLocalToolCall({ turnId, step: 1, call }),
+      ]);
+      const seal = { turnId, step: 1, calls: [call], interrupted: false };
+      await activities.runLocalSeal(seal);
+      await activities.runLocalSeal(seal);
+    } finally {
+      live.delete(turnId);
+    }
+    const count = (what: string) => seen.filter((s) => s === what).length;
+    check(
+      "a retried unit runs once",
+      count("model:1") === 1 &&
+        count("tool:c1a") === 1 &&
+        seen.filter((s) => s.startsWith("seal:")).length === 1,
+      seen,
+    );
+  }
+
   // A tool that throws on a stopped turn must be non-retryable, since nothing records that it ran.
   {
     const turnId = randomUUID();
