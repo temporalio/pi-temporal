@@ -454,6 +454,27 @@ async function main() {
   check("a home directory is refused", (await refusal(homedir())) !== undefined);
   check("a directory with no repository or ignore file is refused", !!(await refusal(bare)));
   check("a directory with an ignore file is sent", (await refusal(ignoring)) === undefined);
+  // A checkout alone has no ignore rules this capture can use. Its own `.git/info/exclude` does.
+  const checkout = await mkdtemp(join(tmpdir(), "pi-checkout-"));
+  await mkdir(join(checkout, ".git", "info"), { recursive: true });
+  check("a checkout with no ignore rules is refused", !!(await refusal(checkout)));
+  await writeFile(join(checkout, ".git", "info", "exclude"), "# local\n.env\n");
+  check("a checkout with local ignore rules is sent", (await refusal(checkout)) === undefined);
+  await writeFile(join(checkout, ".env"), "SECRET=local\n");
+  await writeFile(join(checkout, "code.txt"), "code\n");
+  asHost(root, "checkout");
+  const excluded = join(shared, "excluded.jsonl");
+  await worktree.capture(checkout, excluded, { seed: true });
+  const reader = join(root, "checkout-reader", "project");
+  await mkdir(reader, { recursive: true });
+  asHost(root, "checkout-reader");
+  await worktree.ensure(reader, excluded);
+  check(
+    "and what those rules exclude doesn't ship",
+    (await read(join(reader, "code.txt"))) === "code\n" &&
+      (await read(join(reader, ".env"))) === "",
+  );
+  await rm(checkout, { recursive: true, force: true });
   await rm(bare, { recursive: true, force: true });
   await rm(ignoring, { recursive: true, force: true });
 

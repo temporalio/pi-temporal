@@ -120,7 +120,8 @@ export function fromEnv(): Config {
 }
 
 // What reaches the Temporal control plane. Once `fromEnv` has read them, a process that runs
-// agent tools drops them, so a tool can't read them from its inherited environment.
+// agent tools drops them, so a tool doesn't inherit them. That's not isolation. A tool running as
+// the same user can still read the process's original environment through `/proc`.
 export const TEMPORAL_CREDENTIAL_VARS = [
   "PI_TEMPORAL_API_KEY",
   "PI_TEMPORAL_API_KEY_FILE",
