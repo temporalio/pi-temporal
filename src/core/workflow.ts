@@ -25,7 +25,9 @@ import {
   upsertSearchAttributes,
   ActivityCancellationType,
   ActivityFailure,
+  TemporalFailure,
   TimeoutFailure,
+  setWorkflowOptions,
 } from "@temporalio/workflow";
 import {
   FAILED_BEFORE_CLAIM,
@@ -43,6 +45,7 @@ import {
 } from "./protocol.js";
 import type {
   AgentState,
+  InterruptInput,
   PromptInput,
   Quiet,
   RetireInput,
@@ -58,7 +61,8 @@ import type {
 import { makeSteppedStep, type SteppedActivities } from "./stepped-step.js";
 
 const activityOptions = {
-  // A step is one model call plus its tools. The heartbeat is the real liveness bound.
+  // A step is one model call plus its tools. The heartbeat finds a dead Worker in 30 seconds. It
+  // comes from a timer, not from progress, so a call that hangs runs on to this timeout.
   startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
   // For a lost Worker or a storage error. Pi retries the provider itself, inside the step, and
@@ -211,7 +215,7 @@ const SESSION_STATE = defineSearchAttributeKey(
 
 // How many prompt ids a session remembers to refuse a resend. Far more than any client retries.
 const SEEN_PROMPTS = 200;
-export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
+export const interrupt = defineSignal<[InterruptInput?]>(SIGNALS.interrupt);
 export const turnState = defineQuery<TurnState>(QUERIES.turnState);
 
 /** What a turn used so far, for its bounds. */
@@ -234,6 +238,12 @@ export function overBudget(budget: TurnBudget | undefined, used: Usage): boolean
   );
 }
 
+// With Worker Versioning on, a session moves to the newest version at its next Workflow Task. It's
+// long-lived, and pinned it would keep old Workers alive for as long as it runs. So every change
+// to this Workflow must replay its older histories, or sit behind `patched()`. Named only on a
+// Worker in a deployment, since the server refuses a behavior from any other.
+const versioned = () => Boolean(workflowInfo().currentDeploymentVersion?.deploymentName);
+setWorkflowOptions(() => (versioned() ? { versioningBehavior: "AUTO_UPGRADE" } : {}), piSession);
 export async function piSession(input: SessionInput): Promise<void> {
   const { sessionId, sessionFile, ...options } = input;
   // A schedule can't name a session, and each firing needs its own. Temporal makes scheduled
@@ -335,8 +345,11 @@ export async function piSession(input: SessionInput): Promise<void> {
   // the next run.
   let ending = false;
 
+  // A Signal can't answer, so a refused prompt is only logged. `submit` reports it instead.
   setHandler(submitPrompt, (p) => {
-    if (problemWith(p) === undefined && !seen.includes(p.promptId)) enqueue(p);
+    const problem = problemWith(p) ?? (seen.includes(p.promptId) ? "already seen" : undefined);
+    if (problem === undefined) enqueue(p);
+    else log.warn("dropped a prompt sent as a signal", { promptId: p?.promptId, problem });
   });
   setHandler(
     submit,
@@ -357,12 +370,14 @@ export async function piSession(input: SessionInput): Promise<void> {
       },
     },
   );
+  // `moved` can be wrong when a prompt lands while the run drains to exit, and the run goes on.
+  // The client then asks again and gets this run's answer, so it costs one more call.
   setHandler(waitForQuiet, async () => {
     await condition(() => ending || (!running && queue.length === 0));
     return !running && queue.length === 0 ? { finished } : { moved: true };
   });
-  setHandler(interrupt, () => {
-    current?.cancel();
+  setHandler(interrupt, (target) => {
+    if (target?.promptId === undefined || target.promptId === running?.promptId) current?.cancel();
   });
   setHandler(turnState, () => ({ queued: queue.length, running, finished }));
 
@@ -436,7 +451,8 @@ export async function piSession(input: SessionInput): Promise<void> {
             sessionSeconds: sessionSecondsBefore() + (Date.now() - startedAt) / 1000,
             // For `runStep`, or for the model call of a stepped step.
             fence: fence(),
-            ...prompt,
+            promptId: prompt.promptId,
+            ...(step === 1 ? { text: prompt.text } : {}),
           };
           const result = await runTurnStep(input);
           // A result with nothing to say keeps what an earlier step reported. Reset, it could hand
@@ -485,10 +501,15 @@ export async function piSession(input: SessionInput): Promise<void> {
             seconds: options?.budget?.hardSeconds,
           });
         }
-      } else {
+      } else if (err instanceof TemporalFailure) {
         outcome = "failed";
-        error = err instanceof Error ? err.message : String(err);
+        error = err.message;
         log.warn("turn failed", { sessionId: id, promptId: prompt.promptId, error });
+      } else {
+        // A bug in this code, such as a `TypeError`. Thrown on, it fails the Workflow Task, and
+        // Temporal retries the task until a fixed Worker runs it. Caught, it would be in history
+        // for good as a failed turn.
+        throw err;
       }
     } finally {
       deadlineScope?.cancel();

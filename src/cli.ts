@@ -453,8 +453,11 @@ async function main() {
     case "stop": {
       const sessionId = parse(command, rest).word;
       if (!sessionId) throw new Error("stop wants a session id");
-      await interrupt(sessionId);
-      say(`interrupted ${sessionId}`);
+      say(
+        (await interrupt(sessionId))
+          ? `interrupted ${sessionId}`
+          : `${sessionId} has no turn running, so nothing was stopped`,
+      );
       return;
     }
     // Print the resolved configuration and any problems with it.

@@ -21,13 +21,13 @@ trap cleanup EXIT
 build="$(docker build -q -f docker/Dockerfile -t pi-temporal:l3 . 2>&1)" \
   || { echo "build failed:"; echo "$build"; exit 1; }
 
-# Mount this checkout's source. Mounts and /work survive the restart. /project is its own volume,
+# Mount this checkout's source. Mounts and the container's own files survive the restart. /project is its own volume,
 # so it can't be moved aside.
 docker run -d --name "$name" \
   -v "$PWD/src:/app/src:ro" \
   -v "$PWD/checks/same-container-restart.mts:/app/checks/same-container-restart.mts:ro" \
   -v /project \
-  -e PI_TEMPORAL_DATA=/work/data \
+  -e PI_TEMPORAL_DATA=/home/node/work/data \
   pi-temporal:l3 \
   node --import tsx checks/same-container-restart.mts >/dev/null \
   || { echo "the container did not start"; exit 1; }

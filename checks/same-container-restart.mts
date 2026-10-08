@@ -9,7 +9,7 @@ import { join } from "node:path";
 import * as worktree from "../src/tree/worktree.js";
 
 // The project is a volume, so it cannot be moved aside. A refused directory stays refused.
-const work = "/work";
+const work = "/home/node/work";
 const project = "/project";
 const sessionFile = join(work, "sessions", "restart.jsonl");
 const phase = join(work, "phase");

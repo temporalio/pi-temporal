@@ -35,7 +35,11 @@ ENV PI_TEMPORAL_WORKFLOW_BUNDLE=/app/dist/workflow-bundle.js
 ENV PI_SESSION_DIR=/sessions
 # Where tools run. Not shared: a project reaches another container only with the session.
 ENV PI_PROJECT_DIR=/project
-RUN mkdir -p /sessions /project
+RUN mkdir -p /sessions /project && chown node:node /sessions /project
+
+# Agent tools run as this user, so not as root. They can still read this process's keys, which
+# only a separate user or a sandbox prevents (`docs/guarantees.md`).
+USER node
 
 # Node as PID 1, with no npx wrapper to swallow the stop signal.
 CMD ["node", "--import", "tsx", "src/worker.ts"]

@@ -9,7 +9,8 @@ The Workflow tracks queued prompts and the current step. It also tracks spend ag
 The agent's session file keeps the conversation. Coding tasks can produce large tool output, so
 keeping that output in history would use Temporal's payload and history limits.
 
-History carries IDs and small results, plus prompt text and final answers. Prompts are capped at
+History carries IDs and small results, plus prompt text and final answers. Each step's input
+goes into history, so only the first step of a turn carries the prompt text. Prompts are capped at
 64K characters, and answers in history at 16K. The full answer stays in the session file. These
 payloads can still contain secrets. The codec described below can encrypt them.
 
@@ -28,11 +29,17 @@ exits when idle, it waits for every Update handler to finish, so no client is le
 
 A prompt is an Update-with-start (`submit`). The validator turns away an empty or oversized prompt
 before it reaches history, and the prompt id is the Update id, so a client that resends gets the
-first answer and the prompt runs once. The Update returns how many prompts are ahead.
+first answer and the prompt runs once. The Update returns how many prompts are ahead. The start
+sets `workflowIdConflictPolicy: "USE_EXISTING"`, so a running session takes the prompt. It also
+sets `workflowIdReusePolicy: "ALLOW_DUPLICATE"`, so a closed session, such as one after an idle
+exit, starts a new run under the same id.
 
-An Update needs a Worker to accept it. If none does within 10 seconds, the client sends the
-prompt as a Signal, which the server keeps until a Worker comes. The Workflow drops a Signal for a
-prompt it already has. `watch` waits on a `waitForQuiet` Update instead of polling a Query.
+Update-with-start alone is the plain pattern. The Signal fallback in `sendPrompt`
+(`src/core/client.ts`) is optional. It exists so a prompt still lands when no Worker is up. An
+Update needs a Worker to accept it. If none does within 10 seconds, the client sends the prompt as
+a Signal, which the server keeps until a Worker comes. A Signal can't answer, so the Workflow logs
+a refused prompt, bad or already seen, with `log.warn` and drops it. `submit` reports a refusal to
+the caller instead. `watch` waits on a `waitForQuiet` Update instead of polling a Query.
 
 ## A whole step by default, a unit per tool call as an option
 
@@ -54,6 +61,10 @@ same call when Temporal retries its Activity.
 A failure before the claim is safe to retry anywhere, and it's typed `FailedBeforeClaim`, so the
 Workflow may move the call to another queue. A failure after the claim is `FailedAfterClaim` and
 not retried, since every retry would only find the claim.
+
+Dispatch claims exist only in stepped mode. A whole-step `runStep` runs its tools inside one
+Activity and writes no claims. Its retry relies on the agent's `prepareStep`, which settles every
+call the earlier attempt left open as an unknown outcome and never runs it again.
 
 ## A fence token decides who may write the session file
 
@@ -81,18 +92,24 @@ running, so the step
 records what it has and goes on, and the lost host can't publish later.
 
 This is Temporal's worker-specific Task Queue pattern. You need it only when Activities depend on
-a host's local state.
+a host's local state. So a Worker polls a host queue only with `PI_TEMPORAL_SHIP_TREE=1`. With one
+shared project directory, any Worker can run any unit.
 
 ## Retries and timeouts per unit
 
 | unit | timeout | attempts | why |
 |---|---|---|---|
+| whole step, `runStep` | 30 minutes | 10 | the model call and its tools in one Activity, so one bound covers both |
 | model call | 10 minutes | 10 | a hung stream should end long before the step's cap. Most retries are refusals before the call, which cost nothing |
 | tool call, shared queue | `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` | 20 | failures before the claim, such as a host refusing the project |
 | tool call, host queue | same | 1 | a second attempt's queue timeout couldn't rule out the first still running |
 | seal | 30 minutes | 10, or 3 on a host queue | fenced and safe to repeat |
-| model call, tool call, seal | 120 minutes total, or a longer tool timeout | | a unit that keeps timing out can't hold the session for days |
-| model call, tool call, seal | 30-second heartbeat | | a Worker that died is found in seconds, not at the timeout |
+| `runStep`, model call, tool call, seal | 120 minutes total, or a longer tool timeout | | a unit that keeps timing out can't hold the session for days |
+| `runStep`, model call, tool call, seal | 30-second heartbeat | | a Worker that died is found in seconds. Heartbeats come from a timer, not from progress, so a hung call runs to its own timeout |
+| live turn, `runLocalTurn` | 24 hours | 3 | a whole agent run. The live turn's Workflow timeout of 24 hours bounds it too |
+| live model call | 10 minutes | 3 | as in Worker sessions, a hung stream ends long before the turn |
+| live tool call, live seal | 1 hour | 3 | a tool can run long, and the seal can run a provider retry and a compaction |
+| every live unit | 30-second heartbeat, 1-minute schedule-to-start | | nothing polls a dead `pi`'s queue, so the unit fails fast and the next `pi` to open the session resumes the turn |
 | retire, adopt a template | 5 and 30 minutes total | 3 and 10 | housekeeping, which must not hold a run open |
 
 The agent retries its provider on its own, inside the seal, and counts those retries in
@@ -106,14 +123,103 @@ tool and the model call, which end like a user stop in the agent. The recovery s
 what each tool reported instead of unknown outcomes. Cancellation reaches an Activity only with a
 heartbeat's answer, so Workers send heartbeats at least every 3 seconds.
 
-## No patch gates until there are running sessions
+## A Worker shutdown is not a stop
 
-`patched()` keeps old histories replaying after a change. This repo has none yet, so it has no
-patch gates. Instead, `checks/histories/` keeps a history of each kind of session run, and
-`replay-check` replays them all in CI. A change that breaks one would break running sessions on
-upgrade. Gate it with `patched()`, or ship it as a new Worker Deployment Version and let running
-sessions finish on the old one. A session reaches a new run at every idle exit and every
-Continue-As-New, which are the natural points to pick up new code.
+A deploy must not end turns. When a Worker shuts down, the SDK waits `shutdownGraceTime` and then
+cancels the Activities still running. The Activities tell this apart from a stop through
+`Context.cancellationDetails.workerShutdown`. They keep running until the process ends, so
+recovery treats it like a crash and the step retries on another Worker. A user stop still ends the
+call, and the seal records what it did.
+
+The standalone Worker sets `shutdownGraceTime` to 60 seconds by default, through
+`PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS`. Most model calls finish in that time, so a step isn't cut off
+and paid for twice. `docker/compose.yml` sets `stop_grace_period: 90s`, past the grace, so Docker
+doesn't kill the process first. `shutdown-check` shows the difference between the two cancels.
+
+## A bug fails the Workflow Task, not the turn
+
+`runTurn` catches only a `TemporalFailure`, such as an Activity failure or a cancellation, and
+records it as a failed turn. Any other error, such as a `TypeError` in Workflow code, is a bug.
+`runTurn` throws it on, so it fails the Workflow Task. Temporal retries the task until a Worker
+with fixed code runs it, and the session waits instead of losing the turn. Caught, the bug would
+stay in history as a failed turn. In your own Workflow, catch only the failures you mean to handle.
+
+## Tuning Workers
+
+A Worker runs at most `PI_TEMPORAL_MAX_ACTIVITIES` Activities at once on each queue it polls. The
+default is 16, and a host queue's poller gets its own 16. The SDK default is 100. That's too many
+here, since each tool is a process on the host and every model call uses one API key. The slot
+count is the bound on tool concurrency per host, so set it to what one host can run.
+
+Model calls and tools share one Task Queue, so `maxTaskQueueActivitiesPerSecond` would limit both.
+A team that needs a rate limit on model calls can put them on their own Task Queue and set the
+limit there.
+
+Workers send heartbeats at least every 3 seconds (`maxHeartbeatThrottleInterval`). The SDK would
+send them about every 24 seconds here, and a stop would reach a running tool that much later.
+
+## Worker Versioning, and `patched()` for long sessions
+
+Worker Versioning is opt-in. Set `PI_TEMPORAL_DEPLOYMENT` and `PI_TEMPORAL_BUILD_ID` together on
+the standalone Worker. Each build is then a Worker Deployment Version, and the server sends each
+Workflow Task to a version its run may use. Each Workflow names its own behavior.
+
+- `piSession` is `AUTO_UPGRADE`. A session lives for many turns. Pinned, it would keep its first
+  build's Workers alive for as long as it runs. The cost is that every change to `piSession` must
+  replay older histories, or sit behind `patched()`.
+- `piLocalTurn` is `PINNED`. A live turn is short and bound to one `pi` process, so it finishes
+  on the build that started it. A change to it never meets a history it can't replay.
+
+Use `PINNED` for a Workflow that ends in minutes or hours, and `AUTO_UPGRADE` for one that lives
+for days. A Workflow names its behavior only on a Worker in a deployment, because the server
+refuses a behavior from an unversioned Worker. The Workers inside `pi` don't read these
+variables, so they stay unversioned.
+
+To release a new build, follow these steps.
+
+1. Start Workers with the new `PI_TEMPORAL_BUILD_ID`, next to the old ones.
+2. Make the new build current. New runs, and `AUTO_UPGRADE` sessions at their next Workflow Task,
+   go to it. Pinned runs stay on the old build.
+
+   ```bash
+   temporal worker deployment set-current-version --deployment-name pi --build-id v2
+   ```
+
+   The server refuses while a Task Queue the old build polled has no poller in the new one.
+   Host queues are named per host, so new hosts leave the old names unpolled. Add
+   `--ignore-missing-task-queues` once the old hosts are gone for good.
+
+3. Drain the old build. Stop its Workers once
+   `temporal worker deployment describe-version --deployment-name pi --build-id v1` reports it
+   drained.
+
+A session that moves to the new build replays its history on the new code. Say a change adds an
+Activity call between turns. History from the old build has no such call there, so the replay
+fails. Gate the change with `patched()`, which is false for history written before the change.
+
+```ts
+import { patched } from "@temporalio/workflow";
+
+// In the session loop, between two turns.
+if (patched("snapshot-between-turns")) {
+  await snapshotSession({ sessionFile: file });
+}
+await runTurn(queue.shift()!);
+```
+
+Remove the gate in two more releases.
+
+1. Once no open run started before the gated build, replace `patched(...)` with
+   `deprecatePatch("snapshot-between-turns")` and call the Activity always. A session reaches a
+   new run at every idle exit and every Continue-As-New, so old runs end on their own.
+2. Once no open run started before the `deprecatePatch()` build, delete the `deprecatePatch()`
+   line.
+
+`checks/histories/` keeps a history of each kind of session run. `replay-kept-check` replays them
+with no server, and CI runs it as its own `replay` job. A history is kept once recorded and never
+recorded again, since each stands for runs that may still be open. A change that breaks one would
+break those runs on upgrade. `record-histories.mts` adds new ones next to the old.
+`versioning-check` runs a session on a versioned Worker and reads the behavior the server records.
 
 ## Observability
 

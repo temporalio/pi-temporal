@@ -30,6 +30,9 @@ results so a failure can be reproduced without a model call.
 `dispatch-check`, `stale-dispatch-check`, `seal-claim-check`, `result-recovery-check`,
 `compacted-prompt-check`, `spend-check`, `retire-seconds-check`, `quarantine-check`
 
+`shutdown-check` runs `runStep` under `MockActivityEnvironment`, the SDK's way to give an Activity
+a context with no Worker. It cancels the Activity once as a Worker shutdown and once as a stop.
+
 ## The Workflow with stub Activities, on a dev server
 
 These checks run a real Worker and Workflow with stub Activities. They cover prompt submission
@@ -38,6 +41,9 @@ and budgets, as well as routing and Continue-As-New.
 `step-loop-check`, `submit-check`, `budget-check`, `continue-as-new-check`, `workflow-init-check`,
 `local-turn-check`, `embedded-stop-check`, `codec-check`, `unschedule-check`, `cli-check`
 
+`versioning-check` runs a session on a Worker with Worker Versioning on. It makes a version
+current and reads the versioning behavior the server records for the run.
+
 ## Time skipping
 
 `time-skipping-check` uses `TestWorkflowEnvironment.createTimeSkipping()`, so an hour of idle time
@@ -45,8 +51,13 @@ passes in a moment. Use it for any timer path.
 
 ## Replay
 
-`replay-check` replays every history in `histories/` against the current code. A history that stops
-replaying means running sessions would break on upgrade. `record-histories.mts` records new ones.
+`replay-kept-check` replays every history in `histories/` against the current code, with no
+server. CI runs it as its own `replay` job. A history that stops replaying means running sessions
+would break on upgrade. Keep each history once it's recorded, and don't record it again.
+`record-histories.mts` adds new ones next to the old.
+
+`replay-check` needs a dev server. It covers only a history the current code writes, from a step
+whose host-queue tool failed after it started.
 
 ## Real processes, killed or paused
 

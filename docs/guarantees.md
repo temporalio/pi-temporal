@@ -27,9 +27,9 @@ Worker mode uses one `runStep` Activity per step by default. Live mode runs the 
 `runLocalTurn` Activity. With `PI_TEMPORAL_STEPPED=1`, the model call and seal each use an Activity,
 and every tool call gets its own Activity.
 
-Each Worker also polls its own host queue. In stepped mode, tool calls and the seal use the host
-queue of the Worker that made the model call, because they need its project directory. Work that
-provably never started there can move to the shared Task Queue.
+With `PI_TEMPORAL_SHIP_TREE=1`, each Worker also polls its own host queue. In stepped mode, tool
+calls and the seal use the host queue of the Worker that made the model call, because they need
+its project directory. Work that provably never started there can move to the shared Task Queue.
 
 ## The rules
 
@@ -97,10 +97,14 @@ model response.
 | The user stops a turn | In-memory results are sealed if the process lives. | A running tool or model call is stopped and reports it, the next unit doesn't start, and the step is sealed with what each tool reported. | `local-turn-check`, `seal-check`, `stepped-step-check` |
 | A turn overspends | No bound. | Soft budgets stop at a boundary. The hard deadline stops the running unit like a user stop. A command the tool started outside its own process may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
 | History grows | Step ceiling only. | Continue-As-New between turns. One huge turn can still hit limits. | `continue-as-new-check` |
-| A deploy changes what a step schedules | Not applicable | `replay-check` replays the kept histories, so CI catches it. Gate the change with `patched()`, or ship it as a new Worker Deployment Version. | `replay-check` |
+| A deploy stops a Worker | Not applicable | Running Activities get the shutdown grace. One still running after it is cancelled as a shutdown, not a stop. It keeps going until the process ends, and the step retries elsewhere like after a crash. | `shutdown-check` |
+| A deploy changes what a step schedules | Not applicable | `replay-kept-check` replays the kept histories, so CI catches it. Gate the change with `patched()`. With Worker Versioning, sessions move to the new build and live turns stay on theirs. | `replay-kept-check`, `replay-check`, `versioning-check` |
 
-A stop ends the running turn. Queued prompts still run. If no turn is running, the stop has no
-effect.
+A stop ends the running turn. Queued prompts still run. A stop names its turn, so a stop sent as
+one turn ends can't stop the next. The `interrupt` Signal takes `{ promptId }` and cancels only
+when that id matches the running turn, or when it names none. `cli.ts stop` asks `turnState`
+first and sends nothing when no turn runs. If no Worker answers within 3 seconds, it sends a stop
+that names no turn. `/background-stop` sends the task's prompt id.
 
 The model receives the unknown outcome and can inspect the effect before deciding what to do.
 There's no general resolver for arbitrary commands. A later model request is a new dispatch,
@@ -110,7 +114,16 @@ so the model can still choose to repeat an action.
 
 A prompt is an Update-with-start. The session refuses an empty prompt and runs a resent one once,
 by its prompt id. If no Worker accepts the Update within 10 seconds, the prompt goes as a Signal,
-which the server keeps until a Worker comes.
+which the server keeps until a Worker comes. A Signal can't answer, so the session logs a prompt it
+refuses there with `log.warn`.
+
+The session remembers the last 200 prompt ids and carries them across Continue-As-New. An idle
+exit forgets them, and the server's dedup by Update id is per run too. So a client retry that
+lands after an idle exit starts a new run, and the prompt runs again.
+
+A session's start options, `stepped`, `budget`, and `toolTimeoutMinutes`, also carry across
+Continue-As-New. An operator's change to them reaches a busy session only when it starts fresh
+after an idle exit.
 
 `watch` tails the session file and waits on a `waitForQuiet` Update, which returns once nothing
 is running or queued. If no Worker can answer, the follower keeps waiting through the restart. It
@@ -170,7 +183,8 @@ session's tree store, salvage included.
 - A tool still running on a Worker inside `pi` when you quit. `pi` waits a few seconds, then
   abandons it, and its outcome is reported unknown.
 - Credentials kept from tools. A Worker drops the Temporal and model keys from the environment
-  its tools inherit, but the tools run as the same user. They can read the Worker's original
+  its tools inherit, but the tools run as the same user. The Docker image runs the Worker as the
+  `node` user, so that user isn't root. They can read the Worker's original
   environment from `/proc/<pid>/environ`. They can also read key files or `temporal.toml`. Inside
   `pi`, the model key stays in the environment because `pi` needs it. Keeping credentials from
   the agent requires a separate user or another isolation boundary, such as a sandbox.

@@ -16,12 +16,19 @@ import { type Config, connectionOptions, fromEnv, sessionFileFor } from "../conf
 import { dataConverterFor } from "./codec.js";
 import {
   DUPLICATE_PROMPT,
+  QUERIES,
   SIGNALS,
   UPDATES,
   WORKFLOW_TYPE,
   workflowId,
 } from "./protocol.js";
-import type { PromptInput, SessionTurnOptions, Submitted } from "./protocol.js";
+import type {
+  InterruptInput,
+  PromptInput,
+  SessionTurnOptions,
+  Submitted,
+  TurnState,
+} from "./protocol.js";
 import type { piSession } from "./workflow.js";
 
 type Session = typeof piSession;
@@ -34,6 +41,8 @@ const withCodec = (cfg: Config) => {
 // An Update needs a Worker to accept it. Past this, the prompt goes as a Signal, which the server
 // keeps until a Worker comes.
 const ACCEPT_MS = 10_000;
+// A Query needs a Worker to answer. Past this, a stop goes out without naming its turn.
+const QUERY_MS = 3_000;
 
 /** Every client here is built by this, so the CLI and the extension follow sessions alike. */
 export async function openClient(cfg: Config = fromEnv()) {
@@ -91,7 +100,10 @@ export async function sendPrompt(
         updateId: prompt.promptId,
         startWorkflowOperation: new WithStartWorkflowOperation<Session>(WORKFLOW_TYPE, {
           ...start,
+          // A running session takes the prompt. A closed one, such as after an idle exit, starts
+          // a new run under the same id. That's also the default, set here so it's on record.
           workflowIdConflictPolicy: "USE_EXISTING",
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
         }),
       }),
     );
@@ -139,10 +151,22 @@ export async function sessionExists(
   }
 }
 
-export async function interrupt(sessionId: string) {
+/**
+ * Stop the turn that's running now. Names it, so a stop that lands after that turn ended can't
+ * stop the next one. Without a Worker to say which turn runs, the stop goes untargeted. Returns
+ * false when the session said nothing was running, so nothing was sent.
+ */
+export async function interrupt(sessionId: string): Promise<boolean> {
   const { client, connection } = await connect();
   try {
-    await client.workflow.getHandle(workflowId(sessionId)).signal(SIGNALS.interrupt);
+    const handle = client.workflow.getHandle(workflowId(sessionId));
+    const state = await client
+      .withDeadline(Date.now() + QUERY_MS, () => handle.query<TurnState>(QUERIES.turnState))
+      .catch(() => undefined);
+    if (state && !state.running) return false;
+    const target: InterruptInput = { promptId: state?.running?.promptId };
+    await handle.signal(SIGNALS.interrupt, target);
+    return true;
   } finally {
     await connection.close();
   }
