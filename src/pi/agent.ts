@@ -92,23 +92,15 @@ function wrap(session: PiSession): AgentSession {
     prepareStep: () => session.prepareStep(),
     hasPrompt: (promptId) => promptRecorded(session, promptId),
     recordPrompt: (promptId, text) => session.recordPrompt(`${text}${marker(promptId)}`),
+    // A stop aborts the call like a user stop, so Pi records an aborted response and the turn
+    // ends as stopped. A unit already stopped asks the model nothing, and isn't billed.
     async modelCall(signal) {
-      // A unit already stopped asks the model nothing. Pi clears a stop when a call starts, so an
-      // abort sent before the call would be lost and the call billed anyway.
-      if (signal?.aborted) throw signal.reason ?? new Error("the model call was stopped");
-      // Aborted like a user stop. Pi records an aborted response, and the turn ends as stopped.
-      const stop = () => void session.abort().catch(() => {});
-      signal?.addEventListener("abort", stop, { once: true });
-      try {
-        const outcome = await session.modelCall();
-        return {
-          toolCalls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
-          sequential: outcome.sequential,
-          ended: outcome.ended,
-        };
-      } finally {
-        signal?.removeEventListener("abort", stop);
-      }
+      const outcome = await session.modelCall({ signal });
+      return {
+        toolCalls: outcome.toolCalls.map((call) => ({ id: call.id, name: call.name })),
+        sequential: outcome.sequential,
+        ended: outcome.ended,
+      };
     },
     runToolCall: (callId, signal) => session.runToolCall(callId, { signal }),
     async sealStep(outcomes, { expectCalls, agentState, postRun }) {

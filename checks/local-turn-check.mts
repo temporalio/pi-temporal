@@ -208,6 +208,31 @@ async function main() {
     check("a retried model call does not record the prompt twice", records === 1, seen);
   }
 
+  // A cancelled model call Activity must stop the provider request, not leave it running billed.
+  {
+    const turnId = randomUUID();
+    const { turn } = fakeTurn();
+    let stopped = false;
+    turn.steps.modelCall = async (options) => {
+      await new Promise<void>((resolve) => {
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+        setTimeout(resolve, 2_000);
+      });
+      stopped = options?.signal?.aborted === true;
+      return { toolCalls: [], sequential: false, ended: true };
+    };
+    live.set(turnId, turn);
+    const activities = makeLocalTurnActivities(live);
+    const env = attempt(1);
+    setTimeout(() => env.cancel(), 50);
+    try {
+      await env.run(activities.runLocalModelCall, { turnId, step: 1 }).catch(() => undefined);
+    } finally {
+      live.delete(turnId);
+    }
+    check("a cancelled live model call gets the stop", stopped, { stopped });
+  }
+
   // A retry after a lost completion joins the attempt that ran, so nothing runs twice: no second
   // billed model call, no tool acting twice, no step sealed twice. Two at once stand in for a
   // retry that overlaps an attempt still running.

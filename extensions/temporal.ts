@@ -318,8 +318,9 @@ export default function (pi: ExtensionAPI) {
         record: () => ranHere(() => turn.steps.record()),
         // Not wrapped. Checking for an interrupt doesn't run the turn.
         interrupted: () => turn.steps.interrupted(),
-        modelCall: () => ranHere(() => turn.steps.modelCall()),
-        // The options carry the Activity's abort signal, so a stop reaches the running tool.
+        // The options carry the Activity's abort signal, so a stop reaches the running model call
+        // or tool.
+        modelCall: (options) => ranHere(() => turn.steps.modelCall(options)),
         runToolCall: (id, options) => ranHere(() => turn.steps.runToolCall(id, options)),
         sealStep: (results, options) => ranHere(() => turn.steps.sealStep(results, options)),
       },

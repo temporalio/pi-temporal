@@ -110,7 +110,8 @@ export function makeLocalTurnActivities(live: LiveTurns) {
         return { calls: [], sequential: false, ended: true, interrupted: true };
       }
 
-      const model = await turn.steps.modelCall();
+      // A cancelled Activity stops the provider request, so a stopped turn isn't billed on.
+      const model = await turn.steps.modelCall(cancellation());
       return {
         calls: model.toolCalls.map((call) => ({ id: call.id, name: call.name })),
         sequential: model.sequential,
