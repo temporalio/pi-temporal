@@ -1,6 +1,6 @@
 // Pi's session format and retry state stay in this adapter so the core can serve other agents.
 
-import { mkdir } from "node:fs/promises";
+import { chmod, mkdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { ApplicationFailure } from "@temporalio/activity";
 import {
@@ -155,13 +155,23 @@ function wrap(session: PiSession): AgentSession {
   };
 }
 
+/**
+ * The session directory, owner only. The session holds the conversation, tool output included.
+ * `mkdir` sets the mode only on a directory it creates, so one made before this rule is tightened
+ * too. Only one this user owns. A directory shared on purpose is the operator's to manage.
+ */
+async function privateDir(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const info = await stat(dir);
+  if (info.uid === process.getuid?.() && (info.mode & 0o077) !== 0) await chmod(dir, 0o700);
+}
+
 export function piAgent(opts: PiOptions, dependencies: PiDependencies = {}): Agent {
   const provider = opts.provider ?? "openai";
 
   async function openSession(sessionFile: string, guard: () => void): Promise<PiSession> {
     if (dependencies.openSession) return dependencies.openSession(sessionFile, guard);
-    // Owner only. The session holds the conversation, tool output included.
-    await mkdir(dirname(sessionFile), { recursive: true, mode: 0o700 });
+    await privateDir(dirname(sessionFile));
     const sessionManager = SessionManager.open(sessionFile);
     sessionManager.setWriteGuard(guard);
 
@@ -199,7 +209,8 @@ export function piAgent(opts: PiOptions, dependencies: PiDependencies = {}): Age
       // A fake session in a check stands in for the record too.
       const record = dependencies.openSession
         ? recordOf(await dependencies.openSession(sessionFile, guard))
-        : (() => {
+        : await (async () => {
+            await privateDir(dirname(sessionFile));
             const manager = SessionManager.open(sessionFile);
             manager.setWriteGuard(guard);
             return manager as unknown as Record;
