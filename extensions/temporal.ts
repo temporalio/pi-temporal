@@ -4,7 +4,7 @@
 //
 // `/background` tasks survive Pi exit because a Worker owns their sessions. The embedded Worker
 // needs the Pi fork build. It's off by default in the `fleet` profile, where the fleet's Workers
-// own the queue. `PI_TEMPORAL_EMBEDDED_WORKER` set to `1` or `0` overrides that.
+// own the queue. `PI_TEMPORAL_EMBEDDED_WORKER` set on or off overrides that.
 
 import type {
   ExtensionAPI,
@@ -50,6 +50,7 @@ import {
   dropFromEnv,
   fromEnv,
   modelApiKey,
+  onOff,
   preflight,
   sessionFileFor,
   TEMPORAL_CREDENTIAL_VARS,
@@ -83,13 +84,13 @@ type Env = Config & {
 // session directory. The rest are extension-only.
 const env = (): Env => {
   const shared = fromEnv();
-  const embedded = process.env.PI_TEMPORAL_EMBEDDED_WORKER;
   return {
     ...shared,
     // Off by default in the fleet profile. On the fleet's queue, this pi would take other
-    // sessions' work and run it with the user's key in the user's directory.
-    embeddedWorker: embedded === undefined ? shared.profile !== "fleet" : embedded !== "0",
-    liveTurns: process.env.PI_TEMPORAL_LIVE_TURNS !== "0",
+    // sessions' work and run it with the user's key in the user's directory. Read like every
+    // other switch, so `false` means off and a typo is refused.
+    embeddedWorker: onOff("PI_TEMPORAL_EMBEDDED_WORKER", shared.profile !== "fleet"),
+    liveTurns: onOff("PI_TEMPORAL_LIVE_TURNS", true),
     provider: process.env.PI_TEMPORAL_PROVIDER,
     modelHint: process.env.PI_MODEL,
   };

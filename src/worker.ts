@@ -76,7 +76,7 @@ async function main() {
   ]);
 
   const tracing = cfg.tracing ? startTracing("pi-temporal-worker") : undefined;
-  const { run } = await createSessionWorker({
+  const { run, stop } = await createSessionWorker({
     address: cfg.address,
     connect: connectionOptions(cfg),
     namespace: cfg.namespace,
@@ -106,7 +106,18 @@ async function main() {
   console.log("pi-temporal worker");
   for (const [name, value] of Object.entries(describe(cfg))) console.log(`  ${name}: ${value}`);
   console.log(`  project: ${projectDir}`);
-  await run();
+  try {
+    await run();
+  } catch (err) {
+    // One poller died, but the other may still be running Activities. Let them finish within
+    // the grace, so they end here instead of waiting out a heartbeat timeout elsewhere. Bounded,
+    // since Activities don't stop for a shutdown and a long tool would hold the exit.
+    await Promise.race([
+      stop().catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, cfg.shutdownGrace + 10_000).unref()),
+    ]);
+    throw err;
+  }
   // The Worker drained. Send the spans still buffered before the process ends.
   await tracing?.shutdown();
 }
