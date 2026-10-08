@@ -49,6 +49,7 @@ let started: Tracing | undefined;
  * headers when `OTEL_PROPAGATORS` asks, and its Jaeger reader can crash on a malformed one.
  */
 export function registerTracing(resource: Resource, spanProcessor: SpanProcessor) {
+  // In the constructor. `addSpanProcessor` is deprecated from 1.30 on and gone in 2.x.
   const provider = new BasicTracerProvider({ resource, spanProcessors: [spanProcessor] });
   provider.register({
     contextManager: new AsyncLocalStorageContextManager().enable(),
