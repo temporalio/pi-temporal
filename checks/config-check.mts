@@ -49,3 +49,24 @@ assert.equal(connectionOptions(standard).apiKey, "standard-key");
 process.env.PI_TEMPORAL_API_KEY = "ours";
 assert.equal(connectionOptions(fromEnv()).apiKey, "ours");
 console.log("PASS the standard Temporal settings apply, under the PI_TEMPORAL ones");
+
+// A profile's TLS settings stay when an API key or our certificate pair is added on top.
+delete process.env.PI_TEMPORAL_API_KEY;
+process.env.TEMPORAL_TLS_SERVER_NAME = "tls.example";
+process.env.PI_TEMPORAL_API_KEY = "ours";
+const named = connectionOptions(fromEnv()).tls as { serverNameOverride?: string } | boolean;
+assert.equal(typeof named === "object" && named.serverNameOverride, "tls.example");
+delete process.env.TEMPORAL_TLS_SERVER_NAME;
+console.log("PASS a profile's TLS settings stay under an API key");
+
+// gRPC headers from the standard config can carry credentials, so tools don't get them either.
+process.env.TEMPORAL_GRPC_META_AUTHORIZATION = "Bearer secret";
+dropFromEnv([]);
+assert.equal(process.env.TEMPORAL_GRPC_META_AUTHORIZATION, undefined);
+console.log("PASS gRPC headers are dropped with the credentials");
+
+// The standard config's certificate without its key is refused like ours.
+process.env.TEMPORAL_TLS_CLIENT_CERT_DATA = "not a real certificate";
+assert.ok(preflight(fromEnv()).some((problem) => /come as a pair/.test(problem)));
+delete process.env.TEMPORAL_TLS_CLIENT_CERT_DATA;
+console.log("PASS half the standard certificate pair is refused");

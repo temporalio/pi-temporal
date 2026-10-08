@@ -1,5 +1,8 @@
 # What survives, and how we know
 
+[architecture.md](architecture.md) defines the words used here: turn, step, seal, dispatch
+claim, fence token, host queue.
+
 A crash can leave a tool’s effect on disk without a saved result. Recovery must account for that
 gap before another Worker continues. This page describes each mode’s recovery behavior and links
 it to a check. Each check covers its named scenario, not every possible interleaving.
@@ -91,9 +94,12 @@ model response.
 | Two attempts overlap | The agent admits one unit at a time. | The fence and write guard refuse a stale transcript write. They don’t fence a tool’s effects. | `fence-check`, `lease-check`, `lock-gap-check`, `stall-check` |
 | A stale dispatch wakes after cleanup | No claims in this mode. | The claim is still there, so it isn’t admitted. | `stale-dispatch-check`, `dispatch-check` |
 | The user stops a turn | In-memory results are sealed if the process lives. | A running tool or model call is stopped and reports it, the next unit doesn’t start, and the step is sealed with what each tool reported. | `local-turn-check`, `seal-check`, `stepped-step-check` |
-| A turn overspends | No bound. | Soft budgets stop at a boundary. The hard deadline cancels waiting. External commands may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
+| A turn overspends | No bound. | Soft budgets stop at a boundary. The hard deadline stops the running unit like a user stop. A command the tool started outside its own process may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
 | History grows | Step ceiling only. | Continue-As-New between turns. One huge turn can still hit limits. | `continue-as-new-check` |
-| A deploy changes what a step schedules | Not applicable | Running sessions break on replay. Gate the change with `patched()`, or ship it as a new Worker Deployment Version. | `replay-check` |
+| A deploy changes what a step schedules | Not applicable | `replay-check` replays the kept histories, so CI catches it. Gate the change with `patched()`, or ship it as a new Worker Deployment Version. | `replay-check` |
+
+A stop ends the turn that's running. Prompts already queued still run, and a stop with no turn
+running does nothing.
 
 The model receives the unknown outcome and can inspect the effect before deciding what to do.
 There’s no general resolver for arbitrary commands. A later model request is a new dispatch,
