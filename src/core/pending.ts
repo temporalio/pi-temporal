@@ -136,7 +136,12 @@ export async function forgetResults(
 }
 
 /** Drop every result a session kept, from this turn and any before it. Their claims stay. */
-export async function sweepResults(sessionFile: string): Promise<void> {
+export async function sweepResults(
+  sessionFile: string,
+  // Called before each step's delete. A caller under a lease passes a check that throws once the
+  // lease is gone, so a stalled sweep can't delete a newer session's results.
+  beforeDelete: () => Promise<void> = async () => {},
+): Promise<void> {
   let turns: string[];
   try {
     turns = await readdir(rootFor(sessionFile));
@@ -146,6 +151,7 @@ export async function sweepResults(sessionFile: string): Promise<void> {
   for (const turn of turns) {
     const dir = join(rootFor(sessionFile), turn);
     for (const step of await readdir(dir).catch(() => [] as string[])) {
+      await beforeDelete();
       await dropResults(join(dir, step));
     }
   }
