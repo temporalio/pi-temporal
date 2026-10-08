@@ -1,7 +1,8 @@
 // Holds that a writer that stalls after its lease check can't take the session back to its older
 // tree. Writer A stops right before it names its tip. B takes the lease over and publishes two
 // steps. When A wakes up, the tip must stay B's, and a new host must restore B's newest files.
-// Also when B's second step compacts the store and frees A's number.
+// Also when B's second step compacts the store and frees A's number, and when the session is
+// forgotten while A waits.
 //
 // Usage: npx tsx checks/stale-tip-check.mts
 
@@ -24,6 +25,7 @@ function barrier() {
 }
 
 const originalWrite = fs.writeFile;
+const originalMkdir = fs.mkdir;
 const originalNow = Date.now;
 
 /**
@@ -107,13 +109,76 @@ async function stalledWriter(name: string, steps: number) {
   console.log(`PASS ${name}: a new host and the new holder both keep the newest files`);
 }
 
+/**
+ * A stalls on its claim while the session is forgotten and then sent again. A's late tip must not
+ * bring back the forgotten tree, and must not get in the way of the new one.
+ */
+async function stalledAcrossForget() {
+  const name = "forgotten";
+  const sessionFile = join(root, "sessions", `${name}.jsonl`);
+  const project = (host: string) => join(root, name, host, "project");
+  const asHost = (host: string) => {
+    process.env.PI_TEMPORAL_DATA = join(root, name, host, "data");
+  };
+  for (const host of ["a", "b", "c"]) await fs.mkdir(project(host), { recursive: true });
+  asHost("a");
+  await fs.writeFile(join(project("a"), "old.txt"), "one\n");
+  await worktree.capture(project("a"), sessionFile, { seed: true });
+
+  const paused = barrier();
+  const resume = barrier();
+  let stalled = false;
+  // Right after the lease check, before anything for the tip exists.
+  fs.mkdir = (async (...args: Parameters<typeof fs.mkdir>) => {
+    if (!stalled && String(args[0]).endsWith(join(".tree", "tips"))) {
+      stalled = true;
+      paused.release();
+      await resume.promise;
+    }
+    return originalMkdir(...args);
+  }) as typeof fs.mkdir;
+  syncBuiltinESMExports();
+  await fs.writeFile(join(project("a"), "old.txt"), "two\n");
+  const late = worktree.capture(project("a"), sessionFile).then(
+    () => undefined,
+    (err: unknown) => err,
+  );
+  await paused.promise;
+
+  Date.now = () => originalNow() + 5 * 60_000;
+  try {
+    await worktree.forget(sessionFile);
+  } finally {
+    Date.now = originalNow;
+  }
+  resume.release();
+  await late;
+  fs.mkdir = originalMkdir;
+  syncBuiltinESMExports();
+  assert.equal(await worktree.established(sessionFile), false);
+  console.log("PASS a late tip does not bring back a forgotten session");
+
+  asHost("b");
+  await fs.writeFile(join(project("b"), "new.txt"), "fresh\n");
+  await worktree.capture(project("b"), sessionFile, { seed: true });
+  await fs.writeFile(join(project("b"), "new.txt"), "fresh again\n");
+  await worktree.capture(project("b"), sessionFile);
+  asHost("c");
+  await worktree.ensure(project("c"), sessionFile);
+  assert.equal(await read(join(project("c"), "new.txt")), "fresh again\n");
+  assert.equal(await read(join(project("c"), "old.txt")), undefined);
+  console.log("PASS and the project sent again restores on a new host");
+}
+
 try {
   await fs.mkdir(join(root, "sessions"), { recursive: true });
+  await stalledAcrossForget();
   await stalledWriter("plain", 0);
   // A ends at 38 and stalls on 39. B publishes 39, then the restart at 40.
   await stalledWriter("compacted", 37);
 } finally {
   fs.writeFile = originalWrite;
+  fs.mkdir = originalMkdir;
   syncBuiltinESMExports();
   Date.now = originalNow;
   await fs.rm(root, { recursive: true, force: true });

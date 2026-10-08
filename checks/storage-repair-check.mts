@@ -114,19 +114,7 @@ async function adoptedAfterForget() {
   const file = session("adopted");
   await seed("adopt-seed", template, "live session\n");
   await worktree.forget(file);
-  const marker = `${file}.tree.forgotten.json`;
-  const originalRm = fs.rm;
-  fs.rm = async (path, opts) => {
-    if (path === marker) throw new Error("injected failure after establishment");
-    return originalRm(path, opts);
-  };
-  syncBuiltinESMExports();
-  try {
-    await assert.rejects(worktree.adopt(template, file), /injected failure/);
-  } finally {
-    fs.rm = originalRm;
-    syncBuiltinESMExports();
-  }
+  assert.equal(await worktree.adopt(template, file), true);
   assert.equal(await worktree.established(file), true);
   asHost("adopt-worker");
   await worktree.ensure(project("adopt-worker"), file);
