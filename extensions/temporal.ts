@@ -35,7 +35,7 @@ import type {
 } from "../src/protocol.js";
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 import { openClient, sendPrompt, sessionExists } from "../src/client.js";
 import {
   clientProblems,
