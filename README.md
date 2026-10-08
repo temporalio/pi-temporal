@@ -232,10 +232,18 @@ it must point at a commit on `main`. The release carries generated notes and the
 with its checksum, built after the kept histories replay. A tag with a pre-release part is
 published as a pre-release.
 
+`package.json` is at `0.1.0`, so the first release only needs its tag.
+
 ```shell
-npm version 0.1.0 --no-git-tag-version   # then merge the bump to main
 git tag v0.1.0 origin/main
 git push origin v0.1.0
+```
+
+A later release bumps the version first. Merge the bump to `main`, then tag that commit the same
+way.
+
+```shell
+npm version 0.2.0 --no-git-tag-version
 ```
 
 ## Prior art

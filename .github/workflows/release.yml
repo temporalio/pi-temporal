@@ -2,6 +2,10 @@ name: release
 # A pushed tag such as `v1.2.3` or `v1.2.3-rc.1` becomes a GitHub release. The glob below only
 # narrows which tags start a run. `scripts/release-tag.mts` holds the real rules, and a tag that
 # breaks them fails before anything is published.
+#
+# Two jobs, so the repository's own code never runs with write access. `verify` runs it read-only,
+# and only after the tag proves to be on `main`. `publish` holds the write token and runs nothing
+# from the repository. It only uploads what `verify` built.
 on:
   push:
     tags: ["v[0-9]*.[0-9]*.[0-9]*"]
@@ -12,16 +16,25 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
-    permissions:
-      # To create the release. Nothing else in this job writes.
-      contents: write
+    outputs:
+      prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           # The full history, to check that the tagged commit is on `main`.
           fetch-depth: 0
+          # No token left in the checkout for the steps below to find.
+          persist-credentials: false
+      # First, with git only. A tag on a branch that never merged would otherwise get its own
+      # `package.json` scripts run by `npm ci`.
+      - name: Check the tagged commit is on main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "$GITHUB_REF_NAME points at $GITHUB_SHA, which isn't on main"
+            exit 1
+          }
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: "22"
@@ -32,14 +45,6 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: npx tsx scripts/release-tag.mts "$TAG" >> "$GITHUB_OUTPUT"
-      # A tag on a branch that never merged would release code no one reviewed.
-      - name: Check the tagged commit is on main
-        run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
-            echo "$GITHUB_REF_NAME points at $GITHUB_SHA, which isn't on main"
-            exit 1
-          }
       # The release ships a Workflow bundle, so it must replay what running sessions recorded.
       - run: npx tsx checks/replay-kept-check.mts
       - name: Build the Workflow bundle
@@ -47,11 +52,30 @@ jobs:
           npm run bundle
           cd dist
           sha256sum workflow-bundle.js > SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/workflow-bundle.js
+            dist/SHA256SUMS
+          if-no-files-found: error
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      # To create the release. This job checks out nothing and runs no repository code.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
         run: |
           # A re-run after a failed upload replaces the assets instead of failing on the release.
           if gh release view "$TAG" >/dev/null 2>&1; then
