@@ -6,7 +6,7 @@
 // The core Activities over the echo agent, under `MockActivityEnvironment`. No server and no model
 // key. Usage: npx tsx checks/session-root-check.mts
 
-import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationFailure } from "@temporalio/common";
@@ -75,6 +75,26 @@ try {
     () => false,
   );
   check("and nothing was written where a link led", !leaked);
+
+  // A root the file system can't answer for, as from a lost mount, isn't a bad path. The attempt
+  // fails and is retried, and the next one goes through once the root is back.
+  const retried = (err: unknown) =>
+    err instanceof Error && !(err instanceof ApplicationFailure && err.nonRetryable);
+  await chmod(root, 0o600);
+  const unreadable = await modelCall(join(sessions, "a.jsonl"));
+  await chmod(root, 0o700);
+  check("a root that can't be read is retried", retried(unreadable), String(unreadable));
+  await rename(sessions, `${sessions}.away`);
+  const gone = await modelCall(join(sessions, "a.jsonl"));
+  const remade = await stat(sessions).then(
+    () => true,
+    () => false,
+  );
+  await rename(`${sessions}.away`, sessions);
+  check("and so is a root that is gone", retried(gone), String(gone));
+  check("which isn't made again on a local disk", !remade);
+  const back = await modelCall(join(sessions, "a.jsonl"));
+  check("and the root takes its files again once it's back", back === undefined, String(back));
 
   // The directory reached through a link, as macOS's /var is /private/var, still takes its files
   // by either path.

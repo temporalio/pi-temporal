@@ -9,7 +9,7 @@
 //   the claim reports an unknown outcome rather than run the tool twice.
 // - A tool call keeps its result beside the session, and only the seal writes results in.
 
-import { lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { ApplicationFailure, Context } from "@temporalio/activity";
@@ -123,6 +123,8 @@ export interface CoreActivityOptions {
 
 // The session file, then the claim, fence and tree directories the core keeps beside it.
 const SIBLINGS = ["", ".pending", ".fence", ".tree"];
+// Errors that say the path itself leads nowhere. The same input gets them on every attempt.
+const PATH_ERRORS = new Set(["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]);
 
 export function makeCoreActivities(options: CoreActivityOptions) {
   const activities = makeUncheckedActivities(options);
@@ -136,11 +138,20 @@ export function makeCoreActivities(options: CoreActivityOptions) {
   // resolve it, so a `..` after a link goes where the link goes.
   const direct = (path: string) => {
     if (!/^[^/\\]+\.jsonl$/.test(basename(path))) return false;
+    let parent: string;
     try {
-      if (realpathSync(dirname(path)) !== root) return false;
-    } catch {
+      parent = realpathSync(dirname(path));
+    } catch (err) {
+      // Only an answer about the path refuses it. Any other error, as an EACCES from a lost
+      // mount, fails the attempt so it's retried.
+      if (!PATH_ERRORS.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
+      // A root gone under a running Worker is more likely a lost mount than a fresh install.
+      // Making it again would start sessions on a local disk where no other Worker sees them,
+      // so the attempt fails until the root is back.
+      if (!existsSync(root)) throw new Error(`the session directory ${sessionRoot} is gone`);
       return false;
     }
+    if (parent !== root) return false;
     // The session and what the core keeps beside it must be real files in the root. A link
     // there would send its writes elsewhere. Input can't make one, but anything that writes the
     // root can, as a tool on any host of a shared session directory. The check runs before the
