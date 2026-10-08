@@ -12,7 +12,7 @@ These checks run logic that needs no Temporal server.
 
 `take-fence-check`, `pending-check`, `lease-check`, `lease-recovery-check`, `lock-gap-check`,
 `stall-check`, `session-id-check`, `config-check`, `stale-tip-check`, `worktree-check`,
-`storage-repair-check`, `liveness-linux-check`
+`storage-repair-check`, `liveness-linux-check`, `release-tag-check`
 
 ## The step driver with injected fakes, no server
 

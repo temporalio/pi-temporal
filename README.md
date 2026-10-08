@@ -231,6 +231,32 @@ Temporal server. CI runs them and `docker/restart-check.sh`. The scripts in `doc
 separate Worker containers and NFS storage. [checks/README.md](checks/README.md) groups the checks
 by how they test, so you can find examples for your own agent.
 
+## Releasing
+
+A tag `v<major>.<minor>.<patch>`, with an optional pre-release such as `-rc.1`, becomes a GitHub
+release (`.github/workflows/release.yml`). The tag must match the `version` in `package.json`, and
+it must point at a commit on `main`. The release carries generated notes and the Workflow bundle
+with its checksum, built after the kept histories replay. A tag with a pre-release part is
+published as a pre-release.
+
+The workflow's checks stop mistakes, not someone who means harm. GitHub runs the workflow as the
+tagged commit has it. So protect `v*` tags with a ruleset that lets only release maintainers
+create, move or delete them.
+
+`package.json` is at `0.1.0`, so the first release only needs its tag.
+
+```shell
+git tag v0.1.0 origin/main
+git push origin v0.1.0
+```
+
+A later release bumps the version first. Merge the bump to `main`, then tag that commit the same
+way.
+
+```shell
+npm version 0.2.0 --no-git-tag-version
+```
+
 ## Prior art
 
 [osolmaz/pi-workflows](https://github.com/osolmaz/pi-workflows) makes user-defined workflow

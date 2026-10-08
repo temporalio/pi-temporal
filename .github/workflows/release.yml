@@ -1,0 +1,104 @@
+name: release
+# A pushed tag such as `v1.2.3` or `v1.2.3-rc.1` becomes a GitHub release. The glob below only
+# narrows which tags start a run. `scripts/release-tag.mts` holds the real rules, and a tag that
+# breaks them fails before anything is published.
+#
+# Two jobs, so the repository's own code never runs with write access. `verify` runs it read-only,
+# and only after the tag proves to be on `main`. `publish` holds the write token and runs nothing
+# from the repository. It only uploads what `verify` built.
+#
+# These checks stop mistakes, such as a tag on an unmerged branch. They can't stop someone who
+# means harm, since GitHub runs this file as the tagged commit has it, and anyone who can push
+# could push a workflow of their own anyway. Only a tag ruleset that lets release maintainers
+# alone create, move or delete `v*` tags does that.
+on:
+  push:
+    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+permissions:
+  contents: read
+# One run per tag, so a quick re-push can't race the first run into two releases.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      # The commit this job checked and built. `publish` refuses to release anything else.
+      commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # The full history, to check that the tagged commit is on `main`.
+          fetch-depth: 0
+          # No token left in the checkout for the steps below to find.
+          persist-credentials: false
+      # First, with git only. A tag on a branch that never merged would otherwise get its own
+      # `package.json` scripts run by `npm ci`.
+      - name: Check the tagged commit is on main
+        id: commit
+        run: |
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "$GITHUB_REF_NAME points at $GITHUB_SHA, which isn't on main"
+            exit 1
+          }
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Check the tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: npx tsx scripts/release-tag.mts "$TAG" >> "$GITHUB_OUTPUT"
+      # The release ships a Workflow bundle, so it must replay what running sessions recorded.
+      - run: npx tsx checks/replay-kept-check.mts
+      - name: Build the Workflow bundle
+        run: |
+          npm run bundle
+          cd dist
+          sha256sum workflow-bundle.js > SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/workflow-bundle.js
+            dist/SHA256SUMS
+          if-no-files-found: error
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      # To create the release. This job checks out nothing and runs no repository code.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+          VERIFIED: ${{ needs.verify.outputs.commit }}
+        run: |
+          # The tag can move while `verify` runs. Releasing it then would pair the new commit with
+          # a bundle built from the old one, so the tag must still name the commit that was built.
+          current="$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)"
+          if [ "$current" != "$VERIFIED" ]; then
+            echo "$TAG now names $current, but $VERIFIED was the commit checked and built"
+            exit 1
+          fi
+          # A re-run after a failed upload replaces the assets instead of failing on the release.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/workflow-bundle.js dist/SHA256SUMS --clobber
+            exit 0
+          fi
+          flags=(--verify-tag --generate-notes --title "$TAG")
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" dist/workflow-bundle.js dist/SHA256SUMS
