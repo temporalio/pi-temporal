@@ -52,6 +52,27 @@ const shown = (value: unknown) =>
   typeof value === "string" ? JSON.stringify(value) : String(value);
 
 /**
+ * What's wrong with a duration, or undefined. The env and every client use this one rule, so a
+ * value one of them takes, the other takes too.
+ */
+export const durationProblem = (value: unknown): string | undefined => {
+  // A bare number parses as milliseconds, which nobody means for a timeout.
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+    return `needs a unit, such as "${value.trim()} seconds"`;
+  }
+  let ms: number | undefined;
+  try {
+    ms = msToNumber(value as Duration);
+  } catch {
+    ms = undefined;
+  }
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) {
+    return 'must be a duration such as "5 minutes" or "30s"';
+  }
+  return undefined;
+};
+
+/**
  * What's wrong with a session's start options, or undefined. A bad value fails every Workflow Task
  * of the session, so the Workflow fails at once and clients check before sending. Plain code, since
  * the Workflow calls it too.
@@ -59,17 +80,8 @@ const shown = (value: unknown) =>
 export const sessionInputProblem = (
   input: Pick<SessionInput, "idleTimeout" | "toolTimeoutMinutes" | "budget">,
 ): string | undefined => {
-  if (input.idleTimeout !== undefined) {
-    let ms: number | undefined;
-    try {
-      ms = msToNumber(input.idleTimeout as Duration);
-    } catch {
-      ms = undefined;
-    }
-    if (ms === undefined || !Number.isFinite(ms) || ms <= 0) {
-      return `idleTimeout must be a duration such as "5 minutes", got ${shown(input.idleTimeout)}`;
-    }
-  }
+  const idle = input.idleTimeout === undefined ? undefined : durationProblem(input.idleTimeout);
+  if (idle) return `idleTimeout ${idle}, got ${shown(input.idleTimeout)}`;
   const minutes = input.toolTimeoutMinutes;
   const positive = typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0;
   if (minutes !== undefined && !positive) {

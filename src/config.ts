@@ -4,11 +4,10 @@
 // Whether storage is really shared across hosts is for the operator to verify.
 
 import { readFileSync } from "node:fs";
-import { type Duration, msToNumber } from "@temporalio/common";
 import { loadClientConnectConfig } from "@temporalio/envconfig";
 import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
-import type { TurnBudget } from "./core/protocol.js";
+import { durationProblem, type TurnBudget } from "./core/protocol.js";
 
 export type Profile = "local" | "fleet";
 
@@ -340,21 +339,8 @@ export const minutesFromEnv = (name: string) => wholeFromEnv(name, "minutes");
 function durationFromEnv(name: string, fallback: string): string {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
-  // A bare number parses as milliseconds, which nobody means for a timeout.
-  if (Number.isFinite(Number(raw))) {
-    throw new Error(`${name} needs a unit, such as "${raw} seconds", got ${JSON.stringify(raw)}`);
-  }
-  let ms: number | undefined;
-  try {
-    ms = msToNumber(raw as Duration);
-  } catch {
-    ms = undefined;
-  }
-  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) {
-    throw new Error(
-      `${name} must be a duration such as "5 minutes" or "30s", got ${JSON.stringify(raw)}`,
-    );
-  }
+  const problem = durationProblem(raw);
+  if (problem) throw new Error(`${name} ${problem}, got ${JSON.stringify(raw)}`);
   return raw;
 }
 
