@@ -14,6 +14,7 @@ import {
 import { ApplicationFailure } from "@temporalio/common";
 import { type Config, connectionOptions, fromEnv, sessionFileFor } from "../config.js";
 import { dataConverterFor } from "./codec.js";
+import { clientTracing, startTracing } from "./tracing.js";
 import {
   DUPLICATE_PROMPT,
   QUERIES,
@@ -46,6 +47,7 @@ const QUERY_MS = 3_000;
 
 /** Every client here is built by this, so the CLI and the extension follow sessions alike. */
 export async function openClient(cfg: Config = fromEnv()) {
+  if (cfg.tracing) startTracing("pi-temporal-client");
   const connection = await Connection.connect(connectionOptions(cfg));
   const client = new Client({
     connection,
@@ -54,6 +56,8 @@ export async function openClient(cfg: Config = fromEnv()) {
     // forever. Rejecting the query tells a follower the session is over.
     workflow: { queryRejectCondition: "NOT_OPEN" },
     ...withCodec(cfg),
+    // Starts each trace here, so a prompt's spans in the Worker hang under the call that sent it.
+    ...(cfg.tracing ? { interceptors: clientTracing() } : {}),
   });
   return { client, connection };
 }

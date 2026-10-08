@@ -93,6 +93,7 @@ You can omit the optional modules below when your agent doesn't need them.
 | Budgets | `PI_TEMPORAL_BUDGET_*` | a turn or session must stop at a bound |
 | Schedules, `adoptProject` | `cli.ts schedule` | turns start with no client |
 | Payload codec, `src/core/codec.ts` | `PI_TEMPORAL_CODEC_KEY` | history must not hold prompts in the clear |
+| Tracing, `src/core/tracing.ts` | `PI_TEMPORAL_TRACING=1` | you need to see where a turn spent its time |
 
 ## Words used here
 

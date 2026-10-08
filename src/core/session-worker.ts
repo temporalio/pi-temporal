@@ -9,6 +9,7 @@ import {
   type WorkerOptions,
 } from "@temporalio/worker";
 import { queueForWorker } from "./queue.js";
+import { type Tracing, workerTracing } from "./tracing.js";
 
 // A stop reaches a running Activity only with a heartbeat's answer. By default the SDK sends
 // heartbeats about every 24 seconds here, so a stopped tool would run on that long.
@@ -47,6 +48,8 @@ export interface SessionWorkerOptions {
   // Turns on Worker Versioning. Each build is a Worker Deployment Version, and the server sends
   // each Workflow Task to the version its Workflow may run on. Unset, any Worker takes any task.
   readonly deployment?: { readonly name: string; readonly buildId: string };
+  // Traces Workflows and Activities when set (`startTracing`).
+  readonly tracing?: Tracing;
 }
 
 export interface SessionWorker {
@@ -75,6 +78,7 @@ export async function createSessionWorker(
     activities,
     dataConverter: opts.dataConverter,
     maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
+    ...workerTracing(opts.tracing, opts.workflowBundlePath !== undefined),
     // Left out when unset. The SDK reads an `undefined` it's given as a value, not as its default.
     ...defined({
       shutdownForceTime: opts.shutdownForceTime,

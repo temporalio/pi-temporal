@@ -16,6 +16,7 @@ import {
 import { createSessionWorker } from "./core/session-worker.js";
 import { makeActivities } from "./pi/activities.js";
 import { dataConverterFor } from "./core/codec.js";
+import { startTracing } from "./core/tracing.js";
 import * as worktree from "./tree/worktree.js";
 
 async function main() {
@@ -73,6 +74,7 @@ async function main() {
     "ANTHROPIC_API_KEY_FILE",
   ]);
 
+  const tracing = cfg.tracing ? startTracing("pi-temporal-worker") : undefined;
   const { run } = await createSessionWorker({
     address: cfg.address,
     connect: connectionOptions(cfg),
@@ -86,6 +88,7 @@ async function main() {
     shutdownGraceTime: cfg.shutdownGrace,
     maxConcurrentActivities: cfg.maxActivities,
     deployment: cfg.deployment,
+    tracing,
     activities: (hostQueue) =>
       makeActivities({
         projectDir,
@@ -101,6 +104,8 @@ async function main() {
   for (const [name, value] of Object.entries(describe(cfg))) console.log(`  ${name}: ${value}`);
   console.log(`  project: ${projectDir}`);
   await run();
+  // The Worker drained. Send the spans still buffered before the process ends.
+  await tracing?.shutdown();
 }
 
 main().catch((err) => {

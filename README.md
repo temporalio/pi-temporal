@@ -148,6 +148,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_TEMPORAL_CODEC_OLD_KEYS`, `_FILE` | retired codec keys, comma-separated, that still decrypt | none |
 | `PI_TEMPORAL_SEARCH_ATTRIBUTE` | `1` keeps session state in the `PiSessionState` search attribute | off |
 | `PI_TEMPORAL_METRICS` | address for the Worker's Prometheus metrics, such as `0.0.0.0:9464` | none |
+| `PI_TEMPORAL_TRACING` | `1` sends OpenTelemetry traces to the OTLP endpoint in `OTEL_EXPORTER_OTLP_ENDPOINT` | off |
 | `PI_TEMPORAL_WORKFLOW_BUNDLE` | a bundle from `npm run bundle`, so the Worker doesn't bundle at start | none |
 
 The hard deadline stops the Workflow from waiting for the call. An external command may keep
@@ -202,6 +203,11 @@ alerts.
   file or a refused project.
 - `temporal_workflow_task_execution_failed`. A Workflow Task that throws, such as after a bad
   deploy. Temporal retries it until a fixed Worker runs it, so the session waits.
+
+`PI_TEMPORAL_TRACING=1` traces each prompt from the client that sent it, through the session
+Workflow, to each model call and tool call. Spans go over OTLP/HTTP, set up by the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` variables. Set it on clients and Workers
+alike, so one trace covers both.
 
 ## The Pi fork
 

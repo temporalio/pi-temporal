@@ -28,6 +28,8 @@ export interface Config {
   readonly searchAttribute: boolean;
   // Encrypts payloads in history (`core/codec.ts`). 32 bytes, from base64.
   readonly codecKey?: Buffer;
+  // OpenTelemetry tracing (`core/tracing.ts`). The standard `OTEL_*` variables configure it.
+  readonly tracing: boolean;
   // Retired keys that still decrypt payloads sealed before a rotation. Never used to encrypt.
   readonly codecOldKeys?: readonly Buffer[];
   // API key for Temporal Cloud, or a certificate pair for mTLS. Never printed by `describe`.
@@ -107,6 +109,7 @@ export function fromEnv(): Config {
     // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
     searchAttribute: onOff("PI_TEMPORAL_SEARCH_ATTRIBUTE", false),
+    tracing: onOff("PI_TEMPORAL_TRACING", false),
     ...codecKeyFromEnv(),
     toolTimeoutMinutes: minutesFromEnv("PI_TEMPORAL_TOOL_TIMEOUT_MINUTES"),
     shutdownGrace: (wholeFromEnv("PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS", "seconds") ?? 60) * 1000,
@@ -303,6 +306,7 @@ export function describe(cfg: Config): Record<string, string> {
     toolTimeoutMinutes: cfg.toolTimeoutMinutes ? `${cfg.toolTimeoutMinutes} minutes` : "default",
     shipTree: String(cfg.shipTree),
     maxActivities: String(cfg.maxActivities),
+    tracing: String(cfg.tracing),
     deployment: cfg.deployment
       ? `${cfg.deployment.name}.${cfg.deployment.buildId}`
       : "unversioned",

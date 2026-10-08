@@ -231,6 +231,14 @@ by default because the namespace must register the attribute first. `PI_TEMPORAL
 on the SDK's Prometheus metrics. Activities log through the Activity logger, so each line carries
 its Workflow and Activity ids.
 
+`PI_TEMPORAL_TRACING=1` adds OpenTelemetry traces through the SDK's interceptors
+(`src/core/tracing.ts`). The client starts a trace and passes it on in the call's headers. The
+Workflow's interceptors run in the sandbox and hand finished spans to the Worker through a sink,
+and the Activity interceptors continue the trace. So one trace shows a prompt's turn, step by
+step, across Workers. The prebuilt bundle always has the Workflow interceptors, which makes it
+about twice the size. The same image then traces or not by the variable alone. Without tracing,
+the sink drops their spans. `tracing-check` shows one trace from the client to the Activity.
+
 ## Payloads can be encrypted
 
 Prompt and answer payloads pass through history, along with error text. Coding tasks can put

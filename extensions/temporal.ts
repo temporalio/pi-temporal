@@ -38,6 +38,7 @@ import { type LiveTurns, makeLocalTurnActivities } from "../src/pi/local-turn-ac
 import { createSessionWorker, type SessionWorker } from "../src/core/session-worker.js";
 import { makeActivities } from "../src/pi/activities.js";
 import { dataConverterFor } from "../src/core/codec.js";
+import { startTracing } from "../src/core/tracing.js";
 import * as worktree from "../src/tree/worktree.js";
 import { openClient, sendPrompt, sessionExists } from "../src/core/client.js";
 import {
@@ -149,6 +150,7 @@ export default function (pi: ExtensionAPI) {
         shutdownForceTime: EMBEDDED_STOP,
         maxConcurrentActivities: cfg.maxActivities,
         dataConverter: dataConverterFor(cfg),
+        tracing: cfg.tracing ? startTracing("pi") : undefined,
       });
       worker
         .run()
