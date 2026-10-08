@@ -240,7 +240,13 @@ async function schedule(args: string[]) {
         // refused.
         await worktree.unclaim(projectDir, template);
       } catch (err) {
-        await handle.delete().catch(() => {});
+        const deleted = await handle.delete().then(
+          () => true,
+          () => false,
+        );
+        // A template that kept its claim holds the directory for good, since nothing retires it.
+        // So drop it, claim included. The schedule was still paused, so no firing needs it.
+        if (deleted) await worktree.forget(template, projectDir).catch(() => {});
         throw err;
       }
       say(`  sent the project from ${projectDir}`);

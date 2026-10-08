@@ -711,7 +711,16 @@ export function makeActivities(
   async function keepSeconds(input: RetireInput): Promise<void> {
     const { sessionFile, turn, sessionSeconds } = input;
     if (turn === undefined || sessionSeconds === undefined) return;
-    if (!(await access(sessionFile).then(() => true, () => false))) return;
+    // Only a missing file means nothing to add to. Any other error is thrown, so Temporal retries
+    // and the record still gets the Workflow's total.
+    const exists = await access(sessionFile).then(
+      () => true,
+      (err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") return false;
+        throw err;
+      },
+    );
+    if (!exists) return;
     await withFence(sessionFile, input.fence, async (guard) => {
       const manager = dependencies.openSession
         ? managerOf(await dependencies.openSession(sessionFile, guard))

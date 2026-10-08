@@ -10,10 +10,16 @@ for tool in git node npm; do
   command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
 done
 
-# The Temporal TS SDK and the fork's build both assume a current LTS.
-major="$(node -p 'process.versions.node.split(".")[0]')"
-if [ "$major" -lt 20 ]; then
-  echo "node >= 20 required, found $(node -v)" >&2
+# The Pi fork needs the newer of its own floor and the Temporal TS SDK's (20.3.0). Full version,
+# not the major, since a minor below the floor installs but doesn't run.
+need=22.19.0
+if ! node -e '
+  const parts = (v) => v.split(".").map(Number);
+  const [have, need] = [parts(process.versions.node), parts(process.argv[1])];
+  const diff = have.map((part, i) => part - need[i]).find((d) => d !== 0) ?? 0;
+  process.exit(diff < 0 ? 1 : 0);
+' "$need"; then
+  echo "node >= $need required, found $(node -v)" >&2
   exit 1
 fi
 
