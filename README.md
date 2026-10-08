@@ -1,5 +1,9 @@
 # pi-temporal
 
+<p align="center">
+  <img src="docs/cover.svg" alt="pi-temporal. The Pi coding agent on Temporal. A session Workflow sends each step to a live Worker, and every Worker reads and appends one session file." width="100%">
+</p>
+
 A Worker can die during a [Pi coding agent](https://github.com/earendil-works/pi) task without
 losing the conversation. [Temporal](https://temporal.io) dispatches the next unit of work, and
 another Worker reads the session file to continue. Cross-host recovery needs shared session
@@ -88,6 +92,10 @@ The session you type in stays yours. `/background` and `start` create a new Work
 instead of moving the live one.
 
 ## How a turn runs
+
+<p align="center">
+  <img src="docs/turn.svg" alt="One turn across three Workers. Worker A dies while a tool runs. Worker B seals the step with an unknown outcome instead of running the tool again. The model asks again, and the turn answers on Worker C." width="100%">
+</p>
 
 A turn starts with a user prompt and ends with the final response. Each step contains one model
 call and any tool calls it requests. The seal records those tool results in the transcript.
