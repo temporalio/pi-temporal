@@ -87,6 +87,30 @@ try {
     { ran: ran.get(prompt.promptId), done },
   );
 
+  const huge = { promptId: randomUUID(), text: "x".repeat(64 * 1024 + 1) };
+  const tooBig = await sendPrompt(client, cfg, session, huge).then(
+    () => "",
+    (err: unknown) => String(err),
+  );
+  check("a prompt too big for history is refused", /longer than/.test(tooBig), tooBig);
+
+  // With the search attribute on, a List call can filter sessions by state on the server.
+  const indexed = `submit-indexed-${randomUUID().slice(0, 8)}`;
+  sessions.push(indexed);
+  await sendPrompt(client, { ...cfg, searchAttribute: true }, indexed, {
+    promptId: randomUUID(),
+    text: "index me",
+  });
+  await quiet(indexed);
+  let listed = false;
+  // Visibility is eventually consistent.
+  for (let i = 0; i < 50 && !listed; i++) {
+    const query = `WorkflowId = '${workflowId(indexed)}' AND PiSessionState = 'idle'`;
+    for await (const _ of client.workflow.list({ query })) listed = true;
+    if (!listed) await new Promise((r) => setTimeout(r, 200));
+  }
+  check("the search attribute filters sessions by state", listed);
+
   const empty = await sendPrompt(client, cfg, session, { promptId: randomUUID(), text: "  " }).then(
     () => "",
     (err: unknown) => String(err),

@@ -4,6 +4,7 @@
 // Whether storage is really shared across hosts is for the operator to verify.
 
 import { readFileSync } from "node:fs";
+import { loadClientConnectConfig } from "@temporalio/envconfig";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { sessionIdProblem, type TurnBudget } from "./core/protocol.js";
@@ -23,9 +24,16 @@ export interface Config {
   // Ship the project's files with the session, so a worker on another host sees the last one's
   // work. Not needed on a single machine.
   readonly shipTree: boolean;
+  // Keep each session's state in the `PiSessionState` search attribute too. Needs it registered.
+  readonly searchAttribute: boolean;
+  // Encrypts payloads in history (`core/codec.ts`). 32 bytes, from base64.
+  readonly codecKey?: Buffer;
   // API key for Temporal Cloud, or a certificate pair for mTLS. Never printed by `describe`.
   readonly apiKey?: string;
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
+  // Connection settings from the standard Temporal config: `TEMPORAL_*` variables and the profile
+  // in `temporal.toml`. The `PI_TEMPORAL_*` settings above win over these.
+  readonly standard?: StandardConnection;
   // Only one of the mTLS certificate and key was set. Kept here because the variables are dropped
   // from the environment once read, and no connection may go out with half a pair.
   readonly brokenTlsPair?: boolean;
@@ -63,15 +71,24 @@ function profileFromEnv(): Profile {
   throw new Error(`PI_TEMPORAL_PROFILE must be local or fleet, got ${JSON.stringify(raw)}`);
 }
 
+type StandardConnection = Omit<
+  ReturnType<typeof loadClientConnectConfig>["connectionOptions"],
+  "address"
+>;
+
 export function fromEnv(): Config {
   const profile = profileFromEnv();
   const fleet = profile === "fleet";
   const cert = process.env.PI_TEMPORAL_TLS_CERT;
   const key = process.env.PI_TEMPORAL_TLS_KEY;
+  // The same settings every Temporal SDK and the `temporal` CLI read, so one profile serves all.
+  const { connectionOptions: standardOptions, namespace } = loadClientConnectConfig();
+  const { address, ...standard } = standardOptions;
   return {
     profile,
-    address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
-    namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
+    address: address ?? "127.0.0.1:7233",
+    namespace: namespace ?? "default",
+    ...(Object.keys(standard).length > 0 ? { standard } : {}),
     taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
     // Absolute, since it travels in Workflow input and the client and worker have different cwds.
     sessionDir: given("PI_SESSION_DIR")
@@ -80,6 +97,8 @@ export function fromEnv(): Config {
     idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
     // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
+    searchAttribute: onOff("PI_TEMPORAL_SEARCH_ATTRIBUTE", false),
+    ...codecKeyFromEnv(),
     toolTimeoutMinutes: minutesFromEnv("PI_TEMPORAL_TOOL_TIMEOUT_MINUTES"),
     budget: budgetFromEnv(),
     // In a fleet the files must travel, or tools run against the wrong directory.
@@ -107,7 +126,26 @@ export const TEMPORAL_CREDENTIAL_VARS = [
   "PI_TEMPORAL_TLS_CERT",
   "PI_TEMPORAL_TLS_KEY",
   "PI_TEMPORAL_TLS_CA",
+  "TEMPORAL_API_KEY",
+  "TEMPORAL_TLS_CLIENT_CERT_DATA",
+  "TEMPORAL_TLS_CLIENT_CERT_PATH",
+  "TEMPORAL_TLS_CLIENT_KEY_DATA",
+  "TEMPORAL_TLS_CLIENT_KEY_PATH",
+  "TEMPORAL_CODEC_AUTH",
+  "PI_TEMPORAL_CODEC_KEY",
+  "PI_TEMPORAL_CODEC_KEY_FILE",
 ];
+
+// A bad key must fail at start, not as payloads nobody can read.
+function codecKeyFromEnv(): { codecKey?: Buffer } {
+  const encoded = secret("PI_TEMPORAL_CODEC_KEY");
+  if (encoded === undefined) return {};
+  const codecKey = Buffer.from(encoded, "base64");
+  if (codecKey.length !== 32) {
+    throw new Error("PI_TEMPORAL_CODEC_KEY must be 32 bytes, base64 encoded");
+  }
+  return { codecKey };
+}
 
 export function dropFromEnv(names: readonly string[]): void {
   for (const name of names) delete process.env[name];
@@ -127,6 +165,7 @@ export function connectionOptions(cfg: Config) {
           }
         : undefined;
   return {
+    ...cfg.standard,
     address: cfg.address,
     ...(tls ? { tls } : {}),
     ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
@@ -134,6 +173,9 @@ export function connectionOptions(cfg: Config) {
 }
 
 const TLS_PAIR = "PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY come as a pair";
+
+// From either source of settings.
+const hasApiKey = (cfg: Config) => Boolean(cfg.apiKey ?? cfg.standard?.apiKey);
 
 const LOOPBACK = /^(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(:|$)/;
 
@@ -155,12 +197,12 @@ export function preflight(cfg: Config): string[] {
     }
   }
   problems.push(...clientProblems(cfg));
-  if (cfg.apiKey && LOOPBACK.test(cfg.address)) {
+  if (hasApiKey(cfg) && LOOPBACK.test(cfg.address)) {
     problems.push(
       `an API key is set but TEMPORAL_ADDRESS is ${cfg.address}, which is a dev server`,
     );
   }
-  if (cfg.apiKey && cfg.namespace === "default") {
+  if (hasApiKey(cfg) && cfg.namespace === "default") {
     problems.push(
       "an API key is set but TEMPORAL_NAMESPACE is `default`, which is not a Cloud namespace",
     );
@@ -194,7 +236,7 @@ export function modelApiKey(
 /** Plaintext can be intentional on a private network, so it is a note rather than a refusal. */
 export function notes(cfg: Config): string[] {
   const said: string[] = [];
-  if (!LOOPBACK.test(cfg.address) && !cfg.apiKey && !cfg.tls) {
+  if (!LOOPBACK.test(cfg.address) && !hasApiKey(cfg) && !cfg.tls && !cfg.standard?.tls) {
     said.push(
       `reaching ${cfg.address} in plaintext. For Temporal Cloud set PI_TEMPORAL_API_KEY; for a ` +
         "cluster with mTLS set PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY",
@@ -220,7 +262,16 @@ export function describe(cfg: Config): Record<string, string> {
           .map(([name, value]) => `${name}=${value}`)
           .join(", ")
       : "none",
-    credentials: cfg.apiKey ? "api key" : cfg.tls ? "certificate pair" : "none (plaintext)",
+    payloads: cfg.codecKey ? "encrypted" : "plain",
+    credentials: cfg.apiKey
+      ? "api key"
+      : cfg.tls
+        ? "certificate pair"
+        : cfg.standard?.apiKey
+          ? "api key (standard config)"
+          : cfg.standard?.tls
+            ? "tls (standard config)"
+            : "none (plaintext)",
   };
 }
 

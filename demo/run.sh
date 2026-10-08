@@ -100,7 +100,8 @@ say "starting a Temporal dev server (UI on http://localhost:$ui_port)"
 docker run -d --name "$name-temporal" --network "$net" \
   -p "$grpc_port:7233" -p "$ui_port:8233" \
   --entrypoint temporal temporalio/admin-tools:1.29 \
-  server start-dev --ip 0.0.0.0 --ui-ip 0.0.0.0 --log-level warn >/dev/null \
+  server start-dev --ip 0.0.0.0 --ui-ip 0.0.0.0 --log-level warn \
+  --search-attribute PiSessionState=Keyword >/dev/null \
   || die "the Temporal server did not start"
 for _ in $(seq 1 60); do
   docker exec "$name-temporal" temporal operator cluster health --address 127.0.0.1:7233 \

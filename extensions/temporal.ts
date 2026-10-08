@@ -36,6 +36,7 @@ import type {
 import { type LiveTurns, makeLocalTurnActivities } from "../src/pi/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/core/session-worker.js";
 import { makeActivities } from "../src/pi/activities.js";
+import { dataConverterFor } from "../src/core/codec.js";
 import * as worktree from "../src/tree/worktree.js";
 import { openClient, sendPrompt, sessionExists } from "../src/core/client.js";
 import {
@@ -137,6 +138,7 @@ export default function (pi: ExtensionAPI) {
             hostQueue,
           }),
         shutdownForceTime: EMBEDDED_STOP,
+        dataConverter: dataConverterFor(cfg.codecKey),
       });
       worker
         .run()
@@ -253,6 +255,7 @@ export default function (pi: ExtensionAPI) {
         // Only this process's live turns. The queue is already this process's own.
         activities: () => makeLocalTurnActivities(liveTurns),
         shutdownForceTime: EMBEDDED_STOP,
+        dataConverter: dataConverterFor(cfg.codecKey),
       });
       worker
         .run()

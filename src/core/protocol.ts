@@ -10,6 +10,9 @@ export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
 export const fencePrefix = (runStartMs: number, seq: number) =>
   `${String(runStartMs).padStart(13, "0")}.${String(seq).padStart(8, "0")}`;
 
+// The keyword search attribute a session keeps its state in when `searchAttribute` is on.
+export const SESSION_STATE_ATTRIBUTE = "PiSessionState";
+
 // The memo key a session keeps its state under, `{ state: "running" | "idle", queued }`.
 export const SESSION_MEMO = "piSession";
 
@@ -189,6 +192,9 @@ export interface SessionTurnOptions {
   // Continue-As-New at this many history events, in addition to the server's suggestion. Also lets
   // checks reach that path.
   readonly maxHistory?: number;
+  // Also keep the session's state in the `PiSessionState` search attribute, so a List call can
+  // filter on it. The namespace must have the attribute registered, so it's off by default.
+  readonly searchAttribute?: boolean;
   // Bound on one tool call in stepped mode. A call that crosses it is not re-run, because its
   // dispatch claim says it started.
   readonly toolTimeoutMinutes?: number;

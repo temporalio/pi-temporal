@@ -1,11 +1,13 @@
-// Checks that a worker on this code replays a history this code wrote. A change that alters which
-// commands a Workflow issues breaks running sessions. Once sessions run in production, put it
-// behind `patched()`, or ship it as a new Worker Deployment Version, and keep its old history here.
+// Checks that a Worker on this code replays every history in `histories/`, plus one this code
+// writes now. A history that stops replaying means a change altered which commands a Workflow
+// issues, and running sessions would break on upgrade. Gate that change with `patched()`, or ship
+// it as a new Worker Deployment Version. To add histories, run `record-histories.mts`.
 //
 // Needs a Temporal server, no model key. Usage: npx tsx checks/replay-check.mts
 
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { Worker, NativeConnection } from "@temporalio/worker";
@@ -133,6 +135,24 @@ async function main() {
       ownReplay === undefined,
       String(ownReplay),
     );
+
+    // The kept ones, from earlier code. Each stands for sessions that may still be running.
+    const kept = fileURLToPath(new URL("./histories/", import.meta.url));
+    const names = (await readdir(kept)).filter((name) => name.endsWith(".json")).sort();
+    check("there are kept histories to replay", names.length > 0, names);
+    for (const name of names) {
+      const workflowId = name.replace(/\.json$/, "");
+      const history = historyFromJSON(JSON.parse(await readFile(join(kept, name), "utf8")));
+      let failure: unknown;
+      await Worker.runReplayHistory(
+        { workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)) },
+        history,
+        workflowId,
+      ).catch((err) => {
+        failure = err;
+      });
+      check(`and the kept ${workflowId} history`, failure === undefined, String(failure));
+    }
 
     console.log(
       failures.length === 0

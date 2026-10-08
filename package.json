@@ -4,23 +4,29 @@
   "private": true,
   "description": "Temporal-backed durable executor for the Pi coding agent",
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "engines": {
     "node": ">=22.19.0"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   },
   "scripts": {
     "setup-fork": "scripts/setup-fork.sh",
     "typecheck": "tsc --noEmit",
     "checks": "scripts/run-checks.sh",
-    "worker": "tsx src/worker.ts"
+    "worker": "tsx src/worker.ts",
+    "bundle": "tsx scripts/bundle.mts"
   },
   "dependencies": {
     "@temporalio/activity": "~1.22.0",
     "@temporalio/client": "~1.22.0",
     "@temporalio/common": "~1.22.0",
+    "@temporalio/envconfig": "~1.22.0",
     "@temporalio/worker": "~1.22.0",
     "@temporalio/workflow": "~1.22.0"
   },
@@ -33,6 +39,7 @@
     }
   },
   "devDependencies": {
+    "@temporalio/testing": "~1.22.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

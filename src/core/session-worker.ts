@@ -25,6 +25,11 @@ export interface SessionWorkerOptions {
   // Also poll a host queue named for this project directory, so a step's tools and seal can come
   // back to the host that holds the project. Leave it out when nothing is host-bound.
   readonly hostQueueFor?: string;
+  // A Workflow bundle built ahead of time (`npm run bundle`). Without one, the Worker bundles the
+  // source at start, which is fine for development.
+  readonly workflowBundlePath?: string;
+  // The same codec as the clients, or they can't read each other's payloads.
+  readonly dataConverter?: WorkerOptions["dataConverter"];
   // How long `stop()` waits for in-flight activities before it gives up on them. Unset, it waits
   // for them all. An embedded worker sets it, so quitting pi can't hang on a long tool.
   readonly shutdownForceTime?: WorkerOptions["shutdownForceTime"];
@@ -57,8 +62,11 @@ export async function createSessionWorker(
       connection,
       namespace: opts.namespace,
       taskQueue: opts.taskQueue,
-      workflowsPath: fileURLToPath(new URL("../workflow-bundle.ts", import.meta.url)),
+      ...(opts.workflowBundlePath
+        ? { workflowBundle: { codePath: opts.workflowBundlePath } }
+        : { workflowsPath: fileURLToPath(new URL("../workflow-bundle.ts", import.meta.url)) }),
       activities,
+      dataConverter: opts.dataConverter,
       shutdownForceTime: opts.shutdownForceTime,
       maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
     });
@@ -70,6 +78,7 @@ export async function createSessionWorker(
         namespace: opts.namespace,
         taskQueue: hostQueue,
         activities,
+        dataConverter: opts.dataConverter,
         shutdownForceTime: opts.shutdownForceTime,
         maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
       });

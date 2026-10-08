@@ -1,6 +1,6 @@
-// Checks the stepped step body (`src/stepped-step.ts`) against fake activities, with no server.
-// Asserts every call reaches the seal, interrupts propagate, one failed tool does not end the turn,
-// and host-queue work falls back to the shared queue only when it never started.
+// Checks the stepped step body (`src/core/stepped-step.ts`) against fake activities, with no
+// server. Asserts every call reaches the seal, interrupts propagate, one failed tool does not end
+// the turn, and host-queue work falls back to the shared queue only when it never started.
 //
 // Usage: npx tsx checks/stepped-step-check.mts
 
