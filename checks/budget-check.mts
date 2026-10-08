@@ -11,8 +11,12 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { QUERIES } from "../src/protocol.js";
 import type {
+  ModelCallResult,
+  RetireInput,
   RunStepInput,
   RunStepResult,
+  ToolCallInput,
+  ToolCallResult,
   SessionTurnOptions,
   TurnState,
 } from "../src/protocol.js";
@@ -34,6 +38,8 @@ const recorded = new Map<string, number>();
 // read skips the asking turn's own entries.
 const recordedSeconds = new Map<string, { turn: string; seconds: number }[]>();
 let tokensPerStep = 0;
+let stepsWriteLate = false;
+const toolsRun: string[] = [];
 let secondsPerStep = 0;
 let answerAfter = Number.POSITIVE_INFINITY;
 // Holds a step until this wall-clock time, for the stale-deadline case.
@@ -50,7 +56,9 @@ const activities = {
     const entries = recordedSeconds.get(input.sessionFile) ?? [];
     const secondsBefore = entries.filter((e) => e.turn !== input.promptId).at(-1)?.seconds;
     if (input.sessionSeconds !== undefined) {
-      entries.push({ turn: input.promptId, seconds: input.sessionSeconds + secondsPerStep });
+      // A step writes before its turn is over, so some of the turn's time is never in it.
+      const seconds = input.sessionSeconds + (stepsWriteLate ? 0 : secondsPerStep);
+      entries.push({ turn: input.promptId, seconds });
       recordedSeconds.set(input.sessionFile, entries);
     }
     return {
@@ -62,7 +70,32 @@ const activities = {
       total: { tokens: billed, cost: billed / 1000 },
     };
   },
-  async retireSession() {},
+  // The stepped path. One model call asks for two tools that must run one after the other.
+  async runModelCall(input: RunStepInput): Promise<ModelCallResult> {
+    const billed = (recorded.get(input.sessionFile) ?? 0) + tokensPerStep;
+    recorded.set(input.sessionFile, billed);
+    return {
+      calls: [{ id: "first", name: "bash" }, { id: "second", name: "bash" }],
+      sequential: true,
+      ended: false,
+      spent: { tokens: tokensPerStep, cost: tokensPerStep / 1000 },
+      total: { tokens: billed, cost: billed / 1000 },
+    };
+  },
+  async runToolCall(input: ToolCallInput): Promise<ToolCallResult> {
+    toolsRun.push(input.call.id);
+    return { outcome: "settled" };
+  },
+  async sealStep(): Promise<RunStepResult> {
+    return { done: true, retryAttempt: 0, finalText: "answered" };
+  },
+  // Like the real activity, keeps the Workflow's own total of the session's time.
+  async retireSession(input: RetireInput) {
+    if (input.turn === undefined || input.sessionSeconds === undefined) return;
+    const entries = recordedSeconds.get(input.sessionFile) ?? [];
+    entries.push({ turn: input.turn, seconds: input.sessionSeconds });
+    recordedSeconds.set(input.sessionFile, entries);
+  },
   async adoptProject() {},
 };
 
@@ -85,6 +118,8 @@ async function main() {
     budget: SessionTurnOptions["budget"],
     session?: string,
     run = session,
+    stepped = false,
+    idle = session ? "60 seconds" : "100 milliseconds",
   ) => {
     const promptId = randomUUID();
     const began = Date.now();
@@ -92,8 +127,9 @@ async function main() {
       workflowId: run ?? `${queue}-${promptId}`,
       taskQueue: queue,
       args: [session ?? promptId, session ?? `/unused/${promptId}.jsonl`, {
-        idleTimeout: session ? "60 seconds" : "100 milliseconds",
+        idleTimeout: idle,
         budget,
+        stepped,
       } satisfies SessionTurnOptions as never],
       signal: "submitPrompt",
       signalArgs: [{ promptId, text: "run" }],
@@ -122,6 +158,17 @@ async function main() {
       spent.finished,
     );
     check("after the step that crossed the bound, not before it", spent.taken === 3, spent.taken);
+
+    // A model call that spends past the bound stops the tools after the first. The workflow
+    // counts the step only once it returns, so the check must see the model call's own spend.
+    tokensPerStep = 300;
+    const sequential = await turn({ tokens: 250 }, undefined, undefined, true);
+    check(
+      "a model call over the bound stops its sequential tools after the first",
+      JSON.stringify(toolsRun) === '["first"]',
+      { toolsRun, finished: sequential.finished },
+    );
+    tokensPerStep = 100;
 
     answerAfter = 2;
     const inside = await turn({ tokens: 250 });
@@ -211,6 +258,23 @@ async function main() {
       stoppedSecond.finished?.outcome === "budget" && stoppedSecond.taken === 1,
       stoppedSecond,
     );
+
+    // The steps' own writes miss the end of a turn. The run that exits idle writes the Workflow's
+    // total, so the next run still sees the whole turn.
+    answerAfter = 1;
+    secondsPerStep = 1;
+    stepsWriteLate = true;
+    const idled = `${queue}-idled-session`;
+    await turn({ sessionSeconds: 100 }, idled, `${idled}-1`, false, "1 second");
+    await client.workflow.getHandle(`${idled}-1`).result();
+    answerAfter = 2;
+    const afterIdle = await turn({ sessionSeconds: 1.5 }, idled, `${idled}-2`);
+    check(
+      "a run that exits idle leaves the session's whole time for the next run",
+      afterIdle.finished?.outcome === "budget" && afterIdle.taken === 1,
+      afterIdle,
+    );
+    stepsWriteLate = false;
 
     // `hardSeconds` is the only bound that interrupts a running step, like a user stop.
     answerAfter = Number.POSITIVE_INFINITY;

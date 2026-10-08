@@ -32,6 +32,7 @@ import {
 } from "./protocol.js";
 import type {
   PromptInput,
+  RetireInput,
   RunStepInput,
   RunStepResult,
   SessionTurnOptions,
@@ -126,7 +127,7 @@ const { adoptProject } = proxyActivities<{
 
 // Housekeeping. Short leash, and the next prompt works whether or not it succeeded.
 const { retireSession } = proxyActivities<{
-  retireSession(input: { sessionFile: string }): Promise<void>;
+  retireSession(input: RetireInput): Promise<void>;
 }>({
   startToCloseTimeout: "1 minute",
   // An unpolled queue must not hold the run open.
@@ -163,7 +164,7 @@ export async function piSession(
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   // Set per turn, since it reads that turn's spend. The step driver is built once.
-  let outOfBudget = (): boolean => false;
+  let outOfBudget = (_pending?: Pick<RunStepResult, "spent" | "total">): boolean => false;
   const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
     ? makeSteppedStep({
         activities: {
@@ -174,7 +175,7 @@ export async function piSession(
           sealStep,
         },
         isCancellation,
-        outOfBudget: () => outOfBudget(),
+        outOfBudget: (pending) => outOfBudget(pending),
         // No patch gate. Replay doesn't compare activity timeouts, so a running session takes the
         // configured timeout from its next pinned call on.
         pinnedTo: (queue) =>
@@ -217,7 +218,10 @@ export async function piSession(
     if (!woke && queue.length === 0) {
       // Idle: release the project directory and exit. The next prompt starts a fresh run. Best
       // effort, and it only frees the host that runs this activity.
-      await retireSession({ sessionFile: file }).catch((err) =>
+      // The Workflow's own count of the session's time, which also covers each turn's last seal
+      // and failed attempts. Written now, since the record is all the next run has.
+      const last = finished && { turn: finished.promptId, sessionSeconds: spent.seconds };
+      await retireSession({ sessionFile: file, ...last }).catch((err) =>
         log.warn("could not retire the session's directory", { sessionId: id, err: String(err) }),
       );
       // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.
@@ -293,19 +297,27 @@ export async function piSession(
         }
         // Workflow state, not file totals, since the session file is shared. `Date.now()` is the
         // workflow clock, so replay agrees. Passed to the step so it can stop mid-batch.
-        outOfBudget = () => {
+        const over = (pending?: Pick<RunStepResult, "spent" | "total">) => {
           const b = options?.budget;
           if (!b) return false;
           const turnSeconds = (Date.now() - startedAt) / 1000;
+          const turnTokens = tokens + (pending?.spent?.tokens ?? 0);
+          // The session total a model call read already includes its own spend.
+          const session = pending?.total ?? recorded;
           return (
-            (b.tokens !== undefined && tokens > b.tokens) ||
+            (b.tokens !== undefined && turnTokens > b.tokens) ||
             (b.seconds !== undefined && turnSeconds > b.seconds) ||
             (b.sessionTokens !== undefined &&
-              (recorded?.tokens ?? spent.tokens + tokens) > b.sessionTokens) ||
+              (session?.tokens ?? spent.tokens + turnTokens) > b.sessionTokens) ||
             (b.sessionSeconds !== undefined &&
               sessionSecondsBefore() + turnSeconds > b.sessionSeconds)
           );
         };
+        // Between the tools of one step, the step's own model call counts too. That can stop
+        // tools an older run dispatched, so it's gated, and asked only when it changes the answer.
+        outOfBudget = (pending) =>
+          over() ||
+          (pending !== undefined && over(pending) && patched("a-step-counts-its-model-call"));
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
           const input: RunStepInput = {

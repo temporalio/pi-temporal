@@ -41,8 +41,8 @@ export interface SteppedStepDeps {
   // Run the seal even when the turn was cancelled, so finished calls keep their real results.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
   // Checked between sequential calls. A started call is never stopped, since the transcript needs
-  // its result.
-  readonly outOfBudget?: () => boolean;
+  // its result. Given what this step's model call spent, which the workflow has not counted yet.
+  readonly outOfBudget?: (pending?: Pick<ModelCallResult, "spent" | "total">) => boolean;
   // The workflow logger. History shows an activity succeeded, but only the dispatch knows what it
   // decided.
   readonly log?: (message: string, attributes: Record<string, unknown>) => void;
@@ -229,7 +229,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
         };
         return viaPinned((on) => on.runToolCall(toolInput));
       },
-      deps,
+      {
+        ...deps,
+        outOfBudget: deps.outOfBudget && (() => deps.outOfBudget!(model)),
+      },
     );
 
     // Seal every call, answered or not. An open call makes the transcript invalid for the model.

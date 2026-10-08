@@ -187,6 +187,15 @@ export interface ToolCallResult {
   readonly outcome: ToolCallOutcome;
 }
 
+/** What an idle session leaves behind when its run exits. */
+export interface RetireInput {
+  readonly sessionFile: string;
+  // The last turn and the session's time after it, as the Workflow counted. Absent when no turn
+  // ran in this run or the one it rolled over from.
+  readonly turn?: string;
+  readonly sessionSeconds?: number;
+}
+
 export interface SealStepInput {
   readonly sessionId: string;
   readonly sessionFile: string;

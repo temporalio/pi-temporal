@@ -3,7 +3,7 @@
 // it so each tool call is its own unit of work. All re-open the session file, so any worker that
 // can reach it can run them.
 
-import { mkdir } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
@@ -18,6 +18,7 @@ import {
 import type {
   DeferredToolCall,
   ModelCallResult,
+  RetireInput,
   RunStepInput,
   RunStepResult,
   SealStepInput,
@@ -220,12 +221,16 @@ export function makeActivities(
   // The session's time before `turn`, from the latest total another turn wrote. This turn's own
   // entries are skipped, so a step that runs again can't count the turn twice.
   const secondsBefore = (session: AgentSession, turn: string): number | undefined => {
-    const branch = managerOf(session)?.getBranch() ?? [];
+    const manager = managerOf(session);
+    return manager ? latestSeconds(manager, turn) : undefined;
+  };
+  const latestSeconds = (manager: Record, skipping?: string): number | undefined => {
+    const branch = manager.getBranch();
     for (let i = branch.length - 1; i >= 0; i--) {
       const entry = branch[i];
       if (entry.type !== "custom" || entry.customType !== SESSION_SECONDS_ENTRY) continue;
       const data = entry.data as { turn?: unknown; seconds?: unknown } | undefined;
-      if (data?.turn === turn) continue;
+      if (skipping !== undefined && data?.turn === skipping) continue;
       return typeof data?.seconds === "number" ? data.seconds : undefined;
     }
     return undefined;
@@ -660,9 +665,30 @@ export function makeActivities(
     }
   }
 
+  // The steps record the session's time as they go, but the last one of a turn writes before its
+  // seal ends, and failed attempts never write. The Workflow counted all of it, and its run is
+  // about to end, so its total goes in the record. Only ever raised, never lowered.
+  async function keepSeconds(input: RetireInput): Promise<void> {
+    const { sessionFile, turn, sessionSeconds } = input;
+    if (turn === undefined || sessionSeconds === undefined) return;
+    if (!(await access(sessionFile).then(() => true, () => false))) return;
+    await withSessionLock(sessionFile, async (_owned, ownedNow) => {
+      const guard = writeGuard(ownedNow, "recording the session's time");
+      const manager = dependencies.openSession
+        ? managerOf(await dependencies.openSession(sessionFile, guard))
+        : SessionManager.open(sessionFile);
+      if (!manager) return;
+      if (manager instanceof SessionManager) manager.setWriteGuard(guard);
+      const known = latestSeconds(manager);
+      if (known !== undefined && known >= sessionSeconds) return;
+      manager.appendCustomEntry(SESSION_SECONDS_ENTRY, { turn, seconds: sessionSeconds });
+    });
+  }
+
   /** Release the project directory when the session goes idle, or this worker refuses every other
    * session. Also records the session as over, so other hosts can release theirs. */
-  async function retireSession(input: { readonly sessionFile: string }): Promise<void> {
+  async function retireSession(input: RetireInput): Promise<void> {
+    await keepSeconds(input);
     if (!opts.shipTree) return;
     // Thrown, so Temporal retries. The Workflow gives up quietly once retries run out.
     const freed = await worktree.retire(opts.projectDir, input.sessionFile);
