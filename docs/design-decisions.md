@@ -159,6 +159,12 @@ limit there.
 Workers send heartbeats at least every 3 seconds (`maxHeartbeatThrottleInterval`). The SDK would
 send them about every 24 seconds here, and a stop would reach a running tool that much later.
 
+Some file reads on the Activity path are synchronous. The fence check lists the fence directory
+before each append, and Pi reads the whole session file when it opens one. They block the event
+loop, and heartbeats with it. On local disk that's a few milliseconds. On slow NFS with a large
+session and many slots, they can add up past the 30-second heartbeat timeout. Keep slots low on
+slow storage, or watch heartbeat timeouts in the metrics.
+
 ## Worker Versioning, and `patched()` for long sessions
 
 Worker Versioning is opt-in. Set `PI_TEMPORAL_DEPLOYMENT` and `PI_TEMPORAL_BUILD_ID` together on
