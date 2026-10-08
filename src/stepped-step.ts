@@ -286,7 +286,10 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
     try {
       return withSpend(await seal(false));
     } catch (err) {
-      const sealFailure = stopFailure ?? unsafeFailure;
+      // A stop can land after every tool reported, while the seal is being scheduled. The tools'
+      // results still go in, through the recovery seal.
+      const sealFailure =
+        stopFailure ?? unsafeFailure ?? (deps.isCancellation(err) ? err : undefined);
       if (sealFailure !== undefined) return recover(sealFailure);
       throw err;
     }

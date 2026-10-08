@@ -22,6 +22,7 @@ import {
   log,
   setCurrentDetails,
   upsertMemo,
+  ActivityCancellationType,
   ActivityFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
@@ -65,11 +66,17 @@ const cappedOptions = {
   scheduleToCloseTimeout: `${CAP_MINUTES} minutes`,
 } as const;
 
+// A whole step runs its tools and its seal. A stop waits for both, so the step's results are
+// recorded before the session moves on.
 const { runStep } = proxyActivities<{
   runStep(input: RunStepInput): Promise<RunStepResult>;
-}>(cappedOptions);
+}>({ ...cappedOptions, cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED });
 
 const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
+
+// A stop waits for each running tool to stop and report, so the seal that follows records what
+// the tools did instead of unknown outcomes.
+const TOOL_CANCELLATION = ActivityCancellationType.WAIT_CANCELLATION_COMPLETED;
 
 // Overridable per deployment with PI_TEMPORAL_TOOL_TIMEOUT_MINUTES, read where the session starts.
 export const DEFAULT_TOOL_TIMEOUT_MINUTES = 30;
@@ -82,6 +89,7 @@ function toolCallActivities(timeoutMinutes: number) {
     startToCloseTimeout: `${timeoutMinutes} minutes`,
     scheduleToCloseTimeout: `${Math.max(CAP_MINUTES, timeoutMinutes)} minutes`,
     retry: { maximumAttempts: 20 },
+    cancellationType: TOOL_CANCELLATION,
   });
 }
 
@@ -106,6 +114,7 @@ const onHost = (taskQueue: string, timeoutMinutes: number) => ({
     )} seconds`,
     // A retry's queue timeout cannot rule out an earlier attempt still running.
     retry: { maximumAttempts: 1 },
+    cancellationType: TOOL_CANCELLATION,
     taskQueue,
     scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
   }).runToolCall,

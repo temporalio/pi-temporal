@@ -55,6 +55,31 @@ const say = (level: "info" | "warn", message: string) => {
   }
 };
 
+// Passed to a running tool, so a cancelled Activity stops its tool like a user stop. The tool
+// reports what it did, and the seal records that instead of an unknown outcome. Cancellation
+// arrives with a heartbeat, so it takes up to one heartbeat to reach the tool.
+const cancelled = (): { signal?: AbortSignal } => {
+  try {
+    return { signal: Context.current().cancellationSignal };
+  } catch {
+    return {};
+  }
+};
+
+// The model call, aborted like a user stop when the Activity is cancelled. Pi records an aborted
+// response, and the turn ends as stopped instead of waiting out a slow provider.
+const modelCallUntilCancelled = async (session: AgentSession) => {
+  const { signal } = cancelled();
+  const stop = () => void session.abort().catch(() => {});
+  if (signal?.aborted) stop();
+  else signal?.addEventListener("abort", stop, { once: true });
+  try {
+    return await session.modelCall();
+  } finally {
+    signal?.removeEventListener("abort", stop);
+  }
+};
+
 const heartbeatEvery = (ms: number) => {
   const timer = setInterval(() => {
     try {
@@ -393,7 +418,7 @@ export function makeActivities(
           // started unit runs to its end.
           if (stopRequested()) throw Context.current().cancellationSignal.reason;
           const before = billed(session);
-          const model = await session.modelCall();
+          const model = await modelCallUntilCancelled(session);
           const calls = model.ended ? [] : model.toolCalls;
           const results = new Map<string, TurnToolCallOutcome>();
           let stopped = false;
@@ -405,7 +430,7 @@ export function makeActivities(
               continue;
             }
             // One at a time. The session admits a single unit of work.
-            const outcome = await session.runToolCall(call.id);
+            const outcome = await session.runToolCall(call.id, cancelled());
             if (outcome) results.set(call.id, outcome);
           }
           stopped ||= stopRequested();
@@ -478,7 +503,7 @@ export function makeActivities(
           if (settled) return { settled, calls: [], sequential: false, ended: true };
 
           const before = billed(session);
-          const outcome = await session.modelCall();
+          const outcome = await modelCallUntilCancelled(session);
           const spent = spentSince(before, session);
           const total = billed(session);
           return {
@@ -570,7 +595,7 @@ export function makeActivities(
         // Local marker that a tool is running here. A later turn checks it before reusing this
         // directory, since a timed-out attempt may still be running.
         if (opts.shipTree) await worktree.beginWrite(opts.projectDir, writer);
-        const outcome = await session.runToolCall(input.call.id).finally(async () => {
+        const outcome = await session.runToolCall(input.call.id, cancelled()).finally(async () => {
           if (opts.shipTree) await worktree.endWrite(opts.projectDir, writer);
         });
         if (!outcome) return { outcome: "already-settled" };

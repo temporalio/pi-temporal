@@ -11,6 +11,10 @@ import {
 import { makeActivities, type ActivityOptions } from "./activities.js";
 import { queueForWorker } from "./queue.js";
 
+// A stop reaches a running Activity only with a heartbeat's answer. By default the SDK sends
+// heartbeats about every 24 seconds here, so a stopped tool would run on that long.
+const HEARTBEAT_THROTTLE = "3 seconds";
+
 export interface SessionWorkerOptions extends ActivityOptions {
   readonly address: string;
   // API key or mTLS settings, built by `connectionOptions` so client and worker always agree.
@@ -56,6 +60,7 @@ export async function createSessionWorker(
       workflowsPath: fileURLToPath(new URL("./workflows.ts", import.meta.url)),
       activities,
       shutdownForceTime: opts.shutdownForceTime,
+      maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
     });
     // Activities only, for work that must run on this host. Without this poller every step on the
     // host queue would wait out schedule-to-start before falling back to the shared queue.
@@ -65,6 +70,7 @@ export async function createSessionWorker(
       taskQueue: stepQueue,
       activities,
       shutdownForceTime: opts.shutdownForceTime,
+      maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
     });
   } catch (err) {
     // A Worker holds its connection until its run ends, so one that never ran is run and shut

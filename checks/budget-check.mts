@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
+import { Context } from "@temporalio/activity";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { QUERIES } from "../src/protocol.js";
 import type {
@@ -38,6 +39,18 @@ const recorded = new Map<string, number>();
 // read skips the asking turn's own entries.
 const recordedSeconds = new Map<string, { turn: string; seconds: number }[]>();
 let tokensPerStep = 0;
+
+// Waits like a real activity: it heartbeats, so a stop reaches it, and it ends when stopped.
+async function stoppable(ms: number) {
+  const ctx = Context.current();
+  const beat = setInterval(() => ctx.heartbeat(), 200);
+  try {
+    await ctx.sleep(ms);
+  } finally {
+    clearInterval(beat);
+  }
+}
+
 let stepsWriteLate = false;
 const toolsRun: string[] = [];
 let secondsPerStep = 0;
@@ -49,7 +62,7 @@ const activities = {
   async runStep(input: RunStepInput): Promise<RunStepResult> {
     const taken = (steps.get(input.promptId) ?? 0) + 1;
     steps.set(input.promptId, taken);
-    if (secondsPerStep) await sleep(secondsPerStep * 1000);
+    if (secondsPerStep) await stoppable(secondsPerStep * 1000);
     while (Date.now() < gateUntil) await sleep(100);
     const billed = (recorded.get(input.sessionFile) ?? 0) + tokensPerStep;
     recorded.set(input.sessionFile, billed);
@@ -109,6 +122,7 @@ async function main() {
     taskQueue: queue,
     workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)),
     activities,
+    maxHeartbeatThrottleInterval: "1 second",
   });
   const running = worker.run();
 
