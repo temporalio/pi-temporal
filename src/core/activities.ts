@@ -354,6 +354,8 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
               agentState: input.agentState,
               // A stopped turn records results only. No retry, no compaction.
               postRun: !stopped,
+              // An aborted signal would refuse the seal, and a stopped one must still record.
+              ...(stopped ? {} : { signal: cancellation() }),
             },
           );
           await session.waitForIdle();
@@ -553,6 +555,8 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
             agentState: input.agentState,
             // A stopped turn records results only. No retry, no compaction.
             postRun: !input.interrupted,
+            // A stop that lands during a retry or compaction ends it, rather than waiting it out.
+            signal: cancellation(),
           });
           await session.waitForIdle();
           const seconds = secondsBefore(session, input.turn);

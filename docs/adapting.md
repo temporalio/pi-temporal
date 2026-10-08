@@ -18,7 +18,7 @@ through a write guard. Most agent loops need changes to support this. Pi needed 
 | `hasPrompt(id)`, `recordPrompt(id, text)` | Puts the prompt in the session once, without running the model. |
 | `modelCall(signal)` | One model call. Records the response and its tool calls, runs none. |
 | `runToolCall(id, signal)` | Runs one recorded call and reports the outcome. Writes nothing. |
-| `sealStep(outcomes, options)` | Writes the step's outcomes in the model's order and says whether the turn is over. |
+| `sealStep(outcomes, options)` | Writes the step's outcomes in the model's order and says whether the turn is over. Stops its retry or compaction when `options.signal` aborts. |
 | `answered`, `asked`, `unanswered`, `endsWithResponse`, `lastAnswer` | Reads the session, so a retry can tell what an earlier attempt did. |
 | `waitForIdle()`, `dispose()` | Waits for work the session started after a seal, and closes it. |
 | `spend()`, `latestEntry`, `appendEntry` | Token totals, and a place for the core's bookkeeping. |

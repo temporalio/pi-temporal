@@ -119,9 +119,11 @@ The agent retries its provider on its own, inside the seal, and counts those ret
 
 A stop cancels the turn's scope. Tool and model Activities use `WAIT_CANCELLATION_COMPLETED`, so
 the Workflow waits for each to stop and report. The Activity passes its cancellation signal to the
-tool and the model call, which end like a user stop in the agent. The recovery seal then records
-what each tool reported instead of unknown outcomes. Cancellation reaches an Activity only with a
-heartbeat's answer, so Workers send heartbeats at least every 3 seconds.
+tool and the model call, which end like a user stop in the agent. The seal gets it too, since its
+retry or compaction is another model call. The recovery seal then records what each tool reported
+instead of unknown outcomes. Once a stop is asked the server doesn't retry a seal, so a lost seal
+attempt comes back as a timeout, and the recovery seal runs for that as well. Cancellation reaches
+an Activity only with a heartbeat's answer, so Workers send heartbeats at least every 3 seconds.
 
 ## Only a requested cancel is a stop
 

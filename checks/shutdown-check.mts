@@ -196,6 +196,35 @@ try {
     stopStepped.toolAborted && stopStepped.kept !== undefined,
     { kept: stopStepped.kept, failure: String(stopStepped.failure) },
   );
+
+  // A seal can retry the provider or compact, which takes as long as a model call. A stop reaches
+  // it the same way.
+  {
+    let sealAborted = false;
+    const openSession = async () =>
+      ({
+        state: { messages: [] },
+        sealStep: async (_outcomes: unknown[], options: { signal?: AbortSignal }) => {
+          sealAborted = await work(options.signal, 200);
+          return { done: true, retryAttempt: 0, overflowRecoveryAttempted: false };
+        },
+        async waitForIdle() {},
+        dispose() {},
+      }) as unknown as AgentSession;
+    const activities = makeActivities({ projectDir: root }, { openSession });
+    const env = new MockActivityEnvironment();
+    setTimeout(() => env.cancel("CANCELLED", asked), 50);
+    await env
+      .run(activities.sealStep, {
+        sessionId: "session",
+        sessionFile: join(root, `seal-${++files}.jsonl`),
+        turn: "prompt",
+        step: 1,
+        calls: [],
+      })
+      .catch(() => undefined);
+    check("a cancel from the Workflow aborts a seal", sealAborted);
+  }
 } finally {
   await rm(root, { recursive: true, force: true });
 }

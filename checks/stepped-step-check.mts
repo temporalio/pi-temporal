@@ -467,6 +467,36 @@ async function main() {
     );
   }
 
+  // After a stop the server doesn't retry the seal, so a lost attempt comes back as a timeout. On
+  // the shared queue too, the step's results still go in through the recovery seal.
+  {
+    const timedOut = Object.assign(new Error("activity failed"), {
+      name: "ActivityFailure",
+      cause: { name: "TimeoutFailure", timeoutType: "START_TO_CLOSE" },
+    });
+    const seals: SealStepInput[] = [];
+    const step = makeSteppedStep({
+      activities: {
+        runModelCall: async () => ({ calls: [call("c1")], sequential: false, ended: false }),
+        runToolCall: async () => ({ outcome: "settled" }),
+        sealStep: async (input) => {
+          seals.push(input);
+          if (!input.interrupted) throw timedOut;
+          return SEALED;
+        },
+      },
+      isCancellation,
+      nonCancellable: (fn) => fn(),
+    });
+    const outcome = await step(INPUT).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+    const recovered = seals.length === 2 && seals[1]?.interrupted === true && seals[1]?.lost;
+    check("a seal lost on the shared queue is recovered", recovered === true, seals);
+    check("and the turn goes on past it", "result" in outcome, String(outcome));
+  }
+
   const bad = failures.length;
   console.log(bad === 0 ? "stepped-step-check: OK" : `stepped-step-check: ${bad} failed`);
   process.exit(failures.length === 0 ? 0 : 1);
