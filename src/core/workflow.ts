@@ -549,7 +549,8 @@ export async function piSession(input: SessionInput): Promise<void> {
         }
       } else if (err instanceof TemporalFailure) {
         outcome = "failed";
-        error = err.message;
+        // An Activity's failure only says that it failed. Its cause says why.
+        error = err.cause instanceof ApplicationFailure ? err.cause.message : err.message;
         log.warn("turn failed", { sessionId: id, promptId: prompt.promptId, error });
       } else {
         // A bug in this code, such as a `TypeError`. Thrown on, it fails the Workflow Task, and

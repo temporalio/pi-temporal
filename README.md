@@ -136,7 +136,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | variable | what it sets | default |
 |---|---|---|
 | `PI_TEMPORAL_PROFILE` | `local` or `fleet`, the defaults below | `local` |
-| `PI_SESSION_DIR` | where session files live, shared storage in a fleet | `~/.pi-temporal/sessions` |
+| `PI_SESSION_DIR` | where session files live, shared storage in a fleet. Workers refuse a session file outside it, so it must resolve to the same absolute path on every client and Worker | `~/.pi-temporal/sessions` |
 | `PI_PROJECT_DIR` | the directory a standalone Worker's tools run in, required in `fleet` | the Worker's working directory |
 | `PI_TEMPORAL_STEPPED` | `1` runs each model call, tool call, and seal as its own Activity | off, on in `fleet` |
 | `PI_TEMPORAL_SHIP_TREE` | `1` ships the project's files between hosts | off, on in `fleet` |
