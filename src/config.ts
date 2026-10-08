@@ -88,7 +88,7 @@ export function fromEnv(): Config {
     profile,
     address: address ?? "127.0.0.1:7233",
     namespace: namespace ?? "default",
-    ...(Object.keys(standard).length > 0 ? { standard } : {}),
+    standard,
     taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
     // Absolute, since it travels in Workflow input and the client and worker have different cwds.
     sessionDir: given("PI_SESSION_DIR")
@@ -114,7 +114,8 @@ export function fromEnv(): Config {
         : process.env.PI_TEMPORAL_TLS === "1"
           ? true
           : undefined,
-    brokenTlsPair: !cert !== !key,
+    // The standard config's pair too, which it otherwise skips without a word.
+    brokenTlsPair: !cert !== !key || standardCert() !== standardKey(),
   };
 }
 
@@ -149,17 +150,24 @@ function codecKeyFromEnv(): { codecKey?: Buffer } {
 
 export function dropFromEnv(names: readonly string[]): void {
   for (const name of names) delete process.env[name];
+  // gRPC headers from the standard config, which often carry an `authorization` header.
+  for (const name of Object.keys(process.env)) {
+    if (name.startsWith("TEMPORAL_GRPC_META_")) delete process.env[name];
+  }
 }
 
 /** What the SDK's `Connection.connect` and `NativeConnection.connect` both take. */
 export function connectionOptions(cfg: Config) {
   // Without the key, the certificate is ignored and the client connects as nobody.
   if (cfg.brokenTlsPair) throw new Error(TLS_PAIR);
+  // Ours are added to the profile's TLS settings, so its CA or server name isn't lost.
+  const profileTls = typeof cfg.standard?.tls === "object" ? cfg.standard.tls : {};
   const tls =
     cfg.tls === true || (cfg.apiKey && cfg.tls === undefined)
-      ? true
+      ? (cfg.standard?.tls ?? true)
       : cfg.tls
         ? {
+            ...profileTls,
             clientCertPair: { crt: Buffer.from(cfg.tls.cert), key: Buffer.from(cfg.tls.key) },
             ...(cfg.tls.ca ? { serverRootCACertificate: Buffer.from(cfg.tls.ca) } : {}),
           }
@@ -172,7 +180,14 @@ export function connectionOptions(cfg: Config) {
   };
 }
 
-const TLS_PAIR = "PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY come as a pair";
+const standardCert = () =>
+  given("TEMPORAL_TLS_CLIENT_CERT_PATH") || given("TEMPORAL_TLS_CLIENT_CERT_DATA");
+const standardKey = () =>
+  given("TEMPORAL_TLS_CLIENT_KEY_PATH") || given("TEMPORAL_TLS_CLIENT_KEY_DATA");
+
+const TLS_PAIR =
+  "a client certificate and its key come as a pair: PI_TEMPORAL_TLS_CERT with " +
+  "PI_TEMPORAL_TLS_KEY, and TEMPORAL_TLS_CLIENT_CERT_* with TEMPORAL_TLS_CLIENT_KEY_*";
 
 // From either source of settings.
 const hasApiKey = (cfg: Config) => Boolean(cfg.apiKey ?? cfg.standard?.apiKey);

@@ -19,6 +19,7 @@ import {
 import * as worktree from "./tree/worktree.js";
 import {
   SESSION_MEMO,
+  SESSION_STATE_ATTRIBUTE,
   sessionIdProblem,
   UPDATES,
   WORKFLOW_TYPE,
@@ -468,6 +469,26 @@ async function main() {
         .then(async ({ client, connection }) => {
           try {
             await client.workflowService.getSystemInfo({});
+            // An attribute the namespace doesn't have would fail every session's Workflow task.
+            // A List that names it fails the same way, with no session needed.
+            if (cfg.searchAttribute) {
+              const query = `${SESSION_STATE_ATTRIBUTE} = 'idle'`;
+              const missing = await client.workflow
+                .list({ query, pageSize: 1 })
+                [Symbol.asyncIterator]()
+                .next()
+                .then(
+                  () => undefined,
+                  (err: unknown) => (err instanceof Error ? err.message : String(err)),
+                );
+              if (missing) {
+                const name = SESSION_STATE_ATTRIBUTE;
+                problems.push(
+                  `PI_TEMPORAL_SEARCH_ATTRIBUTE=1, but ${name} isn't usable in ${cfg.namespace}: ` +
+                    `${missing}. Register it as a Keyword search attribute.`,
+                );
+              }
+            }
             return "reached the server";
           } finally {
             await connection.close();

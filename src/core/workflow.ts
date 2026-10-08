@@ -90,6 +90,8 @@ const { runStep } = proxyActivities<{
 const { runModelCall } = proxyActivities<SteppedActivities>({
   ...cappedOptions,
   startToCloseTimeout: "10 minutes",
+  // A stop waits for the call to stop and record its aborted response, like a tool.
+  cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
   summary: "model call",
 });
 

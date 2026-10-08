@@ -12,7 +12,7 @@ Logic with no Temporal in it, run directly.
 
 `take-fence-check`, `pending-check`, `lease-check`, `lease-recovery-check`, `lock-gap-check`,
 `stall-check`, `session-id-check`, `config-check`, `stale-tip-check`, `worktree-check`,
-`storage-repair-check`, `quarantine-check`, `liveness-linux-check`
+`storage-repair-check`, `liveness-linux-check`
 
 ## The step driver with injected fakes, no server
 
@@ -27,7 +27,7 @@ The production Activities, called directly, with a fake `AgentSession`. Shows wh
 does on a retry, a race, or a stale attempt.
 
 `dispatch-check`, `stale-dispatch-check`, `seal-claim-check`, `result-recovery-check`,
-`compacted-prompt-check`, `spend-check`, `retire-seconds-check`
+`compacted-prompt-check`, `spend-check`, `retire-seconds-check`, `quarantine-check`
 
 ## The Workflow with stub Activities, on a dev server
 

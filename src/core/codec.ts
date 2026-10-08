@@ -41,7 +41,8 @@ export class AesGcmCodec implements PayloadCodec {
 
   async decode(payloads: Payload[]): Promise<Payload[]> {
     return payloads.map((payload) => {
-      // Payloads written before a key was set stay readable.
+      // Payloads written before a key was set stay readable. So would one written by anything that
+      // can write history directly, which this codec doesn't guard against.
       if (!payload.metadata?.encoding || text(payload.metadata.encoding) !== ENCODING) {
         return payload;
       }
@@ -50,9 +51,11 @@ export class AesGcmCodec implements PayloadCodec {
         throw new Error(`payload was encrypted with key ${text(keyId)}, not ${this.keyId}`);
       }
       const sealed = Buffer.from(payload.data ?? []);
+      // Too short to hold an IV and a whole tag. Node would accept a shorter tag otherwise.
+      if (sealed.length < IV_BYTES + TAG_BYTES) throw new Error("encrypted payload is cut short");
       const iv = sealed.subarray(0, IV_BYTES);
       const tag = sealed.subarray(sealed.length - TAG_BYTES);
-      const decipher = createDecipheriv(CIPHER, this.key, iv);
+      const decipher = createDecipheriv(CIPHER, this.key, iv, { authTagLength: TAG_BYTES });
       decipher.setAuthTag(tag);
       const plain = Buffer.concat([
         decipher.update(sealed.subarray(IV_BYTES, sealed.length - TAG_BYTES)),
