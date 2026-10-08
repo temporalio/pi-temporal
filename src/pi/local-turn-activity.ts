@@ -1,8 +1,7 @@
-// Activities behind `piLocalTurn`. They run in the pi process and act on the turn it already
-// holds, so transcript, events and streaming stay pi's own.
+// A live turn stays in the Pi process so it can use Pi’s transcript and streaming events.
 //
-// Tool results are kept in memory, not on disk. A crash of this process loses results the seal
-// had not recorded. Reopening the session resumes from the transcript.
+// Unsealed tool results live in memory. A process crash loses them, and reopening the session
+// resumes from the transcript.
 
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import type { TurnSteps, TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
@@ -17,7 +16,7 @@ import type {
 } from "../core/protocol.js";
 import { TURN_STOPPED } from "../core/protocol.js";
 
-/** A turn this process is holding, waiting for its workflow to say run. */
+/** A turn this process is holding, waiting for its Workflow to say run. */
 export interface LiveTurn {
   readonly run: () => Promise<void>;
   readonly steps: TurnSteps;
@@ -25,13 +24,12 @@ export interface LiveTurn {
 
 export type LiveTurns = Map<string, LiveTurn>;
 
-/** What a stepped turn has done so far, so a retried activity does not do it twice. */
+/** What a stepped turn has done so far, so a retried Activity does not do it twice. */
 interface TurnProgress {
   recorded: boolean;
   readonly results: Map<string, TurnToolCallOutcome>;
-  // Each unit's attempt, running or done, by unit. A retry joins it instead of running the unit
-  // again, so a model call isn't billed twice and a tool doesn't act twice. Only a failure is
-  // forgotten, so a retry after it runs the unit again.
+  // Retries join the same unit so they don’t bill another model call or repeat a tool’s effect.
+  // Failed units are forgotten so another attempt can run them.
   readonly units: Map<string, Promise<unknown>>;
 }
 
@@ -50,7 +48,7 @@ export function makeLocalTurnActivities(live: LiveTurns) {
   const turnFor = (turnId: string): LiveTurn => {
     const turn = live.get(turnId);
     if (!turn) {
-      // Process gone or turn finished. Retrying won't help. The next session open picks it up.
+      // Retrying cannot recover a missing live turn. Reopening the session uses its transcript.
       throw ApplicationFailure.nonRetryable(`no live turn ${turnId}`, "TurnGone");
     }
     return turn;

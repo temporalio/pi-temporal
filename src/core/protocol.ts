@@ -1,14 +1,14 @@
-// Names and shapes shared by the workflow, the client, and (type-only) the activities.
-// Keep this free of Pi SDK and Node imports. The workflow bundles it into the Temporal sandbox.
+// The Workflow bundles these shared types into the Temporal sandbox. Pi SDK and Node imports
+// would make this module unsafe to load there.
 
 export const WORKFLOW_TYPE = "piSession";
 export const WORKFLOW_ID_PREFIX = "pi-session-";
 // A tool call that failed before any attempt claimed it, so the tool never started and the
-// workflow may move a host-queue step.
+// Workflow may move a host-queue step.
 export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
 /**
- * Where a run's fences start. A run that started no later than the one it continued from counts
- * on from that run's last fence, so its fences still sort after the old run's.
+ * Where a run’s fences start. A run that started no later than the one it continued from counts
+ * on from that run’s last fence, so its fences still sort after the old run’s.
  */
 export const fenceStart = (
   runStartMs: number,
@@ -16,7 +16,7 @@ export const fenceStart = (
 ): { ms: number; seq: number } =>
   after && after.ms >= runStartMs ? { ms: after.ms, seq: after.seq } : { ms: runStartMs, seq: 0 };
 
-/** The Workflow's half of a fence: its run, and the Activity it is about to schedule. */
+/** The Workflow’s half of a fence: its run, and the Activity it is about to schedule. */
 export const fencePrefix = (runStartMs: number, seq: number) =>
   `${String(runStartMs).padStart(13, "0")}.${String(seq).padStart(8, "0")}`;
 

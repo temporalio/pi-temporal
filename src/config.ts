@@ -1,4 +1,4 @@
-// Configuration from env, read by the client and worker. Workflow code must never import this.
+// Configuration from env, read by the client and Worker. Workflow code must never import this.
 // `PI_TEMPORAL_PROFILE` (`local` or `fleet`) sets defaults that go together. A misconfigured fleet
 // serves the wrong files instead of failing, so `preflight` refuses what one process can detect.
 // Whether storage is really shared across hosts is for the operator to verify.
@@ -16,15 +16,15 @@ export interface Config {
   readonly address: string;
   readonly namespace: string;
   readonly taskQueue: string;
-  // Where each session's JSONL log lives. Must be shared storage in a fleet.
+  // Where each session’s JSONL log lives. Must be shared storage in a fleet.
   readonly sessionDir: string;
   readonly idleTimeout: string;
-  // One activity per model call, per tool call, and a seal, instead of one for the whole step.
+  // One Activity per model call, per tool call, and a seal, instead of one for the whole step.
   readonly stepped: boolean;
-  // Ship the project's files with the session, so a worker on another host sees the last one's
+  // Ship the project’s files with the session, so a Worker on another host sees the last one’s
   // work. Not needed on a single machine.
   readonly shipTree: boolean;
-  // Keep each session's state in the `PiSessionState` search attribute too. Needs it registered.
+  // Keep each session’s state in the `PiSessionState` search attribute too. Needs it registered.
   readonly searchAttribute: boolean;
   // Encrypts payloads in history (`core/codec.ts`). 32 bytes, from base64.
   readonly codecKey?: Buffer;
@@ -37,7 +37,7 @@ export interface Config {
   // Only one of the mTLS certificate and key was set. Kept here because the variables are dropped
   // from the environment once read, and no connection may go out with half a pair.
   readonly brokenTlsPair?: boolean;
-  // How long one tool call may run in stepped mode. Unset keeps the workflow's default.
+  // How long one tool call may run in stepped mode. Unset keeps the Workflow’s default.
   readonly toolTimeoutMinutes?: number;
   // Spend limits for a turn and a session. Unset means no limit.
   readonly budget?: TurnBudget;

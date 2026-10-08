@@ -1,11 +1,11 @@
-// Moves a session's project files between hosts, so a step that resumes on another worker finds
+// Moves a session’s project files between hosts, so a step that resumes on another Worker finds
 // the work the last one did. Each capture writes a git bundle beside the session log, and a host
 // that is behind unbundles what it has not seen. The shadow repository is host-local and points at
-// the work tree from outside, so the project's own `.git` is never touched.
+// the work tree from outside, so the project’s own `.git` is never touched.
 //
-// Rule: only a host standing on the tip may add to it, and nothing on a worker may establish it.
+// Rule: only a host standing on the tip may add to it, and nothing on a Worker may establish it.
 // The client sends the project. A stale tool that writes after its host is restored is not caught
-// here, which is why the driver won't move a step off a host whose attempt started.
+// here, which is why the driver won’t move a step off a host whose attempt started.
 //
 // A step closed away from its host is held to two clauses (see `lost-host-check.mts`):
 //   1. The seal that closes it publishes nothing, since nothing fences the old host until then.
@@ -677,7 +677,7 @@ export interface Fence {
   readonly step: number;
 }
 
-// Steps closed without their host, in the shared directory because that host can't be reached.
+// Steps closed without their host, in the shared directory because that host can’t be reached.
 // Its stale tool would otherwise publish against a tip that still looks live and revert newer work.
 // One marker per closed step, named by a hash of turn and step. Closing and checking stay
 // constant time however many closures a long session collects. `closed.json` is also read, for
@@ -980,7 +980,7 @@ async function handBack(projectDir: string, held: Held, owned: () => Promise<boo
   if (!held.built) return false;
   // A tool can outlive the turn while its directory still matches the last snapshot.
   if ((await writersHere(projectDir)).length > 0) return false;
-  // Compare with this host's own tree, since it may be behind the final tip.
+  // Compare with this host’s own tree, since it may be behind the final tip.
   if ((await treeHere(projectDir)) !== held.tree) return false;
   // Asked right before each step that deletes. A holder that stalled past its lease would delete
   // what the next holder put here. Losing the lease counts as not emptied, like any refusal.

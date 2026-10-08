@@ -1,5 +1,5 @@
 // Client helpers to submit a prompt to a session and to interrupt one. A prompt is an
-// Update-with-start: the first starts the per-session workflow, later ones join the running one.
+// Update-with-start: the first starts the per-session Workflow, later ones join the running one.
 // The session checks the prompt and says where it sits in the queue.
 
 import { randomUUID } from "node:crypto";
@@ -41,7 +41,7 @@ export async function openClient(cfg: Config = fromEnv()) {
   const client = new Client({
     connection,
     namespace: cfg.namespace,
-    // A closed workflow answers queries with its last state, so one terminated mid-turn looks busy
+    // A closed Workflow answers queries with its last state, so one terminated mid-turn looks busy
     // forever. Rejecting the query tells a follower the session is over.
     workflow: { queryRejectCondition: "NOT_OPEN" },
     ...withCodec(cfg),
@@ -64,7 +64,7 @@ export const sessionOptions = (cfg: Config): SessionTurnOptions => ({
 });
 
 /**
- * Send a prompt, starting the session if it isn't running. Returns how many prompts are ahead of
+ * Send a prompt, starting the session if it isn’t running. Returns how many prompts are ahead of
  * it, or undefined when no Worker answered in time and it went as a Signal. A prompt the session
  * already has counts as sent, so a retry after a lost answer is safe.
  */

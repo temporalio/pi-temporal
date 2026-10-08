@@ -1,5 +1,4 @@
-// Pi as an `Agent`. Everything Pi-specific the Activities need is here: how a session opens, how a
-// prompt is marked, how the transcript is read, and what Pi's retry state is between steps.
+// Pi’s session format and retry state stay in this adapter so the core can serve other agents.
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -18,12 +17,12 @@ import type { Spend } from "../core/protocol.js";
 import { textOf } from "./messages.js";
 
 export interface PiOptions {
-  // Where the agent's tools run. The embedded Worker points this at the pi session's own cwd.
+  // Where the agent’s tools run. The embedded Worker points this at the pi session’s own cwd.
   readonly projectDir: string;
   readonly provider?: string;
   // Matched as a substring of the model id, so "mini" picks the first mini the provider offers.
   readonly modelHint?: string;
-  // Only needed when the key is not already in Pi's auth store.
+  // Only needed when the key is not already in Pi’s auth store.
   readonly apiKey?: string;
 }
 

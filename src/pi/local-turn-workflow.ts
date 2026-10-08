@@ -1,11 +1,10 @@
-// A turn of a live pi session, wrapped in a workflow. The turn runs in the pi process that owns
-// the session, reached through a queue only that process polls. This adds a record and a retry
-// policy, not portability.
+// A live turn uses a private queue because only its Pi process owns the session in memory.
+// Temporal records the turn and applies retries, but the turn cannot move between processes.
 //
-// Stepped mode splits the turn into a model call, one activity per tool call, and a seal. Results
-// the seal never recorded are lost with the process.
+// Stepped mode gives each model call, tool call, and seal its own Activity. A process crash
+// loses results that the seal has not recorded.
 //
-// Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
+// Only `@temporalio/workflow` and type-only protocol imports belong in the sandbox.
 
 import {
   ActivityCancellationType,
@@ -34,7 +33,7 @@ interface LocalActivities {
   runLocalSeal(input: LocalSealInput): Promise<{ done: boolean }>;
 }
 
-// A stop from inside pi does not cancel the workflow. Only the failure type marks it.
+// A stop from inside pi does not cancel the Workflow. Only the failure type marks it.
 const userStopped = (err: unknown) =>
   err instanceof ActivityFailure &&
   err.cause instanceof ApplicationFailure &&
@@ -85,7 +84,7 @@ export async function piLocalTurn(input: LocalTurnInput): Promise<void> {
       await CancellationScope.nonCancellable(() => seal(true)).catch((err: unknown) => {
         log.warn("could not close a stopped step", { step, error: String(err) });
       });
-      // A user stop closes the turn, it doesn't fail it.
+      // A user stop closes the turn, it doesn’t fail it.
       if (userStopped(stopped)) return;
       throw stopped;
     }

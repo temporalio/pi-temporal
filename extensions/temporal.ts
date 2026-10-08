@@ -1,10 +1,9 @@
-// The pi extension. Each live turn runs as a workflow on an in-process worker, which gives it a
-// record in Temporal and retries. The turn stays in this process, so it can't move to another one.
-// A turn cut by a crash finishes when the session reopens. PI_TEMPORAL_LIVE_TURNS=0 turns this
-// off.
-// `/background` hands a task to a worker-owned session that keeps going after pi exits.
-// The embedded worker needs the pi fork build. Set PI_TEMPORAL_EMBEDDED_WORKER=0 when a fleet
-// worker owns the queue.
+// The in-process Worker gives live Pi turns a Temporal record and retries. A live turn stays
+// in this process and resumes from its transcript when the session reopens after a crash.
+// Set `PI_TEMPORAL_LIVE_TURNS=0` to disable live turns.
+//
+// `/background` tasks survive Pi exit because a Worker owns their sessions. The embedded Worker
+// needs the Pi fork build. Set `PI_TEMPORAL_EMBEDDED_WORKER=0` when a fleet Worker owns the queue.
 
 import type {
   ExtensionAPI,
@@ -53,12 +52,12 @@ import {
 
 const STATUS_KEY = "pi-temporal";
 const POLL_MS = 2000;
-// Shorter than the poll interval, so a worker that never answers cannot stack polls behind it.
+// Shorter than the poll interval, so a Worker that never answers cannot stack polls behind it.
 const QUERY_MS = 1500;
-// How long quitting pi waits for an embedded worker's in-flight tool. Past it the tool is
+// How long quitting pi waits for an embedded Worker’s in-flight tool. Past it the tool is
 // abandoned, and recovery reports its outcome unknown rather than running it again.
 const EMBEDDED_STOP = "5s";
-// A bound on a live turn's workflow, so a turn on a queue nobody polls can't wait forever. A day
+// A bound on a live turn’s Workflow, so a turn on a queue nobody polls can’t wait forever. A day
 // is far past any real turn, so it never cuts one short.
 const TURN_TIMEOUT = "24h";
 
@@ -73,7 +72,7 @@ type Env = Config & {
   readonly modelHint?: string;
 };
 
-// Shared settings come from `fromEnv`, so the extension and the worker agree on profile and
+// Shared settings come from `fromEnv`, so the extension and the Worker agree on profile and
 // session directory. The rest are extension-only.
 const env = (): Env => ({
   ...fromEnv(),
@@ -91,7 +90,7 @@ interface Task {
 
 export default function (pi: ExtensionAPI) {
   const cfg = env();
-  // Keeps the Temporal credentials, read once into `cfg` above, out of every tool's environment.
+  // Keeps the Temporal credentials, read once into `cfg` above, out of every tool’s environment.
   // The model keys stay, since pi itself needs them. Tools run as you, so they could read either
   // from this process anyway. This only stops them being handed over by default.
   dropFromEnv(TEMPORAL_CREDENTIAL_VARS);
@@ -100,10 +99,10 @@ export default function (pi: ExtensionAPI) {
   let embedding: Promise<SessionWorker> | undefined;
   const watching = new Map<string, Task>();
   let watcher: NodeJS.Timeout | undefined;
-  // The turn executor is handed a turn, not a context, so it borrows the session's for messages.
+  // The turn executor is handed a turn, not a context, so it borrows the session’s for messages.
   let uiCtx: ExtensionContext | undefined;
   let warnedNoTemporal = false;
-  // The embedded worker hosts the same activities, so it gets the standalone worker's checks.
+  // The embedded Worker hosts the same Activities, so it gets the standalone Worker’s checks.
   const workerProblems = cfg.embeddedWorker ? preflight(cfg) : [];
   let polling = false;
 
@@ -118,7 +117,7 @@ export default function (pi: ExtensionAPI) {
     return opening;
   };
 
-  // Building the workflow bundle takes a second, so start the worker on the first task.
+  // Deferring the bundle build keeps it out of Pi’s startup path.
   const startWorker = (ctx: ExtensionContext) => {
     if (embedding) return embedding;
     const starting: Promise<SessionWorker> = (async () => {

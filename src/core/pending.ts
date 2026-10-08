@@ -1,6 +1,6 @@
 // Per-step tool call state before the seal: which calls a dispatch started, and what finished ones
-// produced. Kept beside the session file, one file per call, so concurrent calls don't branch the
-// session tree and the seal can append results in the model's order.
+// produced. Kept beside the session file, one file per call, so concurrent calls don’t branch the
+// session tree and the seal can append results in the model’s order.
 //
 // Dispatch claims outlive their results and their turn. A stalled attempt can come back after the
 // seal and cleanup, and the claim is the only thing that stops it running the tool again. A claim

@@ -1,7 +1,6 @@
 # What survives, and how we know
 
-[architecture.md](architecture.md) defines the words used here: turn, step, seal, dispatch
-claim, fence token, host queue.
+[architecture.md](architecture.md) defines the terms used below.
 
 A crash can leave a tool’s effect on disk without a saved result. Recovery must account for that
 gap before another Worker continues. This page describes each mode’s recovery behavior and links
@@ -28,9 +27,9 @@ Worker mode uses one `runStep` Activity per step by default. Live mode runs the 
 `runLocalTurn` Activity. With `PI_TEMPORAL_STEPPED=1`, the model call and seal each use an Activity,
 and every tool call gets its own Activity.
 
-Each Worker also polls a host queue of its own, a Task Queue only it listens on. A stepped step's
-tool calls and seal go to the host queue of the Worker that made the model call, since they use
-that host's project directory. Work nobody started there moves to the shared Task Queue.
+Each Worker also polls its own host queue. In stepped mode, tool calls and the seal use the host
+queue of the Worker that made the model call, because they need its project directory. Work that
+provably never started there can move to the shared Task Queue.
 
 ## The rules
 
@@ -52,8 +51,9 @@ A Worker may append to the transcript only while it holds the newest fence. The 
 every Activity that writes the transcript, and each attempt adds its own number, so a later run,
 Activity, or attempt sorts higher. A unit takes its token with an exclusive create in
 `<session>.jsonl.fence/`, and its write guard refuses every append once a higher number is there.
-A retry takes over at once, since Temporal already decided the earlier attempt is dead. No clocks
-or timers are involved, beyond a new run starting later than the old one by the server's clock.
+A retry takes over when Temporal starts a new attempt. Fence ordering uses the server’s run
+start time, with the sequence carried across Continue-as-New when needed. It has no lease expiry
+timer.
 Tool calls never write the transcript. The guard stops the transcript write. It doesn’t stop a
 tool’s external effects, which is what the claim is for.
 
@@ -76,8 +76,9 @@ The lock directories outlive the session, `forget` included. They are
 expired epoch. Don’t delete them in cleanup scripts, or an epoch can start again from one.
 
 Stepped Worker tool calls have a 30-minute timeout per attempt by default.
-`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it, for calls on a host queue too. A host-queue call’s
-total also has room for its queue wait. A timed-out call with a dispatch claim isn’t repeated,
+`PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` changes it on both shared and host queues. The total timeout
+for a host-queue call also allows for its queue wait. A timed-out call with a dispatch claim isn’t
+repeated,
 because its effects may already have happened.
 
 Each stepped Activity opens its own `AgentSession`. A step with four tool calls opens the session
@@ -95,11 +96,11 @@ model response.
 | A stale dispatch wakes after cleanup | No claims in this mode. | The claim is still there, so it isn’t admitted. | `stale-dispatch-check`, `dispatch-check` |
 | The user stops a turn | In-memory results are sealed if the process lives. | A running tool or model call is stopped and reports it, the next unit doesn’t start, and the step is sealed with what each tool reported. | `local-turn-check`, `seal-check`, `stepped-step-check` |
 | A turn overspends | No bound. | Soft budgets stop at a boundary. The hard deadline stops the running unit like a user stop. A command the tool started outside its own process may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
-| History grows | Step ceiling only. | Continue-As-New between turns. One huge turn can still hit limits. | `continue-as-new-check` |
+| History grows | Step ceiling only. | Continue-as-New between turns. One huge turn can still hit limits. | `continue-as-new-check` |
 | A deploy changes what a step schedules | Not applicable | `replay-check` replays the kept histories, so CI catches it. Gate the change with `patched()`, or ship it as a new Worker Deployment Version. | `replay-check` |
 
-A stop ends the turn that's running. Prompts already queued still run, and a stop with no turn
-running does nothing.
+A stop ends the running turn. Queued prompts still run. If no turn is running, the stop has no
+effect.
 
 The model receives the unknown outcome and can inspect the effect before deciding what to do.
 There’s no general resolver for arbitrary commands. A later model request is a new dispatch,
@@ -126,8 +127,8 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
 - Only a host at the current tree tip may publish the next snapshot. A host that’s behind saves
   its unshipped work in `<session>.jsonl.tree/salvage/` as a bundle (`worktree-check`).
 - Each snapshot number gets one tip, created once and never replaced. A writer that stalls after
-  its lease check and wakes up after another host took over gets an error. It can't take the
-  session back to its older tree. `forget` starts a new set of tips, so such a writer can't bring
+  its lease check and wakes up after another host took over gets an error. It can’t take the
+  session back to its older tree. `forget` starts a new set of tips, so such a writer can’t bring
   a forgotten session back either (`stale-tip-check`).
 - The client establishes the project through `start --project=` or `/background`. A
   Worker never adopts its own directory, since the first Activity lands on whichever Worker is
@@ -140,11 +141,12 @@ shadow repository is local to the host and leaves the project’s own `.git` unc
   the same way. The closure stays until `forget` removes the session’s tree store. A timed-out
   attempt has no lifetime bound, so later turns can’t make its closure safe to drop.
 - A directory is refused while a call that outlived its Activity may still write it. A marker
-  records the call’s process. The host clears it only after checking the process and its process
-  group, plus the cgroup on Linux. It also checks for processes with the exported name, working
-  directory, or open files in the directory. A reused PID doesn’t count as the original process.
-  A live call touches its marker every 10 seconds. A marker from another PID namespace, e.g.
-  before a container restart, counts as live until it goes quiet for 40 seconds. Children that
+  records the call’s process. Before clearing it, the host checks that process and its process
+  group. On Linux it also checks the cgroup. Other checks look for inherited Worker names and
+  processes that still use the directory or hold its files open. A reused PID doesn’t count as
+  the original process.
+  A live call touches its marker every 10 seconds. A marker from another PID namespace counts
+  as live until it goes quiet for 40 seconds, for example after a container restart. Children that
   outlive such a call are not seen from the new namespace.
   A directory the session built from empty can be moved aside and rebuilt. That separates writes
   through inherited working directories or open handles. A command that uses an absolute path
@@ -168,10 +170,10 @@ session’s tree store, salvage included.
 - A tool still running on a Worker inside `pi` when you quit. `pi` waits a few seconds, then
   abandons it, and its outcome is reported unknown.
 - Credentials kept from tools. A Worker drops the Temporal and model keys from the environment
-  its tools inherit, but the tools run as the same user. They can read the Worker's original
-  environment from `/proc/<pid>/environ`, a key file, or a `temporal.toml`. Inside `pi`, the model
-  key stays in the environment, since `pi` needs it. To keep credentials from the agent, run its
-  tools under another user, in a container, or in a sandbox.
+  its tools inherit, but the tools run as the same user. They can read the Worker’s original
+  environment from `/proc/<pid>/environ`. They can also read key files or `temporal.toml`. Inside
+  `pi`, the model key stays in the environment because `pi` needs it. Keeping credentials from
+  the agent requires a separate user or another isolation boundary, such as a sandbox.
 
 ## Running the checks
 

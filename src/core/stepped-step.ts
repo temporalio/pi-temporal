@@ -1,9 +1,9 @@
-// One step of a turn, driven as a model call, one activity per tool call, and a seal. This puts
-// the workflow between the model asking for a tool and the tool running, so per-tool retry,
+// One step of a turn, driven as a model call, one Activity per tool call, and a seal. This puts
+// the Workflow between the model asking for a tool and the tool running, so per-tool retry,
 // timeout and budget can apply.
 //
 // The seal is the only writer of tool results. Concurrent writers would branch the session tree,
-// so calls report results and the seal records them together, in the model's order.
+// so calls report results and the seal records them together, in the model’s order.
 //
 // Sandbox-safe: no SDK or Node imports. SDK pieces are injected.
 
@@ -28,7 +28,7 @@ export interface SteppedActivities {
 export interface SteppedStepDeps {
   readonly activities: SteppedActivities;
   readonly isCancellation: (err: unknown) => boolean;
-  // The same activities on the model-call worker's own queue. Tools write that host's project
+  // The same Activities on the model-call Worker’s own queue. Tools write that host’s project
   // directory, so they run there and can run concurrently.
   readonly onHost?: (queue: string) => Pick<SteppedActivities, "runToolCall" | "sealStep">;
   // Migration requires evidence that no attempt started on the host queue.
@@ -39,9 +39,9 @@ export interface SteppedStepDeps {
   // Run the seal even when the turn was cancelled, so finished calls keep their real results.
   readonly nonCancellable: <T>(fn: () => Promise<T>) => Promise<T>;
   // Checked between sequential calls. A started call is never stopped, since the transcript needs
-  // its result. Given what this step's model call spent, which the workflow has not counted yet.
+  // its result. Given what this step’s model call spent, which the Workflow has not counted yet.
   readonly outOfBudget?: (pending?: Pick<ModelCallResult, "spent" | "total">) => boolean;
-  // The workflow logger. History shows an activity succeeded, but only the dispatch knows what it
+  // The Workflow logger. History shows an Activity succeeded, but only the dispatch knows what it
   // decided.
   readonly log?: (message: string, attributes: Record<string, unknown>) => void;
 }
@@ -53,17 +53,17 @@ interface Dispatched {
   readonly error?: unknown;
 }
 
-/** What a model call reported, whichever activity made it. */
+/** What a model call reported, whichever Activity made it. */
 export interface StepCalls {
   readonly calls: readonly DeferredToolCall[];
   readonly sequential: boolean;
   readonly ended: boolean;
-  /** The queue the worker that made this call polls on its own, when it has one. */
+  /** The queue the Worker that made this call polls on its own, when it has one. */
   readonly queue?: string;
 }
 
 /**
- * Run the calls of one step and return the stop error, if any. Shared by the worker path and the
+ * Run the calls of one step and return the stop error, if any. Shared by the Worker path and the
  * live pi path.
  */
 export async function dispatchStepCalls(
@@ -134,12 +134,12 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
   const { runModelCall } = deps.activities;
 
   return async (input: RunStepInput): Promise<RunStepResult> => {
-    // The Workflow clock, so replay agrees. The seal adds this step's own time to the session's.
+    // The Workflow clock, so replay agrees. The seal adds this step’s own time to the session’s.
     const stepStartedAt = Date.now();
     const model = await runModelCall(input);
     const withSpend = (result: RunStepResult): RunStepResult => {
       const spent = together(model.spent, result.spent);
-      // Prefer the seal's total. It read the session after the model call wrote to it.
+      // Prefer the seal’s total. It read the session after the model call wrote to it.
       const total = result.total ?? model.total;
       const sessionSeconds = result.sessionSeconds ?? model.sessionSeconds;
       return {
@@ -155,7 +155,7 @@ export function makeSteppedStep(deps: SteppedStepDeps): SteppedStep {
       return withSpend(model.settled);
     }
 
-    // The model-call worker's own queue, the host holding the project directory.
+    // The model-call Worker’s own queue, the host holding the project directory.
     const host = model.queue && deps.onHost ? deps.onHost(model.queue) : undefined;
     let unclaimed = false;
     let unsafeFailure: unknown;

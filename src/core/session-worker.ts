@@ -10,34 +10,34 @@ import {
 } from "@temporalio/worker";
 import { queueForWorker } from "./queue.js";
 
-// A stop reaches a running Activity only with a heartbeat's answer. By default the SDK sends
+// A stop reaches a running Activity only with a heartbeat’s answer. By default the SDK sends
 // heartbeats about every 24 seconds here, so a stopped tool would run on that long.
 const HEARTBEAT_THROTTLE = "3 seconds";
 
 export interface SessionWorkerOptions {
   readonly address: string;
-  // API key or mTLS settings, built by `connectionOptions` so client and worker always agree.
+  // API key or mTLS settings, built by `connectionOptions` so client and Worker always agree.
   readonly connect?: Parameters<typeof NativeConnection.connect>[0];
   readonly namespace: string;
   readonly taskQueue: string;
   // The Activities this Worker runs, given its host queue when it has one.
   readonly activities: (hostQueue: string | undefined) => Record<string, unknown>;
-  // Also poll a host queue named for this project directory, so a step's tools and seal can come
+  // Also poll a host queue named for this project directory, so a step’s tools and seal can come
   // back to the host that holds the project. Leave it out when nothing is host-bound.
   readonly hostQueueFor?: string;
   // A Workflow bundle built ahead of time (`npm run bundle`). Without one, the Worker bundles the
   // source at start, which is fine for development.
   readonly workflowBundlePath?: string;
-  // The same codec as the clients, or they can't read each other's payloads.
+  // The same codec as the clients, or they can’t read each other’s payloads.
   readonly dataConverter?: WorkerOptions["dataConverter"];
-  // How long `stop()` waits for in-flight activities before it gives up on them. Unset, it waits
-  // for them all. An embedded worker sets it, so quitting pi can't hang on a long tool.
+  // How long `stop()` waits for in-flight Activities before it gives up on them. Unset, it waits
+  // for them all. An embedded Worker sets it, so quitting pi can’t hang on a long tool.
   readonly shutdownForceTime?: WorkerOptions["shutdownForceTime"];
 }
 
 export interface SessionWorker {
   readonly worker: Worker;
-  // Runs the worker and resolves when it has drained. Call stop() to end it.
+  // Runs the Worker and resolves when it has drained. Call stop() to end it.
   readonly run: () => Promise<void>;
   readonly stop: () => Promise<void>;
 }
@@ -48,8 +48,8 @@ export async function createSessionWorker(
   const connection = await NativeConnection.connect(
     opts.connect ?? { address: opts.address },
   );
-  // This process's own queue, so a step can come back to the Worker that started it. Computed
-  // once here, so the poller and the Activities can't report different names.
+  // This process’s own queue, so a step can come back to the Worker that started it. Computed
+  // once here, so the poller and the Activities can’t report different names.
   const hostQueue =
     opts.hostQueueFor === undefined ? undefined : queueForWorker(opts.taskQueue, opts.hostQueueFor);
   const activities = opts.activities(hostQueue);
@@ -108,12 +108,12 @@ export async function createSessionWorker(
       running ??= shared.run();
       return Promise.all([running, runningHost]).then(() => undefined);
     },
-    // Once only. A worker that died is stopped by its owner, which may also stop it on exit.
+    // Once only. A Worker that died is stopped by its owner, which may also stop it on exit.
     stop: () => (stopping ??= stopOnce()),
   };
 
   async function stopOnce() {
-    // Each step runs even if an earlier one failed, so one bad resource can't leak the rest.
+    // Each step runs even if an earlier one failed, so one bad resource can’t leak the rest.
     let failure: unknown;
     const attempt = async (step: () => unknown) => {
       try {
@@ -122,10 +122,10 @@ export async function createSessionWorker(
         failure ??= err;
       }
     };
-    // `shutdown()` throws unless the worker is running, e.g. when it already died.
+    // `shutdown()` throws unless the Worker is running, e.g. when it already died.
     await attempt(() => shared.getState() === "RUNNING" && shared.shutdown());
     await attempt(() => hostWorker?.getState() === "RUNNING" && hostWorker.shutdown());
-    // A worker shut down mid-poll, or forced past `shutdownForceTime`, rejects. That's the
+    // A Worker shut down mid-poll, or forced past `shutdownForceTime`, rejects. That’s the
     // shutdown, not a failure.
     await running?.catch(() => {});
     await runningHost?.catch(() => {});

@@ -1,4 +1,4 @@
-// Text of a Pi AgentMessage's content, which is a string or an array of content blocks.
+// Text of a Pi AgentMessage’s content, which is a string or an array of content blocks.
 
 export function textOf(content: unknown): string {
   if (typeof content === "string") return content;

@@ -1,19 +1,19 @@
-// One writer at a time for a project's tree store and for a host's project directory. Unlike the
+// One writer at a time for a project’s tree store and for a host’s project directory. Unlike the
 // session file, these are also written by clients and by hosts outside any Workflow, so there is
-// no Workflow to order them, and a lease stands in. Two attempts of the same activity can overlap
+// no Workflow to order them, and a lease stands in. Two attempts of the same Activity can overlap
 // after a stalled heartbeat.
 //
-// A lease, not a fence. Callers must re-check ownership right before each write. The lock is a
+// Ownership can expire, so callers must re-check it right before each write. The lock is a
 // directory of epoch files. Taking over is an exclusive create of epoch N+1, and the
 // epoch counts only while no newer one exists. A released epoch stays on disk, expired, so
-// epochs only grow and a contender that paused can't reuse one.
+// epochs only grow and a contender that paused can’t reuse one.
 
 import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 
-// Longer than the activity heartbeat timeout. A holder blocked in a synchronous write cannot
+// Longer than the Activity heartbeat timeout. A holder blocked in a synchronous write cannot
 // refresh, and a shorter window would reclaim from a live holder.
 const STALE_MS = 60_000;
 const REFRESH_MS = 3_000;
