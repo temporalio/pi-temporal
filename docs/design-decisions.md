@@ -262,8 +262,11 @@ in every client and Worker, and the server then stores only ciphertext. A failur
 stack trace are plain fields by default, and tool and provider errors can quote the task. So the
 codec's failure converter moves them into a payload too (`encodeCommonAttributes`). The prebuilt
 bundle doesn't carry it, so failures the Workflow raises itself, such as a refused prompt, stay
-plain. They hold no task text. The UI needs a codec server with the same key to show any of this.
-Search attributes, such as `PiSessionState`, are never encrypted.
+plain. They hold no task text. The bundle is built once for every Worker, with a key or without,
+and the converter encodes whether or not a key is set. Built into the bundle, it would hide
+every Workflow failure behind `Encoded failure` in the UI, even where no key is set. The UI
+needs a codec server with the same key to show any of this. Search attributes, such as
+`PiSessionState`, are never encrypted.
 
 The codec still reads a plain payload, so history written before the key was set stays readable.
 That also means it doesn't guard against someone who can write history directly. It protects

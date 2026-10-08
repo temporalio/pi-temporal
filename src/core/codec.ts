@@ -114,7 +114,7 @@ const fromJson = (json: JsonPayload): Payload => ({
 
 /** Moves failure messages into payloads, so the codec encrypts them too. */
 export const FAILURE_CONVERTER_PATH = createRequire(import.meta.url).resolve(
-  "./failure-converter.ts",
+  "./failure-converter.cjs",
 );
 
 /** The data converter for the configured keys, or undefined to store payloads as plain JSON. */
