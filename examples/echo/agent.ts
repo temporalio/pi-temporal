@@ -2,7 +2,7 @@
 // prompt's text, then answers with what the tool gave back. The session is a JSONL file of this
 // file's own entries. Each rule a comment cites is under "What must hold" in docs/adapting.md.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ApplicationFailure } from "@temporalio/common";
@@ -29,16 +29,17 @@ export interface EchoOptions {
   readonly tool?: EchoTool;
 }
 
-function load(file: string): { entries: Entry[]; torn: boolean } {
-  if (!existsSync(file)) return { entries: [], torn: false };
-  const raw = readFileSync(file, "utf8");
-  const lines = raw.split("\n").filter(Boolean);
-  // A crash mid-append can leave a cut last line. Drop it, and start the next append on a new
-  // line, so the file stays one entry per line.
-  const torn = raw.length > 0 && !raw.endsWith("\n");
-  if (torn) lines.pop();
+// `whole` is the length of the complete lines, in bytes. Anything after it is a cut last line.
+function load(file: string): { entries: Entry[]; torn: boolean; whole: number } {
+  if (!existsSync(file)) return { entries: [], torn: false, whole: 0 };
+  const raw = readFileSync(file);
+  const end = raw.lastIndexOf(0x0a) + 1;
+  // A crash mid-append can leave a cut last line. It's read as if it weren't there, and the next
+  // append cuts it off, so the file stays one whole entry per line.
+  const torn = end < raw.length;
+  const lines = raw.subarray(0, end).toString("utf8").split("\n").filter(Boolean);
   try {
-    return { entries: lines.map((line) => JSON.parse(line) as Entry), torn };
+    return { entries: lines.map((line) => JSON.parse(line) as Entry), torn, whole: end };
   } catch (err) {
     // A broken file stays broken. Retrying would burn every attempt on the same error.
     throw ApplicationFailure.nonRetryable(`the session ${file} can't be read: ${String(err)}`);
@@ -47,12 +48,15 @@ function load(file: string): { entries: Entry[]; torn: boolean } {
 
 /** One file's entries, and the only way to add to them: through the guard. */
 function journal(file: string, guard: () => void) {
-  const { entries, torn } = load(file);
+  const { entries, torn, whole } = load(file);
   let cut = torn;
   const append = (entry: Entry) => {
     // Every append calls the guard first, and stops if it throws. That's the fence.
     guard();
-    appendFileSync(file, `${cut ? "\n" : ""}${JSON.stringify(entry)}\n`);
+    // Cut off a torn last line before writing after it. Left in place, it would stop being the
+    // last line, and the next load would fail on it for good.
+    if (cut) truncateSync(file, whole);
+    appendFileSync(file, `${JSON.stringify(entry)}\n`);
     cut = false;
     entries.push(entry);
   };

@@ -152,6 +152,7 @@ export default function (pi: ExtensionAPI) {
             apiKey: modelApiKey(cfg.provider ?? ctx.model?.provider),
             shipTree: cfg.shipTree,
             hostQueue,
+            sessionRoot: cfg.sessionDir,
           }),
         shutdownForceTime: EMBEDDED_STOP,
         maxConcurrentActivities: cfg.maxActivities,

@@ -33,7 +33,8 @@ const worker = await createSessionWorker({
   address,
   namespace,
   taskQueue,
-  activities: () => makeCoreActivities({ agent: yourAgent(options) }),
+  // Anyone who can start a Workflow picks its input. The Worker writes only under this directory.
+  activities: () => makeCoreActivities({ agent: yourAgent(options), sessionRoot }),
 });
 await worker.run();
 ```
@@ -48,6 +49,9 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
 
 - Every append must call the guard first. An unguarded write can let a superseded attempt change
   the session.
+- A crash can cut the last entry in half. Reading must skip a cut last entry, and the next append
+  must remove it first. Left in place, it stops being the last entry, and every later open fails
+  on it. `echo-journal-check` shows the echo agent doing this.
 - Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
   the seal must write their results together to avoid conflicting writes.
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.

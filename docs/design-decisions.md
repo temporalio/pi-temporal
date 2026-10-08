@@ -246,6 +246,14 @@ step, across Workers. The prebuilt bundle always has the Workflow interceptors, 
 about twice the size. The same image then traces or not by the variable alone. Without tracing,
 the sink drops their spans. `tracing-check` shows one trace from the client to the Activity.
 
+## Workflow input is untrusted
+
+Anyone who can start a Workflow in the namespace picks its input, and the client in this repo is
+only one way to do it. The session file in that input names where a Worker writes the session,
+its dispatch claims and its fence tokens. So the core Activities take a `sessionRoot` and refuse,
+without a retry, any session file or template outside it. Pi's Workers pass their session
+directory. `session-root-check` shows the refusal.
+
 ## Payloads can be encrypted
 
 Prompt and answer payloads pass through history, along with error text. Coding tasks can put

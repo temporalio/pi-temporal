@@ -448,7 +448,9 @@ export async function piSession(input: SessionInput): Promise<void> {
         };
         // Between the tools of one step, the step's own model call counts too.
         outOfBudget = (pending) => over(pending);
-        // A session already past a session bound must not pay for one more step per prompt.
+        // A session already past a session bound must not pay for one more step per prompt. This
+        // run's own count carries across Continue-As-New. A run woken after an idle exit starts
+        // with none, and learns the session's total from its first step.
         if (over()) {
           outcome = "budget";
           log.warn("turn not started: the session is out of budget", {

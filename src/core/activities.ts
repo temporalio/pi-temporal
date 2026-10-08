@@ -10,6 +10,7 @@
 // - A tool call keeps its result beside the session, and only the seal writes results in.
 
 import { access } from "node:fs/promises";
+import { resolve as resolvePath, sep } from "node:path";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import type {
   Agent,
@@ -36,6 +37,7 @@ import { takeFence, fenceToken } from "./fence.js";
 // Retry delay after a host refuses the project directory. Short, so the work finds a free host.
 const REFUSAL_RETRY = "2 seconds";
 const QUARANTINED = "WorktreeQuarantined";
+const OUTSIDE_SESSION_ROOT = "SessionOutsideRoot";
 
 // The session's turn time lives in its record, like its token count, so a run woken after an idle
 // exit still counts the turns before it. The Workflow's own count only spans one run.
@@ -100,9 +102,45 @@ export interface CoreActivityOptions {
   readonly store?: ProjectStore;
   // This Worker's host queue. The model call reports it, so the rest of the step runs here.
   readonly hostQueue?: string;
+  // Every session file must be under this directory. Anyone who can start a Workflow in the
+  // namespace picks its input, so a path from it is untrusted, and the Worker writes beside it.
+  // Unset, any path is used as given.
+  readonly sessionRoot?: string;
 }
 
-export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOptions) {
+export function makeCoreActivities(options: CoreActivityOptions) {
+  const activities = makeUncheckedActivities(options);
+  const { sessionRoot } = options;
+  if (sessionRoot === undefined) return activities;
+  const root = resolvePath(sessionRoot) + sep;
+  const inRoot = (path: string | undefined, what: string) => {
+    if (path === undefined || resolvePath(path).startsWith(root)) return;
+    // The same input fails the same way on every attempt, so a retry would only repeat this.
+    throw ApplicationFailure.nonRetryable(
+      `${what} ${path} is outside the session directory ${sessionRoot}`,
+      OUTSIDE_SESSION_ROOT,
+    );
+  };
+  const checked =
+    <I extends { readonly sessionFile: string; readonly template?: string }, O>(
+      activity: (input: I) => Promise<O>,
+    ) =>
+    (input: I): Promise<O> => {
+      inRoot(input.sessionFile, "session file");
+      inRoot(input.template, "template");
+      return activity(input);
+    };
+  return {
+    runStep: checked(activities.runStep),
+    runModelCall: checked(activities.runModelCall),
+    runToolCall: checked(activities.runToolCall),
+    sealStep: checked(activities.sealStep),
+    retireSession: checked(activities.retireSession),
+    adoptProject: checked(activities.adoptProject),
+  };
+}
+
+function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOptions) {
   // Restore the project before work runs here. A step must not run against the wrong files, so
   // errors go up and send the work to a host that can do it.
   const bringTree = async (sessionFile: string, writer?: Writer) => {
@@ -566,5 +604,5 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
   return { runStep, runModelCall, runToolCall, sealStep, retireSession, adoptProject };
 }
 
-export type CoreActivities = ReturnType<typeof makeCoreActivities>;
+export type CoreActivities = ReturnType<typeof makeUncheckedActivities>;
 export type { ToolCallRef };

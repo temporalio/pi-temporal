@@ -100,6 +100,7 @@ async function main() {
         apiKey,
         shipTree: cfg.shipTree,
         hostQueue,
+        sessionRoot: cfg.sessionDir,
       }),
   });
 

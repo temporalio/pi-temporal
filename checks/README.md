@@ -34,8 +34,11 @@ call its own environment and `attempt`.
 `dispatch-check`, `stale-dispatch-check`, `seal-claim-check`, `result-recovery-check`,
 `compacted-prompt-check`, `spend-check`, `retire-seconds-check`, `quarantine-check`
 
-`shutdown-check` cancels `runStep` through its `MockActivityEnvironment`, once as a Worker shutdown
-and once as a stop.
+`shutdown-check` cancels `runStep` through its `MockActivityEnvironment` for each reason the SDK
+gives, and only a requested cancel stops it.
+
+`writer-marker-check` and `session-root-check` run the core Activities over the echo agent, with no
+Pi. `echo-journal-check` cuts the echo agent's session file mid-append.
 
 ## The Workflow with stub Activities, on a dev server
 

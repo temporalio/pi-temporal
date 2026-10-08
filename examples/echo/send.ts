@@ -2,8 +2,6 @@
 // Usage: npx tsx examples/echo/send.ts "hello" (ECHO_STEPPED=1 runs each tool call on its own)
 
 import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Client, Connection } from "@temporalio/client";
 import { sendPrompt } from "../../src/core/client.js";
 import { type Quiet, sessionFileFor, UPDATES, workflowId } from "../../src/core/protocol.js";
@@ -11,10 +9,9 @@ import { settings } from "./worker.js";
 
 const text = process.argv[2];
 if (!text) throw new Error('send.ts wants a prompt: npx tsx examples/echo/send.ts "hello"');
-const { address, namespace, taskQueue } = settings();
+const { address, namespace, taskQueue, sessionDir } = settings();
 const sessionId = process.env.ECHO_SESSION ?? `echo-${randomUUID().slice(0, 8)}`;
-// The Worker opens this path, so both must see the same directory.
-const sessionDir = process.env.ECHO_SESSION_DIR ?? join(tmpdir(), "echo-sessions");
+// The Worker opens this path and refuses one outside its directory, so both use the same one.
 const sessionFile = sessionFileFor(sessionDir, sessionId);
 
 const connection = await Connection.connect({ address });
