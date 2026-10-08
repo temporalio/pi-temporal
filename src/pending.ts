@@ -17,11 +17,11 @@ const STARTED = ".started";
 // Scoped by turn and step. Call ids are unique only per message, and steps restart at one per turn.
 const rootFor = (sessionFile: string) => `${sessionFile}.pending`;
 // Turn ids come from the submitter. Unsafe names are hashed, not rewritten, so two ids never share
-// a directory.
+// a directory. `~` isn't in the direct alphabet, so a hash can't be passed off as a direct id.
 const keyFor = (turn: string) =>
   /^[A-Za-z0-9._-]{1,64}$/.test(turn) && turn !== "." && turn !== ".."
     ? turn
-    : createHash("sha256").update(turn).digest("hex").slice(0, 32);
+    : `~${createHash("sha256").update(turn).digest("hex").slice(0, 32)}`;
 const turnDir = (sessionFile: string, turn: string) => join(rootFor(sessionFile), keyFor(turn));
 const dirFor = (sessionFile: string, turn: string, step: number) =>
   join(turnDir(sessionFile, turn), String(step));

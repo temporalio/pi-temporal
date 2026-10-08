@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { connect, interrupt, submitPrompt } from "./client.js";
+import { connect, interrupt, sessionExists, submitPrompt } from "./client.js";
 import {
   clientProblems,
   describe,
@@ -17,7 +17,7 @@ import {
   sessionFileFor,
 } from "./config.js";
 import * as worktree from "./worktree.js";
-import { WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
+import { sessionIdProblem, WORKFLOW_TYPE, WORKFLOW_ID_PREFIX, workflowId } from "./protocol.js";
 import {
   QueryRejectedError,
   ScheduleAlreadyRunning,
@@ -68,7 +68,9 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
   const cfg = fromEnv();
   if (!cfg.shipTree) return;
   // Never fall back to cwd. From a home directory that would ship `~/.ssh` and `~/.aws`.
-  const projectDir = projectFlag ?? process.env.PI_PROJECT_DIR;
+  const given = projectFlag ?? process.env.PI_PROJECT_DIR;
+  // Absolute, since git runs in the directory and also names it as the work tree.
+  const projectDir = given === undefined ? undefined : resolve(given);
   if (!projectDir) {
     throw new Error(
       'the tree is on, so this needs the project: pi-temporal start "..." --project=/path/to/repo',
@@ -83,6 +85,7 @@ async function seedProject(sessionId: string, projectFlag: string | undefined) {
   await refuseProject(projectDir);
   await worktree.capture(projectDir, file, { seed: true });
   say(`  sent the project from ${projectDir}`);
+  return { file, projectDir };
 }
 
 // The guard `/background` uses. From a home directory, `~/.ssh` and `~/.aws` would ship.
@@ -126,10 +129,25 @@ async function start(args: string[]) {
   refuseConflicts();
   if (!text) throw new Error('start wants a task: pi-temporal start "fix the failing test"');
   const sessionId = flag("session") ?? `task-${randomUUID().slice(0, 8)}`;
-  // Seed before the prompt, or the first worker to run an activity would supply the project.
-  await seedProject(sessionId, flag("project"));
-  // Creates the session and delivers the prompt. Doesn't wait for the turn.
-  await submitPrompt(sessionId, text);
+  // Reachable first. Seeding claims the project directory, and a server that's down would leave
+  // that claim on a session that never starts, refusing every later one there.
+  const { client, connection } = await connect();
+  try {
+    // Seed before the prompt, or the first worker to run an activity would supply the project.
+    const seeded = await seedProject(sessionId, flag("project"));
+    // Creates the session and delivers the prompt. Doesn't wait for the turn.
+    await submitPrompt(sessionId, text).catch(async (err: unknown) => {
+      // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.
+      if (seeded && (await sessionExists(client, sessionId)) === false) {
+        await worktree.forget(seeded.file, seeded.projectDir);
+      } else {
+        say(`  it may have started: pi-temporal watch ${sessionId}`);
+      }
+      throw err;
+    });
+  } finally {
+    await connection.close();
+  }
   emit(sessionId);
   say(`  follow it with: pi-temporal watch ${sessionId}`);
 }
@@ -143,13 +161,22 @@ async function schedule(args: string[]) {
   const id = flag("id") ?? `pi-task-${randomUUID().slice(0, 8)}`;
   if (!text) throw new Error('schedule wants a task: pi-temporal schedule "..." --every=1h');
   if (!every && !cron) throw new Error("schedule wants --every=<duration> or --cron=<expression>");
+  // Each firing's session id is this id plus the firing time, and the template is named after it
+  // too. Refused here, before the schedule exists, since a firing would only fail later.
+  // `unschedule` keeps the template for firings already queued, so each creation gets its own.
+  // Otherwise the id could not be scheduled again.
+  const templateId = `schedule-${id}-${randomUUID().slice(0, 8)}`;
+  const firing = `${id}-0000-00-00T00:00:00Z`;
+  const unsafe = sessionIdProblem(firing) ?? sessionIdProblem(templateId);
+  if (unsafe) throw new Error(`schedule id ${JSON.stringify(id)} can't be used: ${unsafe}`);
   // No client runs at firing time, so capture the project once as a template and each firing
   // copies it. Workers never seed a project from their own directory.
   const scheduled = fromEnv();
   let projectDir: string | undefined;
   let template: string | undefined;
   if (scheduled.shipTree) {
-    projectDir = flag("project") ?? process.env.PI_PROJECT_DIR;
+    const given = flag("project") ?? process.env.PI_PROJECT_DIR;
+    projectDir = given === undefined ? undefined : resolve(given);
     if (!projectDir) {
       throw new Error(
         "the tree is on, so a schedule needs the project: " +
@@ -157,7 +184,7 @@ async function schedule(args: string[]) {
       );
     }
     await refuseProject(projectDir);
-    template = sessionFileFor(scheduled.sessionDir, `schedule-${id}`);
+    template = sessionFileFor(scheduled.sessionDir, templateId);
   }
 
   const { cfg, client, connection } = await connect();
@@ -321,9 +348,11 @@ async function watch(args: string[]) {
       const readable = opened.size - offset;
       if (readable <= 0) return;
       const buffer = Buffer.alloc(readable);
-      await handle.read(buffer, 0, buffer.length, offset);
-      offset = opened.size;
-      carry += decoder.write(buffer);
+      // A read can return less than asked, more so on shared storage. Advance by what came back,
+      // and the next tick reads the rest.
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+      offset += bytesRead;
+      carry += decoder.write(buffer.subarray(0, bytesRead));
       const lines = carry.split("\n");
       // A read can end mid-line. Keep the partial line for the next tick.
       carry = lines.pop() ?? "";

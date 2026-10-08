@@ -91,6 +91,53 @@ try {
     silent.spent === undefined && silent.total === undefined,
     silent,
   );
+
+  // The session's time lives in its record. A step that runs again must not see its own turn's
+  // write, or the Workflow counts that turn twice.
+  const entries: { type: string; customType?: string; data?: unknown }[] = [
+    {
+      type: "custom",
+      customType: "pi-temporal.session-seconds",
+      data: { turn: "earlier", seconds: 40 },
+    },
+  ];
+  const kept = makeActivities(
+    { projectDir: root },
+    {
+      openSession: async () =>
+        ({
+          state: { messages: [] },
+          sessionManager: {
+            getBranch: () => entries,
+            appendCustomEntry: (customType: string, data: unknown) => {
+              entries.push({ type: "custom", customType, data });
+              return String(entries.length);
+            },
+          },
+          prepareStep: () => true,
+          recordPrompt: async () => true,
+          modelCall: async () => ({ toolCalls: [], sequential: false, ended: false }),
+          runToolCall: async () => undefined,
+          sealStep: async () => ({ done: true, retryAttempt: 0 }),
+          async waitForIdle() {},
+          dispose() {},
+        }) as unknown as AgentSession,
+    },
+  );
+  const step = {
+    sessionId: "session",
+    sessionFile: join(root, "kept.jsonl"),
+    promptId: "this-turn",
+    text: "run",
+    step: 1,
+    sessionSeconds: 45,
+  };
+  const once = await kept.runStep(step);
+  const again = await kept.runStep(step);
+  check("a step reports the session's time before its turn", once.sessionSeconds === 40, once);
+  check("and the same after it ran again", again.sessionSeconds === 40, again);
+  const written = entries.filter((e) => (e.data as { turn?: string }).turn === "this-turn");
+  check("each run of the step wrote its turn's total", written.length === 2, written);
 } finally {
   await rm(root, { recursive: true, force: true });
 }

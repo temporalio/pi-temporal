@@ -11,6 +11,28 @@ export const TURN_STOPPED = "TurnStopped";
 
 export const workflowId = (sessionId: string) => `${WORKFLOW_ID_PREFIX}${sessionId}`;
 
+/**
+ * Why a session id can't name its log file, or undefined. The id becomes a file name in the
+ * session directory, so it must stay one name there. Plain code, since the Workflow calls it too.
+ */
+export const sessionIdProblem = (sessionId: string): string | undefined => {
+  if (!sessionId || sessionId === "." || sessionId === "..") return "it is empty or a dot name";
+  if (/[/\\\0]/.test(sessionId)) return "it holds a path separator or NUL";
+  // Room for the longest suffix a session's files get, within a 255-byte file name.
+  if (utf8Length(sessionId) > 200) return "it is longer than 200 bytes";
+  return undefined;
+};
+
+// Counted by hand, because the Workflow's sandbox has no `Buffer`.
+const utf8Length = (text: string) => {
+  let bytes = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+};
+
 export const SIGNALS = {
   submitPrompt: "submitPrompt",
   interrupt: "interrupt",
@@ -51,6 +73,9 @@ export interface RunStepInput extends PromptInput {
   readonly retryAttempt?: number;
   // Whether the turn spent its one compact-and-retry, kept by the workflow for the same reason.
   readonly overflowRecoveryAttempted?: boolean;
+  // The session's turn time when this step was scheduled. Each step writes its total to the
+  // session record, so a run woken after an idle exit still counts the earlier turns.
+  readonly sessionSeconds?: number;
   readonly sessionId: string;
   // Absolute path to the Pi session JSONL, the durable log. Shared storage across workers.
   readonly sessionFile: string;
@@ -80,6 +105,8 @@ export interface RunStepResult {
   readonly spent?: Spend;
   // Session total read off the record, so it survives rollovers, idle restarts, and other clients.
   readonly total?: Spend;
+  // The session's turn time so far, as the session record keeps it.
+  readonly sessionSeconds?: number;
 }
 
 export interface SessionTurnOptions {
@@ -136,6 +163,8 @@ export interface ModelCallResult {
   readonly spent?: Spend;
   // Session total from the record. See `RunStepResult`.
   readonly total?: Spend;
+  // The session's turn time so far, as the session record keeps it.
+  readonly sessionSeconds?: number;
 }
 
 export interface ToolCallInput {
@@ -166,6 +195,7 @@ export interface SealStepInput {
   readonly step: number;
   readonly retryAttempt?: number;
   readonly overflowRecoveryAttempted?: boolean;
+  readonly sessionSeconds?: number;
   // The turn was stopped. Record results only, with no provider retry or compaction.
   readonly interrupted?: boolean;
   // Closed without the host that ran it, for the logs. With tree shipping on, any interrupted seal

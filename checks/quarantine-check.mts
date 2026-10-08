@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -119,6 +119,21 @@ async function main() {
     String(refusedRestore),
   );
 
+  // A later step can reuse the call id. Its marker must not replace the stranded one, or ending
+  // the later call would clear the only sign that the first tool may still be writing.
+  const reused = { turn: "turn-2", step: 3, callId: "call-a" };
+  await worktree.beginWrite(project, reused);
+  await worktree.endWrite(project, reused);
+  let stillRefused: unknown;
+  await worktree.ensure(project, sessionFile, next).catch((err) => {
+    stillRefused = err;
+  });
+  check(
+    "a later call that reuses the id leaves the stranded marker in place",
+    stillRefused instanceof worktree.Quarantined,
+    String(stillRefused),
+  );
+
   // Tools of one step run concurrently by design, so a sibling is not refused.
   const sibling = { turn: "turn-1", step: 1, callId: "call-c" };
   let siblingOk = true;
@@ -136,7 +151,7 @@ async function main() {
   check("the next step of the same turn is refused too", refusedNextStep);
 
   // The abandoned tool returns, so the directory is free again.
-  await worktree.endWrite(project, stranded.callId);
+  await worktree.endWrite(project, stranded);
   let reusable = true;
   await worktree.ensure(project, sessionFile, next).catch(() => {
     reusable = false;
@@ -281,7 +296,16 @@ async function main() {
   // A start time from another pid namespace says nothing about this pid.
   await worktree.beginWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
   await editMarker({ ...reusedNote, pidStartedAt: "elsewhere", pidNs: "pid:[elsewhere]" });
-  check("one from another pid namespace keeps a live pid refused", !(await usable()));
+  check("one from another pid namespace that is still touched stays refused", !(await usable()));
+  // Its writer stops touching it, as after a container restart. Stop ours by hand first.
+  const dir = (await writersHere())!;
+  const [name] = await readdir(dir);
+  const left = await readFile(join(dir, name), "utf8");
+  await worktree.endWrite(project, { turn: "turn-3", step: 1, callId: "call-d" });
+  await writeFile(join(dir, name), left);
+  const old = new Date(Date.now() - 5 * 60_000);
+  await utimes(join(dir, name), old, old);
+  check("one from another pid namespace that went quiet is cleared", await usable());
   await worktree.clearWriters(project);
   await ended(holder);
 

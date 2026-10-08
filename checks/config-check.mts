@@ -1,0 +1,27 @@
+// Holds that settings read from env mean the same in every process. Needs neither a server nor a
+// model key.
+import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fromEnv, modelApiKey } from "../src/config.js";
+
+const dir = await mkdtemp(join(tmpdir(), "pi-config-"));
+const keyFile = join(dir, "key");
+await writeFile(keyFile, "from-file\n");
+
+// A relative session dir travels in Workflow input, so it must not depend on who reads it.
+process.env.PI_SESSION_DIR = "sessions";
+assert.equal(fromEnv().sessionDir, join(process.cwd(), "sessions"));
+console.log("PASS a relative session directory is made absolute");
+
+// An optional secret declared empty must not hide the file next to it.
+process.env.PI_TEMPORAL_API_KEY = "";
+process.env.PI_TEMPORAL_API_KEY_FILE = keyFile;
+assert.equal(fromEnv().apiKey, "from-file");
+process.env.OPENAI_API_KEY = "";
+process.env.OPENAI_API_KEY_FILE = keyFile;
+assert.equal(modelApiKey("openai"), "from-file");
+process.env.OPENAI_API_KEY = "direct";
+assert.equal(modelApiKey("openai"), "direct");
+console.log("PASS an empty key falls back to its file");

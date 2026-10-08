@@ -5,7 +5,8 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { TurnBudget } from "./protocol.js";
+import { resolve } from "node:path";
+import { sessionIdProblem, type TurnBudget } from "./protocol.js";
 
 export type Profile = "local" | "fleet";
 
@@ -36,6 +37,11 @@ const read = (path: string | undefined) => (path ? readFileSync(path, "utf8") : 
 // Set explicitly by the operator, not defaulted here. `preflight` needs the difference.
 const given = (name: string) => process.env[name] !== undefined && process.env[name] !== "";
 
+// A secret set directly, or else read from `<NAME>_FILE`. An empty direct value counts as unset,
+// since deployments often declare an optional secret as empty.
+const secret = (name: string) =>
+  given(name) ? process.env[name] : read(process.env[`${name}_FILE`])?.trim();
+
 // A typo must not quietly turn a switch off, so anything unrecognized is refused.
 function onOff(name: string, fallback: boolean): boolean {
   if (!given(name)) return fallback;
@@ -64,7 +70,10 @@ export function fromEnv(): Config {
     address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
     namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
     taskQueue: process.env.PI_TEMPORAL_TASK_QUEUE ?? "pi-session",
-    sessionDir: process.env.PI_SESSION_DIR ?? `${homedir()}/.pi-temporal/sessions`,
+    // Absolute, since it travels in Workflow input and the client and worker have different cwds.
+    sessionDir: given("PI_SESSION_DIR")
+      ? resolve(process.env.PI_SESSION_DIR!)
+      : `${homedir()}/.pi-temporal/sessions`,
     idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
     // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
@@ -72,7 +81,7 @@ export function fromEnv(): Config {
     budget: budgetFromEnv(),
     // In a fleet the files must travel, or tools run against the wrong directory.
     shipTree: onOff("PI_TEMPORAL_SHIP_TREE", fleet),
-    apiKey: process.env.PI_TEMPORAL_API_KEY ?? read(process.env.PI_TEMPORAL_API_KEY_FILE)?.trim(),
+    apiKey: secret("PI_TEMPORAL_API_KEY"),
     tls:
       cert && key
         ? {
@@ -84,6 +93,20 @@ export function fromEnv(): Config {
           ? true
           : undefined,
   };
+}
+
+// What reaches the Temporal control plane. Once `fromEnv` has read them, a process that runs
+// agent tools drops them, so a tool can't read them from its inherited environment.
+export const TEMPORAL_CREDENTIAL_VARS = [
+  "PI_TEMPORAL_API_KEY",
+  "PI_TEMPORAL_API_KEY_FILE",
+  "PI_TEMPORAL_TLS_CERT",
+  "PI_TEMPORAL_TLS_KEY",
+  "PI_TEMPORAL_TLS_CA",
+];
+
+export function dropFromEnv(names: readonly string[]): void {
+  for (const name of names) delete process.env[name];
 }
 
 /** What the SDK's `Connection.connect` and `NativeConnection.connect` both take. */
@@ -159,8 +182,7 @@ export function modelApiKey(
   provider = process.env.PI_TEMPORAL_PROVIDER ?? "openai",
 ): string | undefined {
   if (provider !== "openai" && provider !== "anthropic") return undefined;
-  const prefix = provider.toUpperCase();
-  return process.env[`${prefix}_API_KEY`] ?? read(process.env[`${prefix}_API_KEY_FILE`])?.trim();
+  return secret(`${provider.toUpperCase()}_API_KEY`);
 }
 
 /** Plaintext can be intentional on a private network, so it is a note rather than a refusal. */
@@ -222,5 +244,8 @@ function budgetFromEnv(): TurnBudget | undefined {
   return set.length > 0 ? (Object.fromEntries(set) as TurnBudget) : undefined;
 }
 
-export const sessionFileFor = (sessionDir: string, sessionId: string) =>
-  `${sessionDir}/${sessionId}.jsonl`;
+export const sessionFileFor = (sessionDir: string, sessionId: string) => {
+  const problem = sessionIdProblem(sessionId);
+  if (problem) throw new Error(`session id ${JSON.stringify(sessionId)} can't be used: ${problem}`);
+  return `${sessionDir}/${sessionId}.jsonl`;
+};

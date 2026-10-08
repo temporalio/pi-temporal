@@ -36,15 +36,17 @@ import type {
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 import * as worktree from "../src/worktree.js";
-import { openClient } from "../src/client.js";
+import { openClient, sessionExists } from "../src/client.js";
 import {
   clientProblems,
   type Config,
   connectionOptions,
+  dropFromEnv,
   fromEnv,
   modelApiKey,
   preflight,
   sessionFileFor,
+  TEMPORAL_CREDENTIAL_VARS,
 } from "../src/config.js";
 
 const STATUS_KEY = "pi-temporal";
@@ -87,6 +89,9 @@ interface Task {
 
 export default function (pi: ExtensionAPI) {
   const cfg = env();
+  // pi's tools inherit this process's env. They must not see the Temporal credentials, which are
+  // read once into `cfg` above. The model keys stay, since pi itself needs them.
+  dropFromEnv(TEMPORAL_CREDENTIAL_VARS);
   // Connect lazily, so a pi that never runs a task opens no connection.
   let connecting: Promise<{ client: Client; connection: Connection }> | undefined;
   let embedding: Promise<SessionWorker> | undefined;
@@ -101,7 +106,7 @@ export default function (pi: ExtensionAPI) {
 
   const connect = () => {
     if (connecting) return connecting;
-    const opening = openClient(fromEnv());
+    const opening = openClient(cfg);
     // Forget a failed attempt, so the next use tries again.
     opening.catch(() => {
       if (connecting === opening) connecting = undefined;
@@ -116,7 +121,7 @@ export default function (pi: ExtensionAPI) {
     const starting: Promise<SessionWorker> = (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
-        connect: connectionOptions(fromEnv()),
+        connect: connectionOptions(cfg),
         namespace: cfg.namespace,
         taskQueue: cfg.taskQueue,
         // Tools run where you are, so a background task sees the project you asked from.
@@ -236,7 +241,7 @@ export default function (pi: ExtensionAPI) {
     const starting: Promise<SessionWorker> = (async () => {
       const worker = await createSessionWorker({
         address: cfg.address,
-        connect: connectionOptions(fromEnv()),
+        connect: connectionOptions(cfg),
         namespace: cfg.namespace,
         taskQueue: turnQueue,
         projectDir: process.cwd(),
@@ -379,8 +384,12 @@ export default function (pi: ExtensionAPI) {
       };
 
       const sessionFile = sessionFileFor(cfg.sessionDir, task.sessionId);
+      let seeded = false;
       try {
         if (cfg.embeddedWorker) await startWorker(ctx);
+        // Before the project is claimed. A server that's down would otherwise leave a claim on a
+        // session that never starts, and this directory would refuse every later task.
+        const { client } = await connect();
         // Ship the project from this directory. Workers never seed it, since the first activity
         // could land on any of them.
         if (cfg.shipTree) {
@@ -394,8 +403,8 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           await worktree.capture(ctx.cwd, sessionFile, { seed: true });
+          seeded = true;
         }
-        const { client } = await connect();
         await client.workflow.signalWithStart(WORKFLOW_TYPE, {
           taskQueue: cfg.taskQueue,
           workflowId: workflowId(task.sessionId),
@@ -405,10 +414,20 @@ export default function (pi: ExtensionAPI) {
         });
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
+        // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.
+        let mayRun = false;
+        if (seeded) {
+          const exists = await connect()
+            .then(({ client }) => sessionExists(client, task.sessionId))
+            .catch(() => undefined);
+          if (exists === false) await worktree.forget(sessionFile, ctx.cwd).catch(() => {});
+          else mayRun = true;
+        }
         ctx.ui.notify(
-          unreachable(err)
+          (unreachable(err)
             ? `could not reach Temporal at ${cfg.address}: ${why}`
-            : `could not start the background task: ${why}`,
+            : `could not start the background task: ${why}`) +
+            (mayRun ? `. It may have started as ${task.sessionId}.` : ""),
           "error",
         );
         return;
