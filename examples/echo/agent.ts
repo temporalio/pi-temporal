@@ -39,7 +39,16 @@ function load(file: string): { entries: Entry[]; torn: boolean; whole: number } 
   const torn = end < raw.length;
   const lines = raw.subarray(0, end).toString("utf8").split("\n").filter(Boolean);
   try {
-    return { entries: lines.map((line) => JSON.parse(line) as Entry), torn, whole: end };
+    const entries = lines.map((line) => {
+      const parsed: unknown = JSON.parse(line);
+      // A line that parses but isn't an entry is as broken as one that doesn't parse. Let through,
+      // it fails later as a plain error, and the Activity retries it to no end.
+      if (typeof parsed !== "object" || parsed === null || !("kind" in parsed)) {
+        throw new Error(`not a session entry: ${line.slice(0, 80)}`);
+      }
+      return parsed as Entry;
+    });
+    return { entries, torn, whole: end };
   } catch (err) {
     // A broken file stays broken. Retrying would burn every attempt on the same error.
     throw ApplicationFailure.nonRetryable(`the session ${file} can't be read: ${String(err)}`);
@@ -132,7 +141,12 @@ function openSession(file: string, guard: () => void, tool: EchoTool): AgentSess
       // the Activity's retry policy assumes it does.
       const prompt = lastPrompt();
       if (!prompt) throw ApplicationFailure.nonRetryable("a model call with no prompt");
-      const result = results().at(-1);
+      // This prompt's result only. A turn that ended without a call-less response, such as a stop
+      // mid-tool, leaves its result after the latest response, and it doesn't answer this prompt.
+      const all = talk();
+      const result = results()
+        .filter((r) => all.lastIndexOf(r) > all.lastIndexOf(prompt))
+        .at(-1);
       const text = !result
         ? ""
         : result.status === "ok"

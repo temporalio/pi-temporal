@@ -69,7 +69,8 @@ const spawnNode = (args: string[], env: Record<string, string>, log: string) => 
 };
 
 const connection = await Connection.connect({ address });
-const client = new Client({ connection, namespace: "default" });
+// The same namespace the spawned Worker and send.ts read, or the kill case talks past them.
+const client = new Client({ connection, namespace: process.env.TEMPORAL_NAMESPACE ?? "default" });
 const sessions: string[] = [];
 
 try {

@@ -24,7 +24,8 @@ npx tsx examples/echo/send.ts "hello"
 ```
 
 `send.ts` prints `answered: hello`. Session files go to `$TMPDIR/echo-sessions`, or to
-`ECHO_SESSION_DIR`. `ECHO_STEPPED=1` runs the model call, the tool call and the seal as separate
+`ECHO_SESSION_DIR`. Both scripts must name the same directory, since the Worker refuses a session
+file outside its own. `ECHO_STEPPED=1` runs the model call, the tool call and the seal as separate
 Activities. `ECHO_TASK_QUEUE` and `TEMPORAL_ADDRESS` work for both scripts.
 
 `checks/echo-check.mts` runs these commands, then kills a Worker while the echo tool runs and

@@ -7,6 +7,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ApplicationFailure } from "@temporalio/common";
 import { echoAgent } from "../examples/echo/agent.js";
 
 const failures: string[] = [];
@@ -44,6 +45,47 @@ try {
   }
   const text = await readFile(sessionFile, "utf8");
   check("and no cut line is left in it", !text.includes('"ty\n') && text.endsWith("\n"), text);
+
+  // A turn stopped mid-tool ends on its result, with no call-less response after it. The next
+  // prompt must ask for its own echo, not answer from the stopped turn's result.
+  const stoppedFile = join(root, "stopped.jsonl");
+  const stopping = echoAgent({
+    tool: async (text) => {
+      if (text === "one") throw new Error("stopped");
+      return text;
+    },
+  });
+  const stopped = await stopping.open(stoppedFile, guard);
+  await stopped.recordPrompt("p1", "one");
+  const asked = await stopped.modelCall();
+  const call = asked.toolCalls[0];
+  const outcome = await stopped.runToolCall(call.id);
+  await stopped.sealStep(outcome ? [outcome] : [], { expectCalls: [call.id], postRun: false });
+  stopped.dispose();
+
+  const second = await stopping.open(stoppedFile, guard);
+  second.prepareStep();
+  await second.recordPrompt("p2", "two");
+  const next = await second.modelCall();
+  check(
+    "a prompt after a turn stopped mid-tool asks for its own echo",
+    next.toolCalls.length === 1 && second.lastAnswer() === "",
+    { calls: next.toolCalls.length, answer: second.lastAnswer() },
+  );
+  second.dispose();
+
+  // A line that parses but isn't an entry fails at once, and isn't retried.
+  const oddFile = join(root, "odd.jsonl");
+  await writeFile(oddFile, "null\n");
+  const odd = await agent.open(oddFile, guard).then(
+    () => undefined,
+    (err: unknown) => err,
+  );
+  check(
+    "a line that isn't an entry fails without a retry",
+    odd instanceof ApplicationFailure && odd.nonRetryable === true,
+    String(odd),
+  );
 } finally {
   await rm(root, { recursive: true, force: true });
 }

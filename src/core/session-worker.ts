@@ -159,6 +159,10 @@ export async function createSessionWorker(
         failure ??= err;
       }
     };
+    // A Worker holds its connection until its run ends, so one built but never run is run and
+    // shut down here. Otherwise the connection can't close and the process stays up.
+    if (shared.getState() === "INITIALIZED") running ??= shared.run();
+    if (hostWorker?.getState() === "INITIALIZED") runningHost ??= hostWorker.run();
     // `shutdown()` throws unless the Worker is running, e.g. when it already died.
     await attempt(() => shared.getState() === "RUNNING" && shared.shutdown());
     await attempt(() => hostWorker?.getState() === "RUNNING" && hostWorker.shutdown());
