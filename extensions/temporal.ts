@@ -26,19 +26,17 @@ import {
   LOCAL_TURN_WORKFLOW,
   QUERIES,
   SIGNALS,
-  WORKFLOW_TYPE,
   workflowId,
 } from "../src/protocol.js";
 import type {
   LocalTurnInput,
   PromptInput,
-  SessionTurnOptions,
   TurnState,
 } from "../src/protocol.js";
 import { type LiveTurns, makeLocalTurnActivities } from "../src/local-turn-activity.js";
 import { createSessionWorker, type SessionWorker } from "../src/session-worker.js";
 import * as worktree from "../src/worktree.js";
-import { openClient, sessionExists } from "../src/client.js";
+import { openClient, sendPrompt, sessionExists } from "../src/client.js";
 import {
   clientProblems,
   type Config,
@@ -378,12 +376,6 @@ export default function (pi: ExtensionAPI) {
         text,
       };
       const prompt: PromptInput = { promptId: task.promptId, text };
-      const options: SessionTurnOptions = {
-        idleTimeout: cfg.idleTimeout,
-        stepped: cfg.stepped,
-        toolTimeoutMinutes: cfg.toolTimeoutMinutes,
-        budget: cfg.budget,
-      };
 
       const sessionFile = sessionFileFor(cfg.sessionDir, task.sessionId);
       let seeded = false;
@@ -407,13 +399,7 @@ export default function (pi: ExtensionAPI) {
           await worktree.capture(ctx.cwd, sessionFile, { seed: true });
           seeded = true;
         }
-        await client.workflow.signalWithStart(WORKFLOW_TYPE, {
-          taskQueue: cfg.taskQueue,
-          workflowId: workflowId(task.sessionId),
-          args: [task.sessionId, sessionFile, options],
-          signal: SIGNALS.submitPrompt,
-          signalArgs: [prompt],
-        });
+        await sendPrompt(client, cfg, task.sessionId, prompt);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
         // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.

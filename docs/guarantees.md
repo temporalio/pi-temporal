@@ -89,12 +89,15 @@ so the model can still choose to repeat an action.
 
 ## Following a session
 
-`watch` and `running` query the Workflow and tail the session file. A query returns the current
-state or reports that the run is gone. If the query can’t reach a Worker, the follower keeps
-waiting through the restart. It doesn’t treat an unreachable run as finished.
+A prompt is an Update-with-start. The session refuses an empty prompt and runs a resent one once,
+by its prompt id. If no Worker accepts the Update within 10 seconds, the prompt goes as a Signal,
+which the server keeps until a Worker comes.
 
-A closed run isn’t read as a live turn. A session Workflow can stay open between turns, so the
-follower uses the reported turn state to decide when a turn has ended.
+`watch` tails the session file and waits on a `waitForQuiet` Update, which returns once nothing
+is running or queued. If no Worker can answer, the follower keeps waiting through the restart. It
+doesn’t treat an unreachable run as finished. A run that continues as new answers that it moved,
+and the follower asks the new run. `running` lists sessions with one List call and reads each
+one’s state from its memo.
 
 ## Moving the project
 

@@ -48,6 +48,28 @@ export const QUERIES = {
   turnState: "turnState",
 } as const;
 
+export const UPDATES = {
+  // Queue a prompt. Rejected when it's empty or the session already has it.
+  submit: "submit",
+  // Resolves once nothing is running or queued, or when the run hands over to a new one.
+  waitForQuiet: "waitForQuiet",
+} as const;
+
+// The failure type `submit` rejects a prompt with when the session already has it. A client that
+// retried after a lost answer reads it as accepted.
+export const DUPLICATE_PROMPT = "DuplicatePrompt";
+
+export interface Submitted {
+  // Prompts ahead of this one, the running turn included.
+  readonly ahead: number;
+}
+
+export interface Quiet {
+  // The run moved to a new one through Continue-As-New. Ask the session again.
+  readonly moved?: boolean;
+  readonly finished?: TurnState["finished"];
+}
+
 // What the session is doing, for outside watchers. The conversation itself is in the session file.
 export interface TurnState {
   // Prompts accepted but not started.
@@ -136,6 +158,9 @@ export interface SessionTurnOptions {
   readonly spent?: Spent;
   // Last turn result carried across Continue-As-New, so a client polling `turnState` still sees it.
   readonly finished?: TurnState["finished"];
+  // Prompt ids the session has taken, newest last, so a resent prompt isn't run twice. Carried
+  // across Continue-As-New.
+  readonly seenPrompts?: readonly string[];
   // Host queues of the Workers that held this session's project, carried across Continue-As-New.
   // Each one is asked to hand its directory back when the session goes idle.
   readonly hostQueues?: readonly string[];

@@ -11,6 +11,8 @@ import {
   sleep,
   defineSignal,
   defineQuery,
+  defineUpdate,
+  allHandlersFinished,
   setHandler,
   workflowInfo,
   condition,
@@ -26,15 +28,19 @@ import {
 import {
   FAILED_BEFORE_CLAIM,
   MAX_STEPS_PER_TURN,
+  DUPLICATE_PROMPT,
   QUERIES,
   SESSION_MEMO,
   SIGNALS,
+  UPDATES,
   sessionIdProblem,
   WORKFLOW_ID_PREFIX,
 } from "./protocol.js";
 import type {
   PromptInput,
+  Quiet,
   RetireInput,
+  Submitted,
   RunStepInput,
   RunStepResult,
   SessionTurnOptions,
@@ -148,7 +154,14 @@ const retireOn = (taskQueue: string) =>
     retry: { maximumAttempts: 1 },
   }).retireSession;
 
+// For a client with no Worker to accept an Update. A Signal is kept with no Worker up. It can't be
+// rejected, so a bad or repeated prompt is dropped.
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
+export const submit = defineUpdate<Submitted, [PromptInput]>(UPDATES.submit);
+export const waitForQuiet = defineUpdate<Quiet, []>(UPDATES.waitForQuiet);
+
+// How many prompt ids a session remembers to refuse a resend. Far more than any client retries.
+const SEEN_PROMPTS = 200;
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
 export const turnState = defineQuery<TurnState>(QUERIES.turnState);
 
@@ -228,9 +241,44 @@ export async function piSession(
     setCurrentDetails(running ? `turn ${running.promptId}, step ${running.step}` : "idle");
   };
 
-  setHandler(submitPrompt, (p) => {
+  const seen = [...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)];
+  const problemWith = (p: PromptInput) =>
+    !p?.promptId ? "a prompt needs an id" : !p.text?.trim() ? "a prompt needs text" : undefined;
+  const enqueue = (p: PromptInput) => {
+    seen.push(p.promptId);
+    if (seen.length > SEEN_PROMPTS) seen.splice(0, seen.length - SEEN_PROMPTS);
     queue.push(p);
     show();
+  };
+  // Set right before the run ends or continues as new, so a waiting client is answered and asks
+  // the next run.
+  let ending = false;
+
+  setHandler(submitPrompt, (p) => {
+    if (problemWith(p) === undefined && !seen.includes(p.promptId)) enqueue(p);
+  });
+  setHandler(
+    submit,
+    (p) => {
+      enqueue(p);
+      return { ahead: queue.length - 1 + (running ? 1 : 0) };
+    },
+    {
+      validator: (p) => {
+        const problem = problemWith(p);
+        if (problem) throw ApplicationFailure.nonRetryable(problem, "BadPrompt");
+        if (seen.includes(p.promptId)) {
+          throw ApplicationFailure.nonRetryable(
+            `prompt ${p.promptId} is already in this session`,
+            DUPLICATE_PROMPT,
+          );
+        }
+      },
+    },
+  );
+  setHandler(waitForQuiet, async () => {
+    await condition(() => ending || (!running && queue.length === 0));
+    return !running && queue.length === 0 ? { finished } : { moved: true };
   });
   setHandler(interrupt, () => {
     current?.cancel();
@@ -253,6 +301,13 @@ export async function piSession(
       ]);
       // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.
       if (queue.length > 0) continue;
+      // Answer waiting clients before the run closes. A prompt can still arrive meanwhile.
+      ending = true;
+      await condition(allHandlersFinished);
+      if (queue.length > 0) {
+        ending = false;
+        continue;
+      }
       return;
     }
 
@@ -265,6 +320,8 @@ export async function piSession(
         queued: queue.length,
         historyLength: info.historyLength,
       });
+      ending = true;
+      await condition(allHandlersFinished);
       await continueAsNew<typeof piSession>(id, file, {
         ...options,
         // The initial prompt is a schedule's task. Carry it only in the queue, or it repeats.
@@ -274,6 +331,7 @@ export async function piSession(
         finished,
         spent,
         hostQueues: [...hostQueues],
+        seenPrompts: seen,
       });
     }
 

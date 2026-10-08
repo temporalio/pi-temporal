@@ -20,6 +20,7 @@ import * as worktree from "./worktree.js";
 import {
   SESSION_MEMO,
   sessionIdProblem,
+  UPDATES,
   WORKFLOW_TYPE,
   WORKFLOW_ID_PREFIX,
   workflowId,
@@ -30,7 +31,7 @@ import {
   ScheduleOverlapPolicy,
   WorkflowNotFoundError,
 } from "@temporalio/client";
-import type { TurnState } from "./protocol.js";
+import type { Quiet, TurnState } from "./protocol.js";
 import { textOf } from "./messages.js";
 
 const POLL_MS = 1_000;
@@ -365,8 +366,30 @@ async function watch(args: string[]) {
     }
   };
 
-  let seenState = false;
+  // One Update waits for the session to go quiet, while the file is read for what it says. A run
+  // that continues as new answers `moved`, and the next one is asked.
+  let answer: { quiet?: Quiet; gone?: true } | undefined;
+  let asking: Promise<void> | undefined;
   let waiting = false;
+  const ask = () =>
+    client.workflow
+      .getHandle(workflowId(sessionId))
+      .executeUpdate<Quiet, []>(UPDATES.waitForQuiet)
+      .then(
+        (quiet) => {
+          if (!quiet.moved) answer = { quiet };
+          asking = undefined;
+        },
+        (err: unknown) => {
+          // Over, or never started. Anything else is a handover, so keep following.
+          if (err instanceof WorkflowNotFoundError) answer = { gone: true };
+          else if (!waiting) {
+            say("  waiting for Temporal or a worker to answer");
+            waiting = true;
+          }
+          asking = undefined;
+        },
+      );
   try {
     for (;;) {
       await drain();
@@ -375,31 +398,20 @@ async function watch(args: string[]) {
         process.exitCode = 1;
         return;
       }
-      const reached = await turnStateOf(client, sessionId);
-      // Likely a worker handover. The turn is still going, so keep following.
-      if (reached.kind === "unreachable") {
-        if (!waiting) say("  waiting for Temporal or a worker to answer");
-        waiting = true;
-        await sleep(POLL_MS);
-        continue;
-      }
-      waiting = false;
-      if (reached.kind === "state") seenState = true;
-      // Exit when nothing is running or queued, without waiting out the workflow's idle timeout.
-      const state = reached.kind === "state" ? reached.state : undefined;
-      if (!state || (!state.running && state.queued === 0)) {
+      if (answer) {
         await drain();
-        if (!seenState && !seenFile) {
+        const finished = answer.quiet?.finished;
+        if (answer.gone && !seenFile) {
           say(`no such session: ${sessionId}`);
-        } else if (state?.finished) {
-          const { outcome, error } = state.finished;
-          say(`  ${outcome}${error ? `: ${error}` : ""}`);
-        } else if (!state) {
+        } else if (finished) {
+          say(`  ${finished.outcome}${finished.error ? `: ${finished.error}` : ""}`);
+        } else if (answer.gone) {
           say("  the session is over; its outcome is no longer kept");
         }
-        if (state?.finished?.outcome !== "answered") process.exitCode = 1;
+        if (finished?.outcome !== "answered") process.exitCode = 1;
         return;
       }
+      asking ??= ask();
       await sleep(POLL_MS);
     }
   } finally {
