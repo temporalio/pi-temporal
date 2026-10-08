@@ -1,6 +1,7 @@
-// Checks that the echo agent recovers from a crash in the middle of an append. The cut last line
-// must be gone after the next append, or it stops being the last line and every later open fails
-// on it. Any agent's session format needs the same rule (docs/adapting.md).
+// Checks that the echo agent recovers from a crash in the middle of an append. The next append
+// must end the cut last line, and later opens must skip it. It must also not rewrite the file,
+// since a superseded writer may still append once and must not erase a newer writer's entries.
+// Any agent's session format needs the same rule (docs/adapting.md).
 //
 // No server and no model key. Usage: npx tsx checks/echo-journal-check.mts
 
@@ -44,7 +45,25 @@ try {
     session.dispose();
   }
   const text = await readFile(sessionFile, "utf8");
-  check("and no cut line is left in it", !text.includes('"ty\n') && text.endsWith("\n"), text);
+  check("and the cut line is ended, not joined to the next", text.includes('"ty\n{'), text);
+
+  // Two writers on one cut file. The newer one appends first, then the superseded one makes the
+  // one write the fence lets through. The newer writer's entry must still be there.
+  const sharedFile = join(root, "shared.jsonl");
+  await writeFile(sharedFile, '{"kind":"note","type":"count","data":1}\n{"kind":"no');
+  const stale = await agent.open(sharedFile, guard);
+  const newer = await agent.open(sharedFile, guard);
+  newer.appendEntry("newer", true);
+  newer.dispose();
+  stale.appendEntry("stale", true);
+  stale.dispose();
+  const after = await agent.open(sharedFile, guard);
+  check(
+    "a superseded writer's append keeps a newer writer's entry",
+    after.latestEntry("newer") === true && after.latestEntry("stale") === true,
+    await readFile(sharedFile, "utf8"),
+  );
+  after.dispose();
 
   // A turn stopped mid-tool ends on its result, with no call-less response after it. The next
   // prompt must ask for its own echo, not answer from the stopped turn's result.

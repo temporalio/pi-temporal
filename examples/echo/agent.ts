@@ -2,7 +2,7 @@
 // prompt's text, then answers with what the tool gave back. The session is a JSONL file of this
 // file's own entries. Each rule a comment cites is under "What must hold" in docs/adapting.md.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ApplicationFailure } from "@temporalio/common";
@@ -29,43 +29,45 @@ export interface EchoOptions {
   readonly tool?: EchoTool;
 }
 
-// `whole` is the length of the complete lines, in bytes. Anything after it is a cut last line.
-function load(file: string): { entries: Entry[]; torn: boolean; whole: number } {
-  if (!existsSync(file)) return { entries: [], torn: false, whole: 0 };
-  const raw = readFileSync(file);
-  const end = raw.lastIndexOf(0x0a) + 1;
-  // A crash mid-append can leave a cut last line. It's read as if it weren't there, and the next
-  // append cuts it off, so the file stays one whole entry per line.
-  const torn = end < raw.length;
-  const lines = raw.subarray(0, end).toString("utf8").split("\n").filter(Boolean);
-  try {
-    const entries = lines.map((line) => {
-      const parsed: unknown = JSON.parse(line);
-      // A line that parses but isn't an entry is as broken as one that doesn't parse. Let through,
-      // it fails later as a plain error, and the Activity retries it to no end.
-      if (typeof parsed !== "object" || parsed === null || !("kind" in parsed)) {
-        throw new Error(`not a session entry: ${line.slice(0, 80)}`);
-      }
-      return parsed as Entry;
-    });
-    return { entries, torn, whole: end };
-  } catch (err) {
-    // A broken file stays broken. Retrying would burn every attempt on the same error.
-    throw ApplicationFailure.nonRetryable(`the session ${file} can't be read: ${String(err)}`);
+function load(file: string): { entries: Entry[]; torn: boolean } {
+  if (!existsSync(file)) return { entries: [], torn: false };
+  const text = readFileSync(file, "utf8");
+  // A crash mid-append can leave a cut last line. The next append ends it with a newline first.
+  const torn = text.length > 0 && !text.endsWith("\n");
+  const entries: Entry[] = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // A cut line, now or from an earlier crash. Every entry is an object, and a cut object never
+      // parses, so skipping it loses no whole entry.
+      continue;
+    }
+    // A line that parses but isn't an entry is a broken file, not a crash. A broken file stays
+    // broken, so a retry would burn every attempt on the same error.
+    if (typeof parsed !== "object" || parsed === null || !("kind" in parsed)) {
+      throw ApplicationFailure.nonRetryable(
+        `the session ${file} can't be read: not a session entry: ${line.slice(0, 80)}`,
+      );
+    }
+    entries.push(parsed as Entry);
   }
+  return { entries, torn };
 }
 
 /** One file's entries, and the only way to add to them: through the guard. */
 function journal(file: string, guard: () => void) {
-  const { entries, torn, whole } = load(file);
+  const { entries, torn } = load(file);
   let cut = torn;
   const append = (entry: Entry) => {
     // Every append calls the guard first, and stops if it throws. That's the fence.
     guard();
-    // Cut off a torn last line before writing after it. Left in place, it would stop being the
-    // last line, and the next load would fail on it for good.
-    if (cut) truncateSync(file, whole);
-    appendFileSync(file, `${JSON.stringify(entry)}\n`);
+    // Only appends, never a rewrite. The fence lets a superseded writer through for one write
+    // after its guard, and an append can't erase what a newer writer added. A newline ends a cut
+    // last line, so it can't join this entry, and every later read skips it.
+    appendFileSync(file, `${cut ? "\n" : ""}${JSON.stringify(entry)}\n`);
     cut = false;
     entries.push(entry);
   };
