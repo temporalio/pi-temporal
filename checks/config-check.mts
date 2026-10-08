@@ -101,6 +101,9 @@ console.log("PASS old codec keys need a current one");
 // The Workflow parses the idle timeout. A typo found there fails every Workflow Task.
 process.env.PI_SESSION_IDLE_TIMEOUT = "5 minuets";
 assert.throws(() => fromEnv(), /must be a duration/);
+// A bare number would be read as milliseconds.
+process.env.PI_SESSION_IDLE_TIMEOUT = "300";
+assert.throws(() => fromEnv(), /needs a unit/);
 process.env.PI_SESSION_IDLE_TIMEOUT = "90 seconds";
 assert.equal(fromEnv().idleTimeout, "90 seconds");
 delete process.env.PI_SESSION_IDLE_TIMEOUT;

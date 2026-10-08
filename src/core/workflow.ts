@@ -42,6 +42,7 @@ import {
   SIGNALS,
   UPDATES,
   sessionIdProblem,
+  sessionInputProblem,
   WORKFLOW_ID_PREFIX,
 } from "./protocol.js";
 import type {
@@ -277,6 +278,11 @@ export async function piSession(input: SessionInput): Promise<void> {
     throw ApplicationFailure.nonRetryable(
       `session id ${JSON.stringify(id)} can't be used: ${problem}`,
     );
+  }
+  // Before any handler, so a buffered prompt fails with the session and no task retries forever.
+  const inputProblem = sessionInputProblem(options);
+  if (inputProblem) {
+    throw ApplicationFailure.nonRetryable(`session ${id} can't start: ${inputProblem}`);
   }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";

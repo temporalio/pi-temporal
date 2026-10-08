@@ -340,6 +340,10 @@ export const minutesFromEnv = (name: string) => wholeFromEnv(name, "minutes");
 function durationFromEnv(name: string, fallback: string): string {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
+  // A bare number parses as milliseconds, which nobody means for a timeout.
+  if (Number.isFinite(Number(raw))) {
+    throw new Error(`${name} needs a unit, such as "${raw} seconds", got ${JSON.stringify(raw)}`);
+  }
   let ms: number | undefined;
   try {
     ms = msToNumber(raw as Duration);

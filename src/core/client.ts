@@ -19,6 +19,7 @@ import {
   SIGNALS,
   UPDATES,
   WORKFLOW_TYPE,
+  sessionInputProblem,
   workflowId,
 } from "./protocol.js";
 import type {
@@ -56,6 +57,10 @@ export async function sendPrompt(
   { taskQueue, sessionId, input }: SessionStart,
   prompt: PromptInput,
 ): Promise<number | undefined> {
+  // The session would fail in its first task, and a buffered Update would only learn that no
+  // handler was registered.
+  const problem = sessionInputProblem(input);
+  if (problem) throw new Error(`session ${sessionId} can't start: ${problem}`);
   const args: Parameters<Session> = [{ ...input, sessionId }];
   const start = {
     taskQueue,

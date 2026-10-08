@@ -1,6 +1,8 @@
 // The Workflow bundles these shared types into the Temporal sandbox. Pi SDK and Node imports
 // would make this module unsafe to load there.
 
+import { type Duration, msToNumber } from "@temporalio/common";
+
 export const WORKFLOW_TYPE = "piSession";
 export const WORKFLOW_ID_PREFIX = "pi-session-";
 // A tool call that failed before any attempt claimed it, so the tool never started and the
@@ -43,6 +45,45 @@ export const sessionIdProblem = (sessionId: string): string | undefined => {
   if (/[/\\\0]/.test(sessionId)) return "it holds a path separator or NUL";
   // Room for the longest suffix a session's files get, within a 255-byte file name.
   if (utf8Length(sessionId) > 200) return "it is longer than 200 bytes";
+  return undefined;
+};
+
+const shown = (value: unknown) =>
+  typeof value === "string" ? JSON.stringify(value) : String(value);
+
+/**
+ * What's wrong with a session's start options, or undefined. A bad value fails every Workflow Task
+ * of the session, so the Workflow fails at once and clients check before sending. Plain code, since
+ * the Workflow calls it too.
+ */
+export const sessionInputProblem = (
+  input: Pick<SessionInput, "idleTimeout" | "toolTimeoutMinutes" | "budget">,
+): string | undefined => {
+  if (input.idleTimeout !== undefined) {
+    let ms: number | undefined;
+    try {
+      ms = msToNumber(input.idleTimeout as Duration);
+    } catch {
+      ms = undefined;
+    }
+    if (ms === undefined || !Number.isFinite(ms) || ms <= 0) {
+      return `idleTimeout must be a duration such as "5 minutes", got ${shown(input.idleTimeout)}`;
+    }
+  }
+  const minutes = input.toolTimeoutMinutes;
+  const positive = typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0;
+  if (minutes !== undefined && !positive) {
+    return `toolTimeoutMinutes must be a positive number, got ${shown(minutes)}`;
+  }
+  if (input.budget !== undefined && (typeof input.budget !== "object" || input.budget === null)) {
+    return `budget must be an object, got ${shown(input.budget)}`;
+  }
+  for (const [key, value] of Object.entries(input.budget ?? {})) {
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return `budget.${key} must be a number of at least 0, got ${shown(value)}`;
+    }
+  }
   return undefined;
 };
 
