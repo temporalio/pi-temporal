@@ -222,6 +222,13 @@ async function main() {
       (second.finished?.spent?.tokens ?? 0) >= 250,
       second.finished?.spent,
     );
+    // Already past the bound, so the next prompt must not pay for a step to find that out.
+    const third = await turn({ tokens: 10_000, sessionTokens: 250 }, session);
+    check(
+      "a prompt to a session already past its bound runs no step",
+      third.finished?.outcome === "budget" && third.taken === 0,
+      { finished: third.finished, taken: third.taken },
+    );
 
     // A new run of the same session starts with no count, so the reported total must bound it.
     answerAfter = 2;

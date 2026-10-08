@@ -41,17 +41,20 @@ const QUARANTINED = "WorktreeQuarantined";
 // exit still counts the turns before it. The Workflow's own count only spans one run.
 const SESSION_SECONDS = "pi-temporal.session-seconds";
 
-// A Worker that shuts down cancels its running Activities too, once `shutdownGraceTime` passes.
-// That isn't a user stop. The work must go on elsewhere, so this Activity keeps running until
-// the process ends, and recovery treats it like a crash. Recording a stop would end the turn.
-const shuttingDown = (context: Context) =>
-  context.cancellationDetails?.workerShutdown === true ||
-  (context.cancellationSignal.reason as Error | undefined)?.message === "WORKER_SHUTDOWN";
+// Only a cancel the Workflow asked for is a stop. A Worker shutdown, a timeout, a pause or a reset
+// also cancels the attempt, but the step must go on. A retry or another Worker takes it, and the
+// fence keeps this attempt's late writes out of the session. Recording a stop would end the turn.
+const stopAsked = (context: Context) => {
+  const details = context.cancellationDetails;
+  if (details) return details.cancelRequested;
+  // No details, as from a server too old to send them. Only a shutdown says why.
+  return (context.cancellationSignal.reason as Error | undefined)?.message !== "WORKER_SHUTDOWN";
+};
 
 // Whether the Workflow asked this Activity to stop. Only as fresh as the last heartbeat.
 const stopRequested = () => {
   const context = Context.current();
-  return context.cancellationSignal.aborted && !shuttingDown(context);
+  return context.cancellationSignal.aborted && stopAsked(context);
 };
 
 // The Activity logger, so each line carries its Workflow and Activity ids.
@@ -68,7 +71,7 @@ const cancellation = (): AbortSignal => {
   const stop = new AbortController();
   // The abort fires outside the Activity's async context, so the context is captured here.
   const forward = () => {
-    if (!shuttingDown(context)) stop.abort(cancelled.reason);
+    if (stopAsked(context)) stop.abort(cancelled.reason);
   };
   if (cancelled.aborted) forward();
   else cancelled.addEventListener("abort", forward, { once: true });
@@ -419,7 +422,11 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
         // directory, since a timed-out attempt may still be running.
         await store?.beginWrite(writer);
         const outcome = await session.runToolCall(call.id, cancellation()).finally(async () => {
-          await store?.endWrite(writer);
+          // The outcome outranks the marker. A marker left behind only holds the directory until
+          // its process is shown gone. A lost outcome turns a tool that worked into an unknown one.
+          await store?.endWrite(writer).catch((err: unknown) => {
+            say("warn", `could not clear the writer marker after ${call.id}: ${err}`);
+          });
         });
         if (outcome === undefined) return { outcome: "already-settled" };
 

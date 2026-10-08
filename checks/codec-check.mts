@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
+import { ApplicationFailure } from "@temporalio/common";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { AesGcmCodec, dataConverterFor } from "../src/core/codec.js";
 import { sendPrompt } from "../src/core/client.js";
@@ -73,6 +74,8 @@ const worker = await Worker.create({
   dataConverter,
   activities: {
     async runStep(input: RunStepInput): Promise<RunStepResult> {
+      // Tool and provider errors carry text from the task, so a failure's message must be sealed too.
+      if (input.text?.startsWith("fail ")) throw ApplicationFailure.nonRetryable(input.text);
       return { done: true, finalText: `${input.text} back` };
     },
     async retireSession() {},
@@ -88,6 +91,11 @@ try {
   assert.equal(quiet.finished?.finalText, `${secret} back`);
   console.log("PASS the client and the Worker read each other's encrypted payloads");
 
+  const failing = `fail ${randomUUID()}`;
+  await sendPrompt(client, cfg, session, { promptId: randomUUID(), text: failing });
+  const failed = await handle.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
+  assert.equal(failed.finished?.outcome, "failed");
+
   // Every payload in the history, wherever it sits: inputs, results, Update arguments, the memo,
   // and summaries.
   const encodings: string[] = [];
@@ -102,7 +110,9 @@ try {
   walk(JSON.parse(JSON.stringify(await handle.fetchHistory())));
   assert.ok(encodings.length > 0);
   assert.deepEqual([...new Set(encodings)], ["binary/encrypted"]);
-  console.log("PASS the history holds only ciphertext");
+  const raw = JSON.stringify(await handle.fetchHistory());
+  assert.ok(!raw.includes(failing.slice(5)), "a failure message is in the history in plain text");
+  console.log("PASS the history holds only ciphertext, failure messages included");
 } finally {
   await client.workflow.getHandle(workflowId(session)).terminate("check cleanup").catch(() => {});
   worker.shutdown();

@@ -1,7 +1,7 @@
-// Checks that a Worker shutting down is not a user stop. The SDK cancels running Activities when
-// its Worker shuts down, and a turn that took that as a stop would end as "interrupted" on every
-// deploy. A shutdown must leave the model call running, so the step finishes or the process dies
-// and Temporal retries it elsewhere. A real cancel from the Workflow must still stop it.
+// Checks that only a cancel the Workflow asked for is a user stop. The SDK also cancels running
+// Activities when their Worker shuts down, times out, is paused or is reset. A turn that took any
+// of those as a stop would end as "interrupted", on every deploy for a start. Those must leave the
+// model call running, so the step finishes or a retry takes it. A real cancel must still stop it.
 //
 // Runs `runStep` under `MockActivityEnvironment`, the SDK's way to give an Activity a context
 // without a Worker. No server and no model key. Usage: npx tsx checks/shutdown-check.mts
@@ -82,6 +82,16 @@ try {
     shutdown.result?.done === true && shutdown.failure === undefined,
     { result: shutdown.result, failure: String(shutdown.failure) },
   );
+
+  // A timeout, a pause or a reset hands the step to a retry. None of them is a user stop either.
+  for (const [why, details] of [
+    ["a timeout", { timedOut: true }],
+    ["a pause", { paused: true }],
+    ["a reset", { reset: true }],
+  ] as const) {
+    const other = await cancelledStep(new ActivityCancellationDetails(details), "CANCELLED");
+    check(`${why} doesn't abort the model call either`, !other.aborted, other);
+  }
 
   const stop = await cancelledStep(
     new ActivityCancellationDetails({ cancelRequested: true }),

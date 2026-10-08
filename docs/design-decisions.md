@@ -123,18 +123,19 @@ tool and the model call, which end like a user stop in the agent. The recovery s
 what each tool reported instead of unknown outcomes. Cancellation reaches an Activity only with a
 heartbeat's answer, so Workers send heartbeats at least every 3 seconds.
 
-## A Worker shutdown is not a stop
+## Only a requested cancel is a stop
 
-A deploy must not end turns. When a Worker shuts down, the SDK waits `shutdownGraceTime` and then
-cancels the Activities still running. The Activities tell this apart from a stop through
-`Context.cancellationDetails.workerShutdown`. They keep running until the process ends, so
-recovery treats it like a crash and the step retries on another Worker. A user stop still ends the
-call, and the seal records what it did.
+A deploy must not end turns. The SDK cancels a running Activity for several reasons: the Workflow
+asked, the Worker shuts down, the attempt timed out, or an operator paused or reset it. Only the
+first is a user stop, and `Context.cancellationDetails.cancelRequested` says which. A stop ends the
+call, and the seal records what it did. For the others the Activity keeps running. A retry or
+another Worker takes the step, and the fence keeps this attempt's late writes out. When a Worker
+shuts down, the SDK first waits `shutdownGraceTime`.
 
 The standalone Worker sets `shutdownGraceTime` to 60 seconds by default, through
 `PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS`. Most model calls finish in that time, so a step isn't cut off
 and paid for twice. `docker/compose.yml` sets `stop_grace_period: 90s`, past the grace, so Docker
-doesn't kill the process first. `shutdown-check` shows the difference between the two cancels.
+doesn't kill the process first. `shutdown-check` shows each kind of cancel.
 
 ## A bug fails the Workflow Task, not the turn
 
@@ -243,9 +244,12 @@ the sink drops their spans. `tracing-check` shows one trace from the client to t
 
 Prompt and answer payloads pass through history, along with error text. Coding tasks can put
 code or secrets in those payloads. `PI_TEMPORAL_CODEC_KEY` turns on an AES-GCM payload codec
-in every client and Worker, and the server then stores only ciphertext. The UI needs a codec
-server with the same key to show them. Search attributes, such as `PiSessionState`, are never
-encrypted.
+in every client and Worker, and the server then stores only ciphertext. A failure's message and
+stack trace are plain fields by default, and tool and provider errors can quote the task. So the
+codec's failure converter moves them into a payload too (`encodeCommonAttributes`). The prebuilt
+bundle doesn't carry it, so failures the Workflow raises itself, such as a refused prompt, stay
+plain. They hold no task text. The UI needs a codec server with the same key to show any of this.
+Search attributes, such as `PiSessionState`, are never encrypted.
 
 The codec still reads a plain payload, so history written before the key was set stays readable.
 That also means it doesn't guard against someone who can write history directly. It protects

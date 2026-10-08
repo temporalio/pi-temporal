@@ -30,6 +30,9 @@ services:
     # Past the Worker's shutdown grace (60 seconds by default), so a running model call or tool
     # can finish before Docker kills the process.
     stop_grace_period: 90s
+    # A tool can leave background children. An init process reaps them, which Node as PID 1
+    # never does, so they'd pile up as zombies for the life of the container.
+    init: true
     depends_on:
       temporal:
         condition: service_healthy

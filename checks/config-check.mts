@@ -97,3 +97,17 @@ assert.equal(fromEnv().codecOldKeys?.length, 1);
 delete process.env.PI_TEMPORAL_CODEC_OLD_KEYS;
 delete process.env.PI_TEMPORAL_CODEC_KEY;
 console.log("PASS old codec keys need a current one");
+
+// The Workflow parses the idle timeout. A typo found there fails every Workflow Task.
+process.env.PI_SESSION_IDLE_TIMEOUT = "5 minuets";
+assert.throws(() => fromEnv(), /must be a duration/);
+process.env.PI_SESSION_IDLE_TIMEOUT = "90 seconds";
+assert.equal(fromEnv().idleTimeout, "90 seconds");
+delete process.env.PI_SESSION_IDLE_TIMEOUT;
+// A typo in a switch is refused rather than read as off.
+process.env.PI_TEMPORAL_TLS = "true";
+assert.equal(fromEnv().tls, true);
+process.env.PI_TEMPORAL_TLS = "ture";
+assert.throws(() => fromEnv(), /PI_TEMPORAL_TLS must be/);
+delete process.env.PI_TEMPORAL_TLS;
+console.log("PASS a bad idle timeout or TLS switch is refused at start");

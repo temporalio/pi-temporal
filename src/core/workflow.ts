@@ -127,8 +127,13 @@ function toolCallActivities(timeoutMinutes: number) {
   };
 }
 
-// The seal may run a provider retry and a compaction, so it keeps the step-sized cap.
-const { sealStep } = proxyActivities<SteppedActivities>({ ...cappedOptions, summary: "seal" });
+// The seal may run a provider retry and a compaction, so it keeps the step-sized cap. A stop waits
+// for it to end, so the recovery seal never writes the session file while this one still does.
+const { sealStep } = proxyActivities<SteppedActivities>({
+  ...cappedOptions,
+  cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+  summary: "seal",
+});
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
 const HOST_SCHEDULE_TO_START_SECONDS = 30;
@@ -159,6 +164,7 @@ const onHost = (taskQueue: string, timeoutMinutes: number) => ({
   sealStep: proxyActivities<SteppedActivities>({
     ...cappedOptions,
     retry: { maximumAttempts: 3 },
+    cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
     taskQueue,
     scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
     summary: "seal",
@@ -325,7 +331,9 @@ export async function piSession(input: SessionInput): Promise<void> {
     setCurrentDetails(running ? `turn ${running.promptId}, step ${running.step}` : "idle");
   };
 
-  const seen = [...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)];
+  // A set first, since a carried queue's ids are already in `seenPrompts`. Doubled, they'd shrink
+  // the window of finished ids at every Continue-As-New.
+  const seen = [...new Set([...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)])];
   // The prompt goes into history, and Continue-As-New carries a queued one on, so its size is
   // capped. A bigger input belongs in a file the agent reads.
   const problemWith = (p: PromptInput) =>
@@ -424,13 +432,6 @@ export async function piSession(input: SessionInput): Promise<void> {
           deadlineScope = new CancellationScope();
           deadlineScope.run(() => sleep(hardMs)).then(expire, () => undefined);
         }
-        if (!projectAdopted && options?.template) {
-          // Part of the turn, so stop and query apply while it waits.
-          running = { promptId: prompt.promptId, step: 0 };
-          show();
-          await adoptProject({ sessionFile: file, template: options.template });
-          projectAdopted = true;
-        }
         // Workflow state, not file totals, since the session file is shared. `Date.now()` is the
         // workflow clock, so replay agrees. Passed to the step so it can stop mid-batch.
         const over = (pending?: Pick<RunStepResult, "spent" | "total">) => {
@@ -447,6 +448,26 @@ export async function piSession(input: SessionInput): Promise<void> {
         };
         // Between the tools of one step, the step's own model call counts too.
         outOfBudget = (pending) => over(pending);
+        // A session already past a session bound must not pay for one more step per prompt.
+        if (over()) {
+          outcome = "budget";
+          log.warn("turn not started: the session is out of budget", {
+            sessionId: id,
+            promptId: prompt.promptId,
+            budget: options?.budget,
+          });
+          return;
+        }
+        if (!projectAdopted && options?.template) {
+          // Part of the turn, so a query shows it. Not cancellable, since the copy has no
+          // heartbeat to hear a stop, and a second copy would start while it still runs.
+          running = { promptId: prompt.promptId, step: 0 };
+          show();
+          await CancellationScope.nonCancellable(() =>
+            adoptProject({ sessionFile: file, template: options.template! }),
+          );
+          projectAdopted = true;
+        }
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
           show();

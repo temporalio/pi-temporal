@@ -4,6 +4,7 @@
 // Whether storage is really shared across hosts is for the operator to verify.
 
 import { readFileSync } from "node:fs";
+import { type Duration, msToNumber } from "@temporalio/common";
 import { loadClientConnectConfig } from "@temporalio/envconfig";
 import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
@@ -65,7 +66,7 @@ const secret = (name: string) =>
   given(name) ? process.env[name] : read(process.env[`${name}_FILE`])?.trim();
 
 // A typo must not quietly turn a switch off, so anything unrecognized is refused.
-function onOff(name: string, fallback: boolean): boolean {
+export function onOff(name: string, fallback: boolean): boolean {
   if (!given(name)) return fallback;
   const value = process.env[name]!.trim().toLowerCase();
   if (["1", "true", "on", "yes"].includes(value)) return true;
@@ -109,7 +110,7 @@ export function fromEnv(): Config {
     sessionDir: given("PI_SESSION_DIR")
       ? resolve(process.env.PI_SESSION_DIR!)
       : `${homedir()}/.pi-temporal/sessions`,
-    idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
+    idleTimeout: durationFromEnv("PI_SESSION_IDLE_TIMEOUT", "5 minutes"),
     // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
     searchAttribute: onOff("PI_TEMPORAL_SEARCH_ATTRIBUTE", false),
@@ -130,7 +131,7 @@ export function fromEnv(): Config {
             key: readFileSync(key, "utf8"),
             ca: read(process.env.PI_TEMPORAL_TLS_CA),
           }
-        : process.env.PI_TEMPORAL_TLS === "1"
+        : onOff("PI_TEMPORAL_TLS", false)
           ? true
           : undefined,
     // The standard config's pair too, which it otherwise skips without a word.
@@ -333,6 +334,25 @@ export function describe(cfg: Config): Record<string, string> {
 }
 
 export const minutesFromEnv = (name: string) => wholeFromEnv(name, "minutes");
+
+// Checked here, since the Workflow parses it. A typo found there fails every Workflow Task of the
+// session, and its prompts wait as Signals until someone notices.
+function durationFromEnv(name: string, fallback: string): string {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  let ms: number | undefined;
+  try {
+    ms = msToNumber(raw as Duration);
+  } catch {
+    ms = undefined;
+  }
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) {
+    throw new Error(
+      `${name} must be a duration such as "5 minutes" or "30s", got ${JSON.stringify(raw)}`,
+    );
+  }
+  return raw;
+}
 
 function wholeFromEnv(name: string, unit: string): number | undefined {
   const raw = process.env[name];
