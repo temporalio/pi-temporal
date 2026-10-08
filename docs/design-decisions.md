@@ -8,7 +8,9 @@ The code comments next to each choice say the same in fewer words.
 The Workflow keeps the prompt queue, the current step, spend, and budgets. The agent's session
 file keeps the conversation. A coding agent's tool output is large and a session can run for
 hours, so a conversation in Workflow state or history would hit Temporal's payload and history
-limits within a busy turn. History carries ids and small results instead.
+limits within a busy turn. History carries ids and small results instead, plus each prompt's
+text and final answer, which can hold secrets (see the codec, below). Both are capped, a prompt at
+64K characters and the answer at 16K, with the whole answer in the session file.
 
 The cost is that every Activity opens the session file again, and the file must be on storage
 every Worker can reach. If your agent's conversation is small and short, keeping it in Workflow

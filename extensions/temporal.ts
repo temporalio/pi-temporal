@@ -91,8 +91,9 @@ interface Task {
 
 export default function (pi: ExtensionAPI) {
   const cfg = env();
-  // pi's tools inherit this process's env. They must not see the Temporal credentials, which are
-  // read once into `cfg` above. The model keys stay, since pi itself needs them.
+  // Keeps the Temporal credentials, read once into `cfg` above, out of every tool's environment.
+  // The model keys stay, since pi itself needs them. Tools run as you, so they could read either
+  // from this process anyway. This only stops them being handed over by default.
   dropFromEnv(TEMPORAL_CREDENTIAL_VARS);
   // Connect lazily, so a pi that never runs a task opens no connection.
   let connecting: Promise<{ client: Client; connection: Connection }> | undefined;
@@ -307,7 +308,8 @@ export default function (pi: ExtensionAPI) {
         // Not wrapped. Checking for an interrupt doesn't run the turn.
         interrupted: () => turn.steps.interrupted(),
         modelCall: () => ranHere(() => turn.steps.modelCall()),
-        runToolCall: (id) => ranHere(() => turn.steps.runToolCall(id)),
+        // The options carry the Activity's abort signal, so a stop reaches the running tool.
+        runToolCall: (id, options) => ranHere(() => turn.steps.runToolCall(id, options)),
         sealStep: (results, options) => ranHere(() => turn.steps.sealStep(results, options)),
       },
     });

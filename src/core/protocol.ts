@@ -6,6 +6,16 @@ export const WORKFLOW_ID_PREFIX = "pi-session-";
 // A tool call that failed before any attempt claimed it, so the tool never started and the
 // workflow may move a host-queue step.
 export const FAILED_BEFORE_CLAIM = "FailedBeforeClaim";
+/**
+ * Where a run's fences start. A run that started no later than the one it continued from counts
+ * on from that run's last fence, so its fences still sort after the old run's.
+ */
+export const fenceStart = (
+  runStartMs: number,
+  after?: { readonly ms: number; readonly seq: number },
+): { ms: number; seq: number } =>
+  after && after.ms >= runStartMs ? { ms: after.ms, seq: after.seq } : { ms: runStartMs, seq: 0 };
+
 /** The Workflow's half of a fence: its run, and the Activity it is about to schedule. */
 export const fencePrefix = (runStartMs: number, seq: number) =>
   `${String(runStartMs).padStart(13, "0")}.${String(seq).padStart(8, "0")}`;
@@ -183,6 +193,9 @@ export interface SessionTurnOptions {
   // Prompt ids the session has taken, newest last, so a resent prompt isn't run twice. Carried
   // across Continue-As-New.
   readonly seenPrompts?: readonly string[];
+  // The last fence the run before this one handed out, carried across Continue-As-New. A new run
+  // can start in the same millisecond, and its fences must still sort after the old run's.
+  readonly fencedAfter?: { readonly ms: number; readonly seq: number };
   // Host queues of the Workers that held this session's project, carried across Continue-As-New.
   // Each one is asked to hand its directory back when the session goes idle.
   readonly hostQueues?: readonly string[];

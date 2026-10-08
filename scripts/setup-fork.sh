@@ -17,6 +17,14 @@ mkdir -p "$dir"
 git -C "$dir" remote add origin "$PI_FORK_REPO" 2>/dev/null \
   || git -C "$dir" remote set-url origin "$PI_FORK_REPO"
 
+# Edited fork sources would be built and linked as if they were the pinned commit. Refused, not
+# reset, so local work on the fork isn't lost.
+if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+  echo "the fork at $dir has uncommitted changes, so it would not build the pinned commit." >&2
+  echo "commit or stash them, or delete $dir to fetch it again." >&2
+  exit 1
+fi
+
 # Shallow fetch of the exact commit, so the checkout doesn't drift.
 if [ "$(git -C "$dir" rev-parse -q --verify HEAD || true)" != "$PI_FORK_REF" ]; then
   git -C "$dir" fetch --depth 1 origin "$PI_FORK_REF"

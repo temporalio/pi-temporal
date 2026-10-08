@@ -113,8 +113,7 @@ async function stalledWriter(name: string, steps: number) {
  * A stalls on its claim while the session is forgotten and then sent again. A's late tip must not
  * bring back the forgotten tree, and must not get in the way of the new one.
  */
-async function stalledAcrossForget() {
-  const name = "forgotten";
+async function stalledAcrossForget(name: string, steps: number) {
   const sessionFile = join(root, "sessions", `${name}.jsonl`);
   const project = (host: string) => join(root, name, host, "project");
   const asHost = (host: string) => {
@@ -124,6 +123,11 @@ async function stalledAcrossForget() {
   asHost("a");
   await fs.writeFile(join(project("a"), "old.txt"), "one\n");
   await worktree.capture(project("a"), sessionFile, { seed: true });
+  // With steps, A's next bundle is a restart, whose cleanup must not reach the new generation.
+  for (let step = 0; step < steps; step++) {
+    await fs.writeFile(join(project("a"), "step.txt"), `${step}\n`);
+    await worktree.capture(project("a"), sessionFile);
+  }
 
   const paused = barrier();
   const resume = barrier();
@@ -145,34 +149,43 @@ async function stalledAcrossForget() {
   );
   await paused.promise;
 
+  const sendAgain = async () => {
+    asHost("b");
+    await fs.writeFile(join(project("b"), "new.txt"), "fresh\n");
+    await worktree.capture(project("b"), sessionFile, { seed: true });
+    await fs.writeFile(join(project("b"), "new.txt"), "fresh again\n");
+    await worktree.capture(project("b"), sessionFile);
+  };
   Date.now = () => originalNow() + 5 * 60_000;
   try {
     await worktree.forget(sessionFile);
+    // Sent again before A wakes, so A's cleanup has the new generation's bundles to reach.
+    if (steps > 0) await sendAgain();
   } finally {
     Date.now = originalNow;
   }
+  asHost("a");
   resume.release();
   await late;
   fs.mkdir = originalMkdir;
   syncBuiltinESMExports();
-  assert.equal(await worktree.established(sessionFile), false);
-  console.log("PASS a late tip does not bring back a forgotten session");
-
-  asHost("b");
-  await fs.writeFile(join(project("b"), "new.txt"), "fresh\n");
-  await worktree.capture(project("b"), sessionFile, { seed: true });
-  await fs.writeFile(join(project("b"), "new.txt"), "fresh again\n");
-  await worktree.capture(project("b"), sessionFile);
+  if (steps === 0) {
+    assert.equal(await worktree.established(sessionFile), false);
+    console.log("PASS a late tip does not bring back a forgotten session");
+    await sendAgain();
+  }
   asHost("c");
   await worktree.ensure(project("c"), sessionFile);
   assert.equal(await read(join(project("c"), "new.txt")), "fresh again\n");
   assert.equal(await read(join(project("c"), "old.txt")), undefined);
-  console.log("PASS and the project sent again restores on a new host");
+  console.log(`PASS ${name}: the project sent again restores on a new host`);
 }
 
 try {
   await fs.mkdir(join(root, "sessions"), { recursive: true });
-  await stalledAcrossForget();
+  await stalledAcrossForget("forgotten", 0);
+  // A ends at 39 and stalls on its restart at 40, then cleans up after the session was sent again.
+  await stalledAcrossForget("forgotten-restart", 38);
   await stalledWriter("plain", 0);
   // A ends at 38 and stalls on 39. B publishes 39, then the restart at 40.
   await stalledWriter("compacted", 37);

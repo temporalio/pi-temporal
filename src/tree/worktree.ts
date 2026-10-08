@@ -139,7 +139,9 @@ async function claimTip(sessionFile: string, generation: number, tip: Tip): Prom
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     // Over NFS a resent link can report EEXIST for a link that landed, so look at what is there.
-    const there = await readJson<Tip>(path).catch(() => undefined);
+    // A read that fails is thrown. Read as "someone else's", it would end a seal that a retry
+    // could finish.
+    const there = await readJson<Tip>(path);
     return there !== undefined && bundleOf(there) === bundleOf(tip);
   } finally {
     // Never fail a claim that landed over its scratch file.
@@ -435,17 +437,29 @@ async function liveHere(projectDir: string): Promise<LiveHere | undefined> {
       if (held !== undefined) workers.add(held);
       named.set(pid, held);
     }
-    // Ask for every cwd at once. `lsof +D` would stat the whole tree.
-    const cwds = await execFileAsync("lsof", ["-a", "-d", "cwd", "-Fpn"], asked).catch(
-      () => undefined,
+    // Every open file of every process, at once, like the `/proc` scan on Linux: a process can
+    // hold a file open after it left the directory and its group. `lsof +D` would stat the whole
+    // tree instead. A scan that fails can't say the directory is free, so it throws.
+    const open = await execFileAsync("lsof", ["-n", "-P", "-Fpfn"], asked).catch(
+      (err: { stdout?: string; code?: number }) => {
+        // lsof exits 1 when some files couldn't be read, but still lists the rest.
+        if (err.code === 1 && err.stdout) return { stdout: err.stdout };
+        throw err;
+      },
     );
     let at: number | undefined;
-    for (const line of cwds?.stdout.split("\n") ?? []) {
+    let fd = "";
+    for (const line of open.stdout.split("\n")) {
       if (line.startsWith("p")) at = Number.parseInt(line.slice(1), 10);
+      if (line.startsWith("f")) fd = line.slice(1);
       if (!line.startsWith("n") || at === undefined || at === process.pid) continue;
-      if (inside(line.slice(1)) && !ours(named.get(at))) {
-        holding.push({ pid: at, how: "its working directory is in it" });
-      }
+      const path = line.slice(1);
+      if (!inside(path) || ours(named.get(at))) continue;
+      if (holding.some((h) => h.pid === at)) continue;
+      holding.push({
+        pid: at,
+        how: fd === "cwd" ? "its working directory is in it" : `it holds ${path} open`,
+      });
     }
     return {
       groups,
@@ -768,15 +782,43 @@ export async function clearWriters(projectDir: string): Promise<number> {
 }
 
 // What the directory holds now, as a tree id. Callers hold the tree lock.
+// The checkout's own `.git/info/exclude`. The snapshot uses a repository of its own, so without
+// this the checkout's local ignore rules would not apply and its ignored files would ship.
+async function checkoutExcludes(projectDir: string): Promise<string[]> {
+  const path = await checkoutExcludePath(projectDir);
+  if (path === undefined) return [];
+  return (await access(path).then(() => true, () => false))
+    ? ["-c", `core.excludesFile=${path}`]
+    : [];
+}
+
+// Where the checkout keeps its own exclude file. Git answers, since a linked worktree or a
+// submodule has a `.git` file that points elsewhere. Undefined when the directory isn't a
+// checkout at all.
+async function checkoutExcludePath(projectDir: string): Promise<string | undefined> {
+  const dir = resolve(projectDir);
+  const exists = await access(join(dir, ".git")).then(() => true, () => false);
+  if (!exists) return undefined;
+  // A `.git` that git doesn't take for a checkout counts as none, so its rules don't apply.
+  const asked = await execFileAsync(
+    "git",
+    ["-C", dir, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+    { env: gitEnv() },
+  ).catch(() => undefined);
+  return asked?.stdout.trim() || undefined;
+}
+
 async function treeHere(projectDir: string) {
   await ensureShadow(projectDir);
+  const excludes = await checkoutExcludes(projectDir);
   // `add -A` keeps what the index already tracks, so a file ignored after it was captured would
   // keep shipping. Drop those entries first.
-  const ignored = (await git(projectDir, ["ls-files", "-ci", "--exclude-standard", "-z"])).stdout;
+  const listed = ["ls-files", "-ci", "--exclude-standard", "-z"];
+  const ignored = (await git(projectDir, [...excludes, ...listed])).stdout;
   if (ignored !== "") {
     await git(projectDir, ["update-index", "--force-remove", "-z", "--stdin"], ignored);
   }
-  await git(projectDir, ["add", "-A"]);
+  await git(projectDir, [...excludes, "add", "-A"]);
   return (await git(projectDir, ["write-tree"])).stdout.trim();
 }
 
@@ -816,18 +858,26 @@ async function ingest(projectDir: string, sessionFile: string, generation: numbe
 const COMPACT_EVERY = 40;
 
 // Bundles and tips older than a restart bundle, which stands on its own. `salvage/` stays.
+// Only this generation's. Every generation's bundles share one directory, and a writer that stalled
+// across a `forget` would otherwise delete the new generation's bundles by their numbers. A bundle
+// no tip names, from a writer that lost its race, stays. Nothing reads it.
 async function dropBefore(sessionFile: string, generation: number, seq: number) {
   const dir = shareDir(sessionFile);
-  for (const name of await listDir(dir)) {
-    if (name.endsWith(".bundle") && Number.parseInt(name, 10) < seq) {
-      await rm(join(dir, name), { force: true });
-    }
-  }
   for (const name of await tipNames(sessionFile, generation)) {
     if (Number.parseInt(name, 10) >= seq) continue;
+    const tip = await readJson<Tip>(join(tipsDir(sessionFile, generation), name));
+    if (tip) await rm(join(dir, bundleOf(tip)), { force: true });
     await rm(join(tipsDir(sessionFile, generation), name), { force: true });
   }
-  await rm(legacyTipPath(sessionFile), { force: true });
+  // A store from before tips were one file each names its bundles by number alone.
+  if (generation === 0) {
+    for (const name of await listDir(dir)) {
+      if (/^\d{8}\.bundle$/.test(name) && Number.parseInt(name, 10) < seq) {
+        await rm(join(dir, name), { force: true });
+      }
+    }
+    await rm(legacyTipPath(sessionFile), { force: true });
+  }
 }
 
 // Where a restore starts. A note from an older generation counts from the start of this one.
@@ -926,21 +976,29 @@ async function salvage(projectDir: string, sessionFile: string, tree: string) {
 
 // Empty a directory this host built, unless it holds unshipped work. Returns whether it is now
 // empty, since a root `.git` survives and the next restore would refuse it.
-async function handBack(projectDir: string, held: Held) {
+async function handBack(projectDir: string, held: Held, owned: () => Promise<boolean>) {
   if (!held.built) return false;
   // A tool can outlive the turn while its directory still matches the last snapshot.
   if ((await writersHere(projectDir)).length > 0) return false;
   // Compare with this host's own tree, since it may be behind the final tip.
   if ((await treeHere(projectDir)) !== held.tree) return false;
+  // Asked right before each step that deletes. A holder that stalled past its lease would delete
+  // what the next holder put here. Losing the lease counts as not emptied, like any refusal.
+  if (!(await owned())) return false;
   await git(projectDir, ["read-tree", "-u", "--reset", EMPTY_TREE]);
   // `-x` too. Safe because only directories this host built get here.
+  if (!(await owned())) return false;
   await git(projectDir, ["clean", "-fdxq"]);
   return await isEmptyDir(projectDir);
 }
 
 // Whether another session is using this directory, after handing back retired ones. Retirement
 // runs on one host, so the others clean up here. Called with the tree lock held.
-async function heldByOthers(projectDir: string, sessionFile: string) {
+async function heldByOthers(
+  projectDir: string,
+  sessionFile: string,
+  owned: () => Promise<boolean>,
+) {
   const mine = heldName(sessionFile);
   const names = (await listDir(hostDir(projectDir))).filter(
     (name) => name.startsWith("held-") && !isScratch(name) && name !== mine,
@@ -954,7 +1012,7 @@ async function heldByOthers(projectDir: string, sessionFile: string) {
       holdouts++;
       continue;
     }
-    if (note.built && !(await handBack(projectDir, note))) {
+    if (note.built && !(await handBack(projectDir, note, owned))) {
       holdouts++;
       continue;
     }
@@ -974,10 +1032,24 @@ export async function projectRefusal(dir: string): Promise<string | undefined> {
     return `${dir} is your home directory, and every dotfile in it would ship`;
   }
   const exists = (name: string) => access(join(resolved, name)).then(() => true, () => false);
-  if (!(await exists(".git")) && !(await exists(".gitignore"))) {
-    return `${dir} holds no repository and no .gitignore, so nothing keeps secrets out of it`;
+  if (await exists(".gitignore")) return undefined;
+  // A checkout alone isn't enough. Its own ignore rules count only if there are some. Only a
+  // missing file means no rules. Any other read error is thrown, not taken as permission.
+  const path = await checkoutExcludePath(resolved);
+  const local =
+    path === undefined
+      ? ""
+      : await readFile(path, "utf8").catch((err: NodeJS.ErrnoException) => {
+          if (err.code === "ENOENT") return "";
+          throw err;
+        });
+  if (local.split("\n").some((line) => line.trim() !== "" && !line.trim().startsWith("#"))) {
+    return undefined;
   }
-  return undefined;
+  return (
+    `${dir} has no .gitignore and no rules in .git/info/exclude, so nothing keeps secrets ` +
+    `out of it`
+  );
 }
 
 /**
@@ -1015,7 +1087,7 @@ export async function capture(
     if (!tip) {
       // Nothing shipped yet. Only a seeding caller may establish it.
       if (!opts.seed) return;
-      if (await heldByOthers(projectDir, sessionFile)) {
+      if (await heldByOthers(projectDir, sessionFile, owned)) {
         throw new WrongTree(`not shipping ${projectDir}: another session is working in it`);
       }
     } else if (held?.tree !== tip.tree) {
@@ -1065,7 +1137,7 @@ export async function ensure(
     const tip = await tipOf(sessionFile, generation);
 
     // Before the tip check, so a session with nothing shipped can't run in another's directory.
-    if (await heldByOthers(projectDir, sessionFile)) {
+    if (await heldByOthers(projectDir, sessionFile, owned)) {
       throw new WrongTree(`not restoring ${projectDir}: another session is working in it`);
     }
     // A worker may not establish the project. The client sends it before the session starts.
@@ -1122,11 +1194,11 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
  * Returns false when `handBack` refuses.
  */
 export async function release(projectDir: string, sessionFile: string): Promise<boolean> {
-  return await withTreeLocks(projectDir, sessionFile, async () => {
+  return await withTreeLocks(projectDir, sessionFile, async (owned) => {
     const held = await readJson<Held>(heldPath(projectDir, sessionFile));
     if (!held) return false;
     // Keep the note if not emptied, or the next restore would refuse the leftovers.
-    if (!(await handBack(projectDir, held))) return false;
+    if (!(await handBack(projectDir, held, owned))) return false;
     await rm(heldPath(projectDir, sessionFile), { force: true });
     return true;
   });
@@ -1207,13 +1279,13 @@ export async function sweep(): Promise<number> {
       if (!note?.session || !note.directory) continue;
       // An unreadable marker skips this note, not the whole pass.
       if (!(await isRetired(note.session).catch(() => false))) continue;
-      const done = await withTreeLocks(note.directory, note.session, async () => {
+      const done = await withTreeLocks(note.directory, note.session, async (owned) => {
         const current = await readJson<Held>(path);
         if (
           !current || current.session !== note.session || current.directory !== note.directory ||
           !(await isRetired(note.session!))
         ) return false;
-        if (current.built && !(await handBack(note.directory!, current))) {
+        if (current.built && !(await handBack(note.directory!, current, owned))) {
           return false;
         }
         await rm(path, { force: true });

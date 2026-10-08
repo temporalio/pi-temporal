@@ -83,6 +83,16 @@ const heartbeatEvery = (ms: number) => {
   return () => clearInterval(timer);
 };
 
+// The final answer goes into history, where every client reads it, and Continue-As-New carries the
+// last one on. So it's capped. The whole answer stays in the session file.
+const MAX_ANSWER_CHARS = 16 * 1024;
+const answerOf = (session: AgentSession) => {
+  const answer = session.lastAnswer();
+  return answer.length <= MAX_ANSWER_CHARS
+    ? answer
+    : `${answer.slice(0, MAX_ANSWER_CHARS)}\n\n[cut short here; the session file has all of it]`;
+};
+
 export interface CoreActivityOptions {
   readonly agent: Agent;
   // Ships the project between hosts. Without one, every Worker must see the same directory.
@@ -226,7 +236,7 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
     }
 
     // Already answered. A retry that landed after the last step finished.
-    if (!settleWhatStopped(session)) return { done: true, finalText: session.lastAnswer() };
+    if (!settleWhatStopped(session)) return { done: true, finalText: answerOf(session) };
     return undefined;
   }
 
@@ -299,7 +309,7 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
           return {
             done: sealed.done,
             ...(sealed.agentState ? { agentState: sealed.agentState } : {}),
-            finalText: sealed.done ? session.lastAnswer() : "",
+            finalText: sealed.done ? answerOf(session) : "",
             ...totals(before, session),
             ...seconds,
           };
@@ -482,7 +492,7 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
           const seconds = secondsBefore(session, input.turn);
           recordSeconds(session, input.turn, input.sessionSeconds);
           // Kept results stay until the next step sweeps them, so a retried seal can read them.
-          const answer = session.lastAnswer();
+          const answer = answerOf(session);
           // Ship after the seal, so the project matches the session.
           if (!input.interrupted) {
             const fence = { turn: input.turn, step: input.step };

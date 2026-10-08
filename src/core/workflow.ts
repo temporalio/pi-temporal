@@ -31,6 +31,7 @@ import {
 import {
   FAILED_BEFORE_CLAIM,
   fencePrefix,
+  fenceStart,
   MAX_STEPS_PER_TURN,
   DUPLICATE_PROMPT,
   QUERIES,
@@ -255,8 +256,10 @@ export async function piSession(input: SessionInput): Promise<void> {
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
   // One per Activity that writes the session file. See `fence.ts`.
-  let fenced = 0;
-  const fence = () => fencePrefix(workflowInfo().runStartTime.getTime(), ++fenced);
+  const firstFence = fenceStart(workflowInfo().runStartTime.getTime(), options.fencedAfter);
+  const fenceMs = firstFence.ms;
+  let fenced = firstFence.seq;
+  const fence = () => fencePrefix(fenceMs, ++fenced);
   // Set per turn, since it reads that turn's spend. The step driver is built once.
   let outOfBudget = (_pending?: Pick<RunStepResult, "spent" | "total">): boolean => false;
   const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
@@ -551,6 +554,7 @@ export async function piSession(input: SessionInput): Promise<void> {
         spent,
         hostQueues: [...hostQueues],
         seenPrompts: seen,
+        fencedAfter: { ms: fenceMs, seq: fenced },
       });
     }
 

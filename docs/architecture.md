@@ -30,10 +30,12 @@ flowchart LR
   act -. "optional: project files" .-> tree
 ```
 
-Nothing in Workflow history holds the conversation. History carries prompt ids, tool call ids and
-names, spend, and results such as "settled". A tool's arguments and output stay in the session
-file, so a long session with large tool outputs never runs into Temporal's payload or history
-limits.
+The conversation stays out of Workflow history, but not all of it. A prompt's text and a turn's
+final answer go into history, in Update, Signal, and Activity payloads, and so does error text.
+Tool arguments, tool output, and the model's other responses stay in the session file. Prompts are
+capped at 64K characters, and the answer kept in history at 16K, so large tool outputs and long
+sessions don't run into Temporal's payload and history limits. What does go
+into history can hold code or secrets, so set `PI_TEMPORAL_CODEC_KEY` to store it encrypted.
 
 ## Reading order
 
