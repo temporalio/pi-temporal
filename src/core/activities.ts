@@ -43,14 +43,20 @@ const OUTSIDE_SESSION_ROOT = "SessionOutsideRoot";
 // exit still counts the turns before it. The Workflow's own count only spans one run.
 const SESSION_SECONDS = "pi-temporal.session-seconds";
 
-// Only a cancel the Workflow asked for is a stop. A Worker shutdown, a timeout, a pause or a reset
-// also cancels the attempt, but the step must go on. A retry or another Worker takes it, and the
-// fence keeps this attempt's late writes out of the session. Recording a stop would end the turn.
+// A Worker shutdown cancels the attempt, but the step must go on here until the Worker exits. A
+// lang-side shutdown sends no details, only the reason.
+const shuttingDown = (context: Context) =>
+  context.cancellationDetails?.workerShutdown === true ||
+  (context.cancellationSignal.reason as Error | undefined)?.message === "WORKER_SHUTDOWN";
+
+// Only a cancel the Workflow asked for is a stop. A timeout, a pause, a reset or an attempt the
+// server no longer knows also cancels it, but the step must go on in a retry. Recording a stop
+// would end the turn.
 const stopAsked = (context: Context) => {
   const details = context.cancellationDetails;
   if (details) return details.cancelRequested;
   // No details, as from a server too old to send them. Only a shutdown says why.
-  return (context.cancellationSignal.reason as Error | undefined)?.message !== "WORKER_SHUTDOWN";
+  return !shuttingDown(context);
 };
 
 // Whether the Workflow asked this Activity to stop. Only as fresh as the last heartbeat.
@@ -59,13 +65,20 @@ const stopRequested = () => {
   return context.cancellationSignal.aborted && stopAsked(context);
 };
 
+// Cancelled, but not stopped and not shutting down: the attempt is no longer the step's. A retry
+// may already hold the same fence token, since a reset rewinds the attempt number, so the fence
+// alone can't keep this one out.
+const abandoned = (context: Context) =>
+  context.cancellationSignal.aborted && !shuttingDown(context) && !stopAsked(context);
+
 // The Activity logger, so each line carries its Workflow and Activity ids.
 const say = (level: "info" | "warn", message: string) => {
   Context.current().log[level](message);
 };
 
-// Passed to a running tool or model call, so a cancelled Activity stops it like a user stop. It
-// reports what it did, and the seal records that instead of an unknown outcome. Cancellation
+// Passed to a running tool or model call, so a cancelled Activity stops it like a user stop. After
+// a stop it reports what it did, and the seal records that instead of an unknown outcome. Any other
+// cancel but a shutdown stops it too, and the fence guard keeps what it reports out. Cancellation
 // arrives with a heartbeat, so it takes up to one heartbeat to get there.
 const cancellation = (): AbortSignal => {
   const context = Context.current();
@@ -73,7 +86,7 @@ const cancellation = (): AbortSignal => {
   const stop = new AbortController();
   // The abort fires outside the Activity's async context, so the context is captured here.
   const forward = () => {
-    if (stopAsked(context)) stop.abort(cancelled.reason);
+    if (!shuttingDown(context)) stop.abort(cancelled.reason);
   };
   if (cancelled.aborted) forward();
   else cancelled.addEventListener("abort", forward, { once: true });
@@ -178,7 +191,8 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
 
   // Runs `body` as the session file's writer, with the guard the agent asks before each append.
   // The model's response lands at the end of a stream that can run for minutes, so the guard, not
-  // a check up front, is what keeps a superseded attempt out.
+  // a check up front, is what keeps a superseded attempt out. An abandoned one is kept out the same
+  // way, so what its aborted call reports never lands.
   //
   // An Activity with no fence was scheduled by an older Workflow. It sorts below every fenced one,
   // so it can't block the run that follows.
@@ -187,9 +201,13 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
     prefix: string | undefined,
     body: (guard: () => void) => Promise<T>,
   ) => {
-    const { attempt } = Context.current().info;
-    const token = fenceToken(prefix ?? fencePrefix(0, 0), attempt);
-    return await body(await takeFence(sessionFile, token));
+    const context = Context.current();
+    const token = fenceToken(prefix ?? fencePrefix(0, 0), context.info.attempt);
+    const fence = await takeFence(sessionFile, token);
+    return await body(() => {
+      if (abandoned(context)) throw context.cancellationSignal.reason;
+      fence();
+    });
   };
 
   // The session's time before `turn`, from the latest total another turn wrote. This turn's own
@@ -276,8 +294,9 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
     return undefined;
   }
 
-  /** A model call, stopped like a user stop when the Activity is cancelled. The agent records an
-   * aborted response, and the turn ends as stopped instead of waiting out a slow provider. */
+  /** A model call, stopped like a user stop when the Activity is cancelled. After a stop the agent
+   * records an aborted response, and the turn ends as stopped instead of waiting out a slow
+   * provider. */
   const modelCall = (session: AgentSession) => session.modelCall(cancellation());
 
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
@@ -308,6 +327,8 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
           let stopped = false;
           const notStarted = new Set<string>();
           for (const call of calls) {
+            // An attempt the step no longer owns starts no more tools.
+            guard();
             if (stopped || stopRequested()) {
               stopped = true;
               notStarted.add(call.id);
@@ -446,8 +467,10 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
           throw new Error(`no recorded tool call ${call.id} in ${input.sessionId}`);
         }
 
-        // A stopped turn's seal may be about to take this claim. Don't race it.
-        if (stopRequested()) throw Context.current().cancellationSignal.reason;
+        // A stopped turn's seal may be about to take this claim. Don't race it. An abandoned
+        // attempt leaves the call to its retry.
+        const context = Context.current();
+        if (stopRequested() || abandoned(context)) throw context.cancellationSignal.reason;
         if (!(await pending.claimDispatch(input.sessionFile, turn, step, call.id))) {
           // An earlier dispatch started this tool, so it may have taken effect. Report unknown
           // rather than run a push or a delete again. The first attempt may still return, and
@@ -467,6 +490,8 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
           });
         });
         if (outcome === undefined) return { outcome: "already-settled" };
+        // The claim stays, so the retry reports unknown. The aborted result says nothing true.
+        if (abandoned(context)) throw context.cancellationSignal.reason;
 
         await pending.keepResult(input.sessionFile, turn, step, call.id, outcome);
         // Ship from here. Only this host has the tool's changes, and the seal may land elsewhere.
@@ -480,8 +505,9 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
         session.dispose();
       }
     } catch (err) {
-      // A stop stays a stop. Typed as a failure, it would hide the cancellation.
-      if (stopRequested()) throw err;
+      // A cancel stays a cancel. Typed as a failure, it would hide it, and a non-retryable one
+      // would end a paused call for good.
+      if (stopRequested() || abandoned(Context.current())) throw err;
       if (!claimed) throw await beforeClaim(err, input);
       throw ApplicationFailure.nonRetryable(
         `tool call ${input.call.id} failed after it started: ${String(err)}`,

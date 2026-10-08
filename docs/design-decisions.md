@@ -126,11 +126,15 @@ heartbeat's answer, so Workers send heartbeats at least every 3 seconds.
 ## Only a requested cancel is a stop
 
 A deploy must not end turns. The SDK cancels a running Activity for several reasons: the Workflow
-asked, the Worker shuts down, the attempt timed out, or an operator paused or reset it. Only the
-first is a user stop, and `Context.cancellationDetails.cancelRequested` says which. A stop ends the
-call, and the seal records what it did. For the others the Activity keeps running. A retry or
-another Worker takes the step, and the fence keeps this attempt's late writes out. When a Worker
-shuts down, the SDK first waits `shutdownGraceTime`.
+asked, the Worker shuts down, the attempt timed out, an operator paused or reset it, or the server
+no longer knows the attempt (`notFound`, as after the Workflow is terminated). Only the first is a
+user stop, and `Context.cancellationDetails.cancelRequested` says which. A stop ends the call, and
+the seal records what it did. A shutdown leaves the Activity running, and the SDK first waits
+`shutdownGraceTime`. Any other cancel aborts the model call or tool too, and a whole step runs no
+more tools, since a retry takes the step or nobody waits for it. That attempt records no stop: the
+fence guard refuses every write once it's cancelled, and a tool call keeps no result. The guard
+matters even past the fence token, since a reset rewinds the attempt number and a retry can take
+the same token.
 
 The standalone Worker sets `shutdownGraceTime` to 60 seconds by default, through
 `PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS`. Most model calls finish in that time, so a step isn't cut off
