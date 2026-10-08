@@ -167,6 +167,15 @@ try {
   await deadline.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "hang" });
   await save("deadline", deadline);
 
+  // Values that older code took and the start check now refuses. Only a raw client sends them.
+  const loose = await session("loose-input", {
+    budget: { sessionTokens: "250" as unknown as number },
+    toolTimeoutMinutes: 0,
+  });
+  await loose.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "run" });
+  await loose.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
+  await save("loose-input", loose);
+
   // Continue-As-New between turns, with a prompt carried over.
   const carried = await session("continue-as-new", { maxHistory: 20 });
   await carried.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "one" });

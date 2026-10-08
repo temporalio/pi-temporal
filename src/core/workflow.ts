@@ -280,8 +280,10 @@ export async function piSession(input: SessionInput): Promise<void> {
     );
   }
   // Before any handler, so a buffered prompt fails with the session and no task retries forever.
+  // Behind a patch, because an open run may hold a value that older code took, and failing it
+  // now would not match its history.
   const inputProblem = sessionInputProblem(options);
-  if (inputProblem) {
+  if (inputProblem && patched("refuse-bad-input")) {
     throw ApplicationFailure.nonRetryable(`session ${id} can't start: ${inputProblem}`);
   }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
