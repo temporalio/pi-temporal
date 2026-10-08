@@ -24,8 +24,14 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 };
 
 const ran = new Map<string, number>();
+// A turn with this text waits for `release`, so prompts pile up behind it.
+let release = () => {};
+const held = new Promise<void>((resolve) => {
+  release = resolve;
+});
 const activities = {
   async runStep(input: RunStepInput): Promise<RunStepResult> {
+    if (input.text === "hold") await held;
     ran.set(input.promptId, (ran.get(input.promptId) ?? 0) + 1);
     return { done: true, finalText: `answered ${input.promptId}` };
   },
@@ -116,6 +122,23 @@ try {
     (err: unknown) => String(err),
   );
   check("an empty prompt is refused", /needs text/.test(empty), empty);
+
+  // More prompts queued than the session remembers finished ones. A resent prompt that's still
+  // queued must be refused, or it runs twice.
+  const backlog = `submit-backlog-${randomUUID().slice(0, 8)}`;
+  sessions.push(backlog);
+  await sendPrompt(client, cfg, backlog, { promptId: randomUUID(), text: "hold" });
+  const queued = Array.from({ length: 205 }, () => ({ promptId: randomUUID(), text: "queued" }));
+  const handle = client.workflow.getHandle(workflowId(backlog));
+  for (const each of queued) await handle.signal("submitPrompt", each);
+  const resent = await sendPrompt(client, cfg, backlog, queued[0]);
+  release();
+  await quiet(backlog);
+  check(
+    "a resent prompt still queued behind a long backlog runs once",
+    resent === undefined && ran.get(queued[0].promptId) === 1,
+    { resent, ran: ran.get(queued[0].promptId) },
+  );
 } finally {
   for (const id of sessions) {
     await client.workflow.getHandle(workflowId(id)).terminate("check cleanup").catch(() => {});
