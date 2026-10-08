@@ -28,7 +28,7 @@ try {
   // Already billed for earlier turns. Pi's totals cover every entry, even compacted history.
   let billed = { tokens: 1_000, cost: 0.5 };
   const activities = makeActivities(
-    { projectDir: root },
+    { projectDir: root, sessionRoot: root },
     {
       openSession: async () =>
         ({
@@ -75,7 +75,7 @@ try {
 
   // Missing totals must not read as zero, or a budget would never stop the turn.
   const quiet = makeActivities(
-    { projectDir: root },
+    { projectDir: root, sessionRoot: root },
     {
       openSession: async () =>
         ({
@@ -113,7 +113,7 @@ try {
     },
   ];
   const kept = makeActivities(
-    { projectDir: root },
+    { projectDir: root, sessionRoot: root },
     {
       openSession: async () =>
         ({

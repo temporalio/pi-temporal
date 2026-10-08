@@ -60,7 +60,7 @@ try {
     );
     let recorded = 0;
     let modelCalls = 0;
-    const activities = makeActivities({ projectDir: root }, {
+    const activities = makeActivities({ projectDir: root, sessionRoot: root }, {
       openSession: async () => ({
         sessionManager: reopened,
         state: { messages: context },

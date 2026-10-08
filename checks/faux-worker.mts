@@ -268,7 +268,7 @@ export async function runFauxWorker(queue: string, dir: string) {
     taskQueue: queue,
     workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities: makeActivities(
-      { projectDir, provider: PROVIDER },
+      { projectDir, provider: PROVIDER, sessionRoot: join(dir, "sessions") },
       { openSession: fauxOpenSession(dir, projectDir) },
     ),
   });

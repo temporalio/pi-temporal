@@ -24,7 +24,7 @@ const input: ToolCallInput = {
   step: 1,
   call: { id: "call", name: "probe" },
 };
-const activities = makeActivities({ projectDir: root }, {
+const activities = makeActivities({ projectDir: root, sessionRoot: root }, {
   openSession: async () => ({
     state: { messages: [{ role: "assistant", content: [{ type: "toolCall", id: "call" }] }] },
     async runToolCall() {

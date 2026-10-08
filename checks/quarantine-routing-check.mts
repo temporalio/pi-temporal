@@ -83,7 +83,7 @@ async function main() {
     maxEagerActivityReservationsPerWorkflowTask: 0,
     workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     activities: makeActivities(
-      { projectDir: hosts.refused, shipTree: true },
+      { projectDir: hosts.refused, shipTree: true, sessionRoot: sessions },
       {
         openSession: async () => {
           ranOn.push("refused");
@@ -110,7 +110,7 @@ async function main() {
       `const worker = await Worker.create({\n` +
       `  connection: native, namespace: "default", taskQueue: ${JSON.stringify(queue)},\n` +
       `  activities: makeActivities({ projectDir: ${JSON.stringify(hosts.free)}, ` +
-      `shipTree: true }, {\n` +
+      `shipTree: true, sessionRoot: ${JSON.stringify(sessions)} }, {\n` +
       `    openSession: async () => {\n` +
       `      console.log("RAN_ON free");\n` +
       `      return (${fakeSession})();\n` +

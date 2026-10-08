@@ -48,7 +48,12 @@ const store: ProjectStore = {
 };
 
 try {
-  const activities = makeCoreActivities({ agent: echoAgent(), store, hostQueue: "host" });
+  const activities = makeCoreActivities({
+    agent: echoAgent(),
+    store,
+    hostQueue: "host",
+    sessionRoot: root,
+  });
   const env = () => new MockActivityEnvironment();
   const turn = "prompt-1";
   const model: ModelCallResult = await env().run(activities.runModelCall, {

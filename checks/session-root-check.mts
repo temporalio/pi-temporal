@@ -23,6 +23,9 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
 const root = await mkdtemp(join(tmpdir(), "pi-session-root-"));
 const sessions = join(root, "sessions");
 const activities = makeCoreActivities({ agent: echoAgent(), sessionRoot: sessions });
+// A Worker can't be built without the directory, so none runs with every path allowed.
+// @ts-expect-error `sessionRoot` is required.
+void (() => makeCoreActivities({ agent: echoAgent() }));
 const modelCall = (sessionFile: string) =>
   new MockActivityEnvironment()
     .run(activities.runModelCall, {

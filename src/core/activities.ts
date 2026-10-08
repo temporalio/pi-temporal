@@ -117,14 +117,12 @@ export interface CoreActivityOptions {
   readonly hostQueue?: string;
   // Every session file must be under this directory. Anyone who can start a Workflow in the
   // namespace picks its input, so a path from it is untrusted, and the Worker writes beside it.
-  // Unset, any path is used as given.
-  readonly sessionRoot?: string;
+  readonly sessionRoot: string;
 }
 
 export function makeCoreActivities(options: CoreActivityOptions) {
   const activities = makeUncheckedActivities(options);
   const { sessionRoot } = options;
-  if (sessionRoot === undefined) return activities;
   const root = resolvePath(sessionRoot) + sep;
   const inRoot = (path: string | undefined, what: string) => {
     if (path === undefined || resolvePath(path).startsWith(root)) return;

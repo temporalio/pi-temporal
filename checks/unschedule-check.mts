@@ -64,7 +64,11 @@ try {
   );
   await cli(["unschedule", id]);
   const target = join(sessionDir, "firing.jsonl");
-  const { adoptProject } = makeActivities({ projectDir: project, shipTree: true });
+  const { adoptProject } = makeActivities({
+    projectDir: project,
+    shipTree: true,
+    sessionRoot: sessionDir,
+  });
   await new MockActivityEnvironment().run(adoptProject, { sessionFile: target, template });
   assert.equal(await worktree.established(target), true);
   console.log("PASS a queued firing can adopt after the schedule is deleted");

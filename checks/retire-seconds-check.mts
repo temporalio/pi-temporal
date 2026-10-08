@@ -20,7 +20,11 @@ const latest = () => {
   return entries.filter((e) => e.customType === "pi-temporal.session-seconds").at(-1)?.data;
 };
 
-const { retireSession: retire } = makeActivities({ projectDir: dir, shipTree: false });
+const { retireSession: retire } = makeActivities({
+  projectDir: dir,
+  shipTree: false,
+  sessionRoot: dir,
+});
 const env = new MockActivityEnvironment();
 const retireSession = (input: Parameters<typeof retire>[0]) => env.run(retire, input);
 // A session with no record yet has nothing to add to.

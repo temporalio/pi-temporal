@@ -42,7 +42,7 @@ async function duplicateResult() {
     ...template,
     message: { ...template.message, content: [{ type: "text" as const, text: "saved result" }] },
   };
-  const activities = makeActivities({ projectDir: root }, {
+  const activities = makeActivities({ projectDir: root, sessionRoot: root }, {
     openSession: async () => ({
       state: { messages: [{ role: "assistant", content: [{ type: "toolCall", id: "call" }] }] },
       runToolCall: async () => {

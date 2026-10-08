@@ -27,7 +27,7 @@ const input: ToolCallInput = {
   step: 1,
   call: { id: "call", name: "probe" },
 };
-const activities = makeActivities({ projectDir: root }, {
+const activities = makeActivities({ projectDir: root, sessionRoot: root }, {
   openSession: async () => ({
     state: { messages: [{ role: "assistant", content: [{ type: "toolCall", id: "call" }] }] },
     runToolCall: async () => {
@@ -84,7 +84,7 @@ try {
 
   // The workflow moves a step off its host queue only on `FAILED_BEFORE_CLAIM`. A claimed call must
   // not say it.
-  const cannotOpen = makeActivities({ projectDir: root }, {
+  const cannotOpen = makeActivities({ projectDir: root, sessionRoot: root }, {
     openSession: async () => {
       throw new Error("cannot open the session");
     },
@@ -101,7 +101,7 @@ try {
   console.log("PASS a call an earlier attempt claimed does not");
 
   // A host refusing the project comes before the claim, so it also lets the host-queue step move.
-  const refusing = makeActivities({ projectDir: root }, {
+  const refusing = makeActivities({ projectDir: root, sessionRoot: root }, {
     openSession: async () => {
       throw ApplicationFailure.create({ message: "refused", type: "WorktreeQuarantined" });
     },

@@ -30,7 +30,7 @@ const input: ToolCallInput = {
   call: { id: "call", name: "probe" },
 };
 let sealed: TurnToolCallOutcome[] = [];
-const activities = makeActivities({ projectDir: root }, {
+const activities = makeActivities({ projectDir: root, sessionRoot: root }, {
   openSession: async () => ({
     state: { messages: [{ role: "assistant", content: [{ type: "toolCall", id: "call" }] }] },
     async runToolCall() {

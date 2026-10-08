@@ -77,7 +77,7 @@ type Reason = "WORKER_SHUTDOWN" | "CANCELLED" | "TIMED_OUT" | "PAUSED" | "RESET"
 /** Runs one whole step and cancels the Activity partway through. */
 async function cancelledStep(details: ActivityCancellationDetails, reason: Reason, tool = false) {
   const { seen, openSession } = fakeSession(tool);
-  const activities = makeActivities({ projectDir: root }, { openSession });
+  const activities = makeActivities({ projectDir: root, sessionRoot: root }, { openSession });
   const env = new MockActivityEnvironment();
   setTimeout(() => env.cancel(reason, details), 50);
   const outcome: { result?: RunStepResult; failure?: unknown } = await env
@@ -98,7 +98,7 @@ async function cancelledStep(details: ActivityCancellationDetails, reason: Reaso
 /** Runs one stepped tool call and cancels it partway through. */
 async function cancelledToolCall(details: ActivityCancellationDetails, reason: Reason) {
   const { seen, openSession } = fakeSession(true);
-  const activities = makeActivities({ projectDir: root }, { openSession });
+  const activities = makeActivities({ projectDir: root, sessionRoot: root }, { openSession });
   const sessionFile = join(root, `tool-${++files}.jsonl`);
   const env = new MockActivityEnvironment();
   setTimeout(() => env.cancel(reason, details), 50);
@@ -211,7 +211,7 @@ try {
         async waitForIdle() {},
         dispose() {},
       }) as unknown as AgentSession;
-    const activities = makeActivities({ projectDir: root }, { openSession });
+    const activities = makeActivities({ projectDir: root, sessionRoot: root }, { openSession });
     const env = new MockActivityEnvironment();
     setTimeout(() => env.cancel("CANCELLED", asked), 50);
     await env

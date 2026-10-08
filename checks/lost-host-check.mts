@@ -36,7 +36,7 @@ try {
   // Both hosts start on the tip.
   await worktree.ensure(b, sessionFile);
 
-  const activities = makeActivities({ projectDir: a, shipTree: true }, {
+  const activities = makeActivities({ projectDir: a, shipTree: true, sessionRoot: root }, {
     openSession: async () => ({
       state: { messages: [] },
       async sealStep(results: TurnToolCallOutcome[]) {
