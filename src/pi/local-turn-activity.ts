@@ -33,14 +33,9 @@ interface TurnProgress {
   readonly units: Map<string, Promise<unknown>>;
 }
 
-// No Activity around it when a check calls it directly.
-const cancellation = (): { signal?: AbortSignal } => {
-  try {
-    return { signal: Context.current().cancellationSignal };
-  } catch {
-    return {};
-  }
-};
+const cancellation = (): { signal: AbortSignal } => ({
+  signal: Context.current().cancellationSignal,
+});
 
 export function makeLocalTurnActivities(live: LiveTurns) {
   const progress = new Map<string, TurnProgress>();
@@ -81,13 +76,7 @@ export function makeLocalTurnActivities(live: LiveTurns) {
   };
 
   const heartbeating = async <T>(body: () => Promise<T>): Promise<T> => {
-    const beat = setInterval(() => {
-      try {
-        Context.current().heartbeat();
-      } catch {
-        // outside an activity context (a unit test); ignore
-      }
-    }, 3000);
+    const beat = setInterval(() => Context.current().heartbeat(), 3000);
     beat.unref?.();
     try {
       return await body();

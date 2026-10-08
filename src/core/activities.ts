@@ -50,34 +50,20 @@ const shuttingDown = (context: Context) =>
 
 // Whether the Workflow asked this Activity to stop. Only as fresh as the last heartbeat.
 const stopRequested = () => {
-  try {
-    const context = Context.current();
-    return context.cancellationSignal.aborted && !shuttingDown(context);
-  } catch {
-    return false;
-  }
+  const context = Context.current();
+  return context.cancellationSignal.aborted && !shuttingDown(context);
 };
 
-// The Activity logger, so each line carries its Workflow and Activity ids. Plain console when a
-// check calls an Activity directly, with no Activity around it.
+// The Activity logger, so each line carries its Workflow and Activity ids.
 const say = (level: "info" | "warn", message: string) => {
-  try {
-    Context.current().log[level](message);
-  } catch {
-    console[level](message);
-  }
+  Context.current().log[level](message);
 };
 
 // Passed to a running tool or model call, so a cancelled Activity stops it like a user stop. It
 // reports what it did, and the seal records that instead of an unknown outcome. Cancellation
 // arrives with a heartbeat, so it takes up to one heartbeat to get there.
-const cancellation = (): AbortSignal | undefined => {
-  let context: Context;
-  try {
-    context = Context.current();
-  } catch {
-    return undefined;
-  }
+const cancellation = (): AbortSignal => {
+  const context = Context.current();
   const cancelled = context.cancellationSignal;
   const stop = new AbortController();
   // The abort fires outside the Activity's async context, so the context is captured here.
@@ -90,13 +76,7 @@ const cancellation = (): AbortSignal | undefined => {
 };
 
 const heartbeatEvery = (ms: number) => {
-  const timer = setInterval(() => {
-    try {
-      Context.current().heartbeat();
-    } catch {
-      // No Activity around it, as in a check.
-    }
-  }, ms);
+  const timer = setInterval(() => Context.current().heartbeat(), ms);
   timer.unref?.();
   return () => clearInterval(timer);
 };
@@ -160,21 +140,15 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
   // a check up front, is what keeps a superseded attempt out.
   //
   // An Activity with no fence was scheduled by an older Workflow. It sorts below every fenced one,
-  // so it can't block the run that follows. A check calling an Activity directly, with no Activity
-  // around it, gets one from this host's clock.
+  // so it can't block the run that follows.
   const withFence = async <T>(
     sessionFile: string,
     prefix: string | undefined,
     body: (guard: () => void) => Promise<T>,
   ) => {
-    let attempt: number | undefined;
-    try {
-      attempt = Context.current().info.attempt;
-    } catch {
-      // No Activity around it.
-    }
-    const fallback = attempt === undefined ? fencePrefix(Date.now(), 0) : fencePrefix(0, 0);
-    return await body(await takeFence(sessionFile, fenceToken(prefix ?? fallback, attempt ?? 1)));
+    const { attempt } = Context.current().info;
+    const token = fenceToken(prefix ?? fencePrefix(0, 0), attempt);
+    return await body(await takeFence(sessionFile, token));
   };
 
   // The session's time before `turn`, from the latest total another turn wrote. This turn's own
