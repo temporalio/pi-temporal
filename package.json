@@ -2,6 +2,7 @@
   "name": "pi-temporal",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Temporal-backed durable executor for the Pi coding agent",
   "type": "module",
   "keywords": [
