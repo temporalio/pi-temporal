@@ -10,8 +10,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, TurnToolCallOutcome } from "@earendil-works/pi-coding-agent";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import { makeSteppedStep } from "../src/core/stepped-step.js";
+import type { RunStepResult } from "../src/core/protocol.js";
 import * as worktree from "../src/tree/worktree.js";
 
 const root = await mkdtemp(join(tmpdir(), "pi-lost-host-"));
@@ -82,9 +84,10 @@ try {
     (await readdir(`${sessionFile}.tree`)).filter((name) => name.endsWith(".bundle")).length;
   const shipped = await bundles();
 
-  const result = await step({
+  // The step calls the real `sealStep` in this process, so it shares this Activity context.
+  const result = (await new MockActivityEnvironment().run(step, {
     sessionId: "session", sessionFile, promptId: turn, text: "task", step: 1,
-  });
+  })) as RunStepResult;
   assert.equal(seals, 1, "the step records what it had before it hands the turn back");
   assert.equal(result.done, false, "the turn goes on rather than ending with the worker");
   console.log("PASS a step that lost its host hands the turn back instead of failing it");

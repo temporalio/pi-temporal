@@ -13,6 +13,7 @@ import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ApplicationFailure } from "@temporalio/common";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import * as worktree from "../src/tree/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -362,8 +363,8 @@ async function main() {
         }) as unknown as AgentSession,
     },
   );
-  await activities
-    .runToolCall({
+  await new MockActivityEnvironment()
+    .run(activities.runToolCall, {
       sessionId: "s1",
       sessionFile,
       turn: seen.turn,
@@ -383,8 +384,8 @@ async function main() {
   // A refusal is this host saying no, not a failing activity. It sets `nextRetryDelay` so another
   // host can take the work without climbing the backoff.
   await worktree.beginWrite(project, { turn: "turn-7", step: 1, callId: "call-g" });
-  const refusal = await activities
-    .runToolCall({
+  const refusal = await new MockActivityEnvironment()
+    .run(activities.runToolCall, {
       sessionId: "s1",
       sessionFile,
       turn: "turn-8",

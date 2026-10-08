@@ -10,9 +10,10 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownToolCallOutcome, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { MockActivityEnvironment } from "@temporalio/testing";
 import { makeActivities } from "../src/pi/activities.js";
 import * as pending from "../src/core/pending.js";
-import type { ToolCallInput } from "../src/core/protocol.js";
+import type { ToolCallInput, ToolCallResult } from "../src/core/protocol.js";
 
 const root = await fs.mkdtemp(join(tmpdir(), "pi-result-recovery-"));
 const originalWrite = fs.writeFile;
@@ -53,7 +54,7 @@ async function duplicateResult() {
       dispose() {},
     }) as unknown as AgentSession,
   });
-  const first = activities.runToolCall(input);
+  const first = new MockActivityEnvironment({ attempt: 1 }).run(activities.runToolCall, input);
   await started.promise;
   fs.writeFile = (async (...args: Parameters<typeof fs.writeFile>) => {
     if (String(args[0]).endsWith("call.started")) {
@@ -63,13 +64,13 @@ async function duplicateResult() {
     return originalWrite(...args);
   }) as typeof fs.writeFile;
   syncBuiltinESMExports();
-  const duplicate = activities.runToolCall(input);
+  const duplicate = new MockActivityEnvironment({ attempt: 2 }).run(activities.runToolCall, input);
   try {
     await checked.promise;
     finish.release();
-    assert.equal((await first).outcome, "settled");
+    assert.equal(((await first) as ToolCallResult).outcome, "settled");
     retry.release();
-    assert.equal((await duplicate).outcome, "unknown");
+    assert.equal(((await duplicate) as ToolCallResult).outcome, "unknown");
     assert.equal(effects, 1);
     assert.deepEqual(
       await pending.readResult(input.sessionFile, input.turn, input.step, input.call.id),

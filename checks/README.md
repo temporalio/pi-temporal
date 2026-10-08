@@ -27,11 +27,15 @@ cancellation without waiting for Activity timeouts.
 These checks call production Activities with a fake `AgentSession`. They control races and retry
 results so a failure can be reproduced without a model call.
 
+They run under `MockActivityEnvironment`, the SDK's way to give an Activity its context with no
+Worker, so the Activities need no test-only code. A check that stands in for a retry gives each
+call its own environment and `attempt`.
+
 `dispatch-check`, `stale-dispatch-check`, `seal-claim-check`, `result-recovery-check`,
 `compacted-prompt-check`, `spend-check`, `retire-seconds-check`, `quarantine-check`
 
-`shutdown-check` runs `runStep` under `MockActivityEnvironment`, the SDK's way to give an Activity
-a context with no Worker. It cancels the Activity once as a Worker shutdown and once as a stop.
+`shutdown-check` cancels `runStep` through its `MockActivityEnvironment`, once as a Worker shutdown
+and once as a stop.
 
 ## The Workflow with stub Activities, on a dev server
 

@@ -8,13 +8,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { makeActivities } from "../src/pi/activities.js";
+import { MockActivityEnvironment } from "@temporalio/testing";
+import { makeActivities, type Activities } from "../src/pi/activities.js";
+import type { RunStepInput, RunStepResult } from "../src/core/protocol.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
   console.log(`${ok ? "PASS" : "FAIL"} ${what}${ok ? "" : ` (${JSON.stringify(detail)})`}`);
   if (!ok) failures.push(what);
 };
+
+const runStep = (activities: Activities, input: RunStepInput, attempt = 1) =>
+  new MockActivityEnvironment({ attempt }).run(activities.runStep, input) as Promise<RunStepResult>;
 
 const root = await mkdtemp(join(tmpdir(), "pi-spend-"));
 const sessionFile = join(root, "session.jsonl");
@@ -45,7 +50,7 @@ try {
     },
   );
 
-  const result = await activities.runStep({
+  const result = await runStep(activities, {
     sessionId: "session",
     sessionFile,
     promptId: "prompt",
@@ -85,7 +90,7 @@ try {
         }) as unknown as AgentSession,
     },
   );
-  const silent = await quiet.runStep({
+  const silent = await runStep(quiet, {
     sessionId: "session",
     sessionFile: join(root, "quiet.jsonl"),
     promptId: "prompt",
@@ -138,8 +143,8 @@ try {
     step: 1,
     sessionSeconds: 45,
   };
-  const once = await kept.runStep(step);
-  const again = await kept.runStep(step);
+  const once = await runStep(kept, step);
+  const again = await runStep(kept, step, 2);
   check("a step reports the session's time before its turn", once.sessionSeconds === 40, once);
   check("and the same after it ran again", again.sessionSeconds === 40, again);
   const written = entries.filter((e) => (e.data as { turn?: string }).turn === "this-turn");
