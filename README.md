@@ -20,8 +20,15 @@ can continue after you quit.
   Workers.
 - Worker sessions accept token and wall-clock budgets for each turn or the whole session.
 
-[docs/guarantees.md](docs/guarantees.md) describes the recovery limits and the checks that cover
-them.
+It's also meant as a template for putting any agent's loop on Temporal. The Temporal part is in
+`src/core/`, written against a small `Agent` interface, and Pi is one implementation of it.
+
+- [docs/architecture.md](docs/architecture.md) is the map: a reading order, who owns what, and the
+  optional modules.
+- [docs/design-decisions.md](docs/design-decisions.md) says why each Temporal choice was made.
+- [docs/adapting.md](docs/adapting.md) is what your agent must provide, and what you can delete.
+- [docs/guarantees.md](docs/guarantees.md) says what survives which failure, with the check that
+  shows it.
 
 ## Install
 
@@ -69,9 +76,10 @@ npx tsx src/cli.ts doctor                 # resolved config and server reachabil
 ```
 
 The Workflow holds control state. The session file holds the conversation. To follow a session,
-the client queries the Workflow and tails the file. With `PI_SESSION_DIR` on shared storage, you
-can submit a task from one machine and watch it from another. `watch` exits with a nonzero status
-unless the turn was answered. `--timeout=<seconds>` bounds how long it follows.
+the client tails the file and waits on the Workflow's `waitForQuiet` Update. With `PI_SESSION_DIR`
+on shared storage, you can submit a task from one machine and watch it from another. `watch`
+exits with a nonzero status unless the turn was answered. `--timeout=<seconds>` bounds how long it
+follows.
 
 `start` and `schedule` send `--project` only when it's a git checkout or has a `.gitignore`, and
 never when it's your home directory. `/background` applies the same rule to its directory.
@@ -115,6 +123,10 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 
 | variable | what it sets | default |
 |---|---|---|
+| `PI_TEMPORAL_PROFILE` | `local` or `fleet`, the defaults below | `local` |
+| `PI_SESSION_DIR` | where session files live, shared storage in a fleet | `~/.pi-temporal/sessions` |
+| `PI_TEMPORAL_STEPPED` | `1` runs each model call, tool call, and seal as its own Activity | off, on in `fleet` |
+| `PI_TEMPORAL_SHIP_TREE` | `1` ships the project's files between hosts | off, on in `fleet` |
 | `PI_TEMPORAL_TASK_QUEUE` | the Task Queue sessions use | `pi-session` |
 | `PI_TEMPORAL_PROVIDER` | `openai` or `anthropic` (reads `<PROVIDER>_API_KEY` or `_API_KEY_FILE`) | `openai` |
 | `PI_MODEL` | substring matched against the provider’s model ids | `mini` / `haiku` |
@@ -126,10 +138,18 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | `PI_TEMPORAL_DATA` | host directory for shadow repos and markers | `~/.pi-temporal` |
 | `PI_TEMPORAL_LIVE_TURNS` | `0` runs live turns as plain pi, with no Workflow | on |
 | `PI_TEMPORAL_EMBEDDED_WORKER` | `0` when a standalone Worker (`npm run worker`) owns the queue | on |
+| `PI_TEMPORAL_CODEC_KEY`, `_FILE` | 32 bytes, base64, to encrypt payloads in history | none |
+| `PI_TEMPORAL_SEARCH_ATTRIBUTE` | `1` keeps session state in the `PiSessionState` search attribute | off |
+| `PI_TEMPORAL_METRICS` | address for the Worker's Prometheus metrics, such as `0.0.0.0:9464` | none |
+| `PI_TEMPORAL_WORKFLOW_BUNDLE` | a bundle from `npm run bundle`, so the Worker doesn't bundle at start | none |
 
 The hard deadline stops the Workflow from waiting for the call. An external command may keep
 running after cancellation. Token and other wall-clock budgets are checked between steps or
 sequential tool calls, so a running call can exceed them.
+
+The standard Temporal settings work too: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`,
+`TEMPORAL_API_KEY`, the `TEMPORAL_TLS_*` variables, and a `TEMPORAL_PROFILE` in `temporal.toml`.
+A `PI_TEMPORAL_*` setting wins where both are set.
 
 For Temporal Cloud, export an API key with the namespace's address before you start a Worker or
 run the CLI.
@@ -170,7 +190,9 @@ pi install -l /path/to/pi-temporal   # this project only
 Each `checks/*-check.mts` script checks one contract and exits with a nonzero status on failure.
 `npm run checks` runs the checks that need neither a model key nor Docker. Most need a local
 Temporal server. CI runs them and `docker/restart-check.sh`. The scripts in `docker/` cover
-separate Worker containers and NFS storage.
+separate Worker containers and NFS storage. [checks/README.md](checks/README.md) groups them by
+how they test: pure functions, the step driver with fakes, stub Activities on a dev server, time
+skipping, replay, and real processes killed mid-Activity.
 
 ## Prior art
 
