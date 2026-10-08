@@ -13,6 +13,7 @@ import {
 } from "@temporalio/client";
 import { ApplicationFailure } from "@temporalio/common";
 import { type Config, connectionOptions, fromEnv, sessionFileFor } from "../config.js";
+import { dataConverterFor } from "./codec.js";
 import {
   DUPLICATE_PROMPT,
   SIGNALS,
@@ -24,6 +25,11 @@ import type { PromptInput, SessionTurnOptions, Submitted } from "./protocol.js";
 import type { piSession } from "./workflow.js";
 
 type Session = typeof piSession;
+
+const withCodec = (cfg: Config) => {
+  const dataConverter = dataConverterFor(cfg.codecKey);
+  return dataConverter ? { dataConverter } : {};
+};
 
 // An Update needs a Worker to accept it. Past this, the prompt goes as a Signal, which the server
 // keeps until a Worker comes.
@@ -38,6 +44,7 @@ export async function openClient(cfg: Config = fromEnv()) {
     // A closed workflow answers queries with its last state, so one terminated mid-turn looks busy
     // forever. Rejecting the query tells a follower the session is over.
     workflow: { queryRejectCondition: "NOT_OPEN" },
+    ...withCodec(cfg),
   });
   return { client, connection };
 }
@@ -53,6 +60,7 @@ export const sessionOptions = (cfg: Config): SessionTurnOptions => ({
   stepped: cfg.stepped,
   toolTimeoutMinutes: cfg.toolTimeoutMinutes,
   budget: cfg.budget,
+  ...(cfg.searchAttribute ? { searchAttribute: true } : {}),
 });
 
 /**
@@ -68,7 +76,13 @@ export async function sendPrompt(
 ): Promise<number | undefined> {
   const file = sessionFileFor(cfg.sessionDir, sessionId);
   const args: Parameters<Session> = [{ sessionId, sessionFile: file, ...sessionOptions(cfg) }];
-  const start = { taskQueue: cfg.taskQueue, workflowId: workflowId(sessionId), args };
+  const start = {
+    taskQueue: cfg.taskQueue,
+    workflowId: workflowId(sessionId),
+    args,
+    // Shown in the UI and CLI. The session id only, since a prompt may hold secrets.
+    staticSummary: `pi session ${sessionId}`,
+  };
   try {
     const submitted = await client.withDeadline(Date.now() + ACCEPT_MS, () =>
       client.workflow.executeUpdateWithStart<Session, Submitted, [PromptInput]>(UPDATES.submit, {

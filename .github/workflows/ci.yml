@@ -52,7 +52,8 @@ jobs:
           echo "$HOME/.temporalio/bin" >> "$GITHUB_PATH"
       - name: Start a dev server
         run: |
-          temporal server start-dev --headless --log-level warn > "$RUNNER_TEMP/temporal.log" 2>&1 &
+          temporal server start-dev --headless --log-level warn \
+            --search-attribute PiSessionState=Keyword > "$RUNNER_TEMP/temporal.log" 2>&1 &
           for _ in $(seq 1 60); do
             temporal operator cluster health --address 127.0.0.1:7233 >/dev/null 2>&1 && exit 0
             sleep 1

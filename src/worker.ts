@@ -2,6 +2,7 @@
 // any session from the shared session directory. The pi extension runs the same worker in-process.
 
 import { resolve } from "node:path";
+import { Runtime } from "@temporalio/worker";
 import {
   connectionOptions,
   describe,
@@ -14,9 +15,16 @@ import {
 } from "./config.js";
 import { createSessionWorker } from "./core/session-worker.js";
 import { makeActivities } from "./pi/activities.js";
+import { dataConverterFor } from "./core/codec.js";
 import * as worktree from "./tree/worktree.js";
 
 async function main() {
+  // Prometheus metrics from the SDK's core: task latencies, slots, poll and Activity counts. Set
+  // before anything connects, since the runtime is set up once per process.
+  const metrics = process.env.PI_TEMPORAL_METRICS;
+  if (metrics) {
+    Runtime.install({ telemetryOptions: { metrics: { prometheus: { bindAddress: metrics } } } });
+  }
   const cfg = fromEnv();
   // Absolute, since git runs in the directory and also names it as the work tree.
   const projectDir = resolve(process.env.PI_PROJECT_DIR ?? process.cwd());
@@ -69,6 +77,8 @@ async function main() {
     namespace: cfg.namespace,
     taskQueue: cfg.taskQueue,
     hostQueueFor: projectDir,
+    dataConverter: dataConverterFor(cfg.codecKey),
+    workflowBundlePath: process.env.PI_TEMPORAL_WORKFLOW_BUNDLE,
     activities: (hostQueue) =>
       makeActivities({
         projectDir,

@@ -25,6 +25,11 @@ COPY tsconfig.json ./
 COPY src ./src
 COPY extensions ./extensions
 COPY checks/detached-check.mts ./checks/
+COPY scripts/bundle.mts ./scripts/
+
+# Bundle the Workflows once, so each Worker starts with the code that was built here.
+RUN npm run bundle
+ENV PI_TEMPORAL_WORKFLOW_BUNDLE=/app/dist/workflow-bundle.js
 
 # Session logs. Mount one shared volume here in every container.
 ENV PI_SESSION_DIR=/sessions
