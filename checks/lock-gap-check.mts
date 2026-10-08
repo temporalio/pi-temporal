@@ -1,5 +1,5 @@
 // Checks that a stale lock takeover cannot let two holders in. One contender reads a dead claim
-// and stalls (via `withSessionLock`'s last argument), a second takes the next epoch, a third races
+// and stalls (via `withLease`'s last argument), a second takes the next epoch, a third races
 // both. Asserts one holder at a time, including at the synchronous write guard.
 //
 // Usage: npx tsx checks/lock-gap-check.mts
@@ -7,7 +7,7 @@
 import { mkdir, mkdtemp, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withSessionLock } from "../src/session-lock.js";
+import { withLease } from "../src/tree/lease.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
@@ -43,14 +43,14 @@ async function main() {
   };
 
   // Reads the dead claim, then stalls before it can take the next epoch.
-  const slow = withSessionLock(file, hold(200), 30_000, 1_500);
+  const slow = withLease(file, hold(200), 30_000, 1_500);
   await sleep(200);
   // Takes the next epoch and still holds it when the slow one wakes.
-  const quick = withSessionLock(file, hold(2_500), 30_000);
+  const quick = withLease(file, hold(2_500), 30_000);
   await sleep(400);
   // Starts while the quick one holds the lock and the slow one is still stalled.
   const thirdStarted = Date.now();
-  const third = withSessionLock(file, hold(200), 30_000);
+  const third = withLease(file, hold(200), 30_000);
 
   await Promise.all([slow, quick, third]);
 

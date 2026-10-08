@@ -1,6 +1,6 @@
-// Checks `piSession` startup and pinned dispatch against a live Temporal server. Interrupts during
-// adoption and asserts no model call runs. Fails a pinned tool attempt and asserts it is neither
-// retried nor moved to the shared queue.
+// Checks `piSession` startup and host-queue dispatch against a live Temporal server. Interrupts
+// during adoption and asserts no model call runs. Fails a host-queue tool attempt and asserts it is
+// neither retried nor moved to the shared queue.
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -14,7 +14,7 @@ import type { RunStepInput, TurnState } from "../src/protocol.js";
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const namespace = process.env.TEMPORAL_NAMESPACE ?? "default";
 const queue = `pi-init-check-${randomUUID()}`;
-const pinnedQueue = `${queue}-pinned`;
+const hostQueue = `${queue}-host`;
 const connection = await Connection.connect({ address });
 const native = await NativeConnection.connect({ address });
 const client = new Client({ connection, namespace });
@@ -29,7 +29,7 @@ const adoption = new Promise<void>((resolve) => { releaseAdoption = resolve; });
 let startedAdoption!: () => void;
 const adoptionStarted = new Promise<void>((resolve) => { startedAdoption = resolve; });
 let modelCalls = 0;
-let pinnedAttempts = 0;
+let hostAttempts = 0;
 let sharedTools = 0;
 const activities = {
   async adoptProject() {
@@ -46,7 +46,7 @@ const activities = {
       calls: [{ id: "call", name: "probe" }],
       sequential: false,
       ended: false,
-      queue: pinnedQueue,
+      queue: hostQueue,
     };
   },
   async runToolCall() {
@@ -70,20 +70,20 @@ const worker = await Worker.create({
   },
 });
 // A started failure must remain distinguishable from an unclaimed dispatch.
-const pinned = await Worker.create({
+const host = await Worker.create({
   connection: native,
   namespace,
-  taskQueue: pinnedQueue,
+  taskQueue: hostQueue,
   activities: {
     ...activities,
     async runToolCall() {
-      pinnedAttempts = Math.max(pinnedAttempts, Context.current().info.attempt);
+      hostAttempts = Math.max(hostAttempts, Context.current().info.attempt);
       throw new Error("retryable probe");
     },
   },
 });
 const running = worker.run();
-const runningPinned = pinned.run();
+const runningHost = host.run();
 const handles: Array<ReturnType<typeof client.workflow.getHandle>> = [];
 
 try {
@@ -124,21 +124,21 @@ try {
     }],
   });
   handles.push(retried);
-  for (let i = 0; i < 50 && pinnedAttempts === 0; i++) await sleep(100);
+  for (let i = 0; i < 50 && hostAttempts === 0; i++) await sleep(100);
   const history = await retried.fetchHistory();
   const tool = history.events?.find((event) =>
     event.activityTaskScheduledEventAttributes?.activityType?.name === "runToolCall",
   )?.activityTaskScheduledEventAttributes;
-  check("pinned dispatch permits only one attempt", tool?.retryPolicy?.maximumAttempts === 1);
+  check("host-queue dispatch permits only one attempt", tool?.retryPolicy?.maximumAttempts === 1);
   await Promise.race([retried.result(), sleep(30_000)]);
-  check("a failed pinned attempt is not started again", pinnedAttempts === 1);
+  check("a failed host-queue attempt is not started again", hostAttempts === 1);
   check("a started failure does not migrate the step", sharedTools === 0);
 } finally {
   releaseAdoption();
   for (const handle of handles) await handle.terminate("check cleanup").catch(() => {});
   worker.shutdown();
-  pinned.shutdown();
-  await Promise.all([running, runningPinned]);
+  host.shutdown();
+  await Promise.all([running, runningHost]);
   await connection.close();
   await native.close();
 }

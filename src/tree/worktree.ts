@@ -31,8 +31,8 @@ import { constants } from "node:fs";
 import { homedir, hostname, uptime } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import * as pending from "./pending.js";
-import { withSessionLock } from "./session-lock.js";
+import * as pending from "../pending.js";
+import { withLease } from "./lease.js";
 
 const execFileAsync = promisify(execFile);
 const { W_OK } = constants;
@@ -186,8 +186,8 @@ const withTreeLocks = <T>(
   sessionFile: string,
   body: (owned: () => Promise<boolean>) => Promise<T>,
 ) =>
-  withSessionLock(treeLockPath(projectDir), (directoryOwned) =>
-    withSessionLock(sharedLockPath(sessionFile), (storeOwned) =>
+  withLease(treeLockPath(projectDir), (directoryOwned) =>
+    withLease(sharedLockPath(sessionFile), (storeOwned) =>
       body(async () => (await directoryOwned()) && (await storeOwned())),
     ),
   );
@@ -684,7 +684,7 @@ interface ClosedStep extends Fence {
  * starts: a capture that beat it left a tip the replacement reads, and a later one is refused.
  */
 export async function closeStep(sessionFile: string, fence: Fence): Promise<void> {
-  await withSessionLock(sharedLockPath(sessionFile), async () => {
+  await withLease(sharedLockPath(sessionFile), async () => {
     if (await isClosed(sessionFile, fence)) return;
     // A timed-out attempt has no lifetime bound, so its closure must survive later turns.
     await mkdir(closedDir(sessionFile), { recursive: true });
@@ -1138,7 +1138,7 @@ export async function release(projectDir: string, sessionFile: string): Promise<
  */
 export async function retire(projectDir: string, sessionFile: string): Promise<boolean> {
   // Under the shared lock, so it can't interleave with a capture or restore deciding to revive.
-  await withSessionLock(sharedLockPath(sessionFile), async () => {
+  await withLease(sharedLockPath(sessionFile), async () => {
     if (await established(sessionFile)) {
       await writeJson(retiredPath(sessionFile), { at: new Date().toISOString() });
     }
@@ -1151,7 +1151,7 @@ export async function retire(projectDir: string, sessionFile: string): Promise<b
  * but copies what a client sent, not the worker's directory. A no-op once the session has a tip.
  */
 export async function adopt(template: string, sessionFile: string): Promise<boolean> {
-  return await withSessionLock(sharedLockPath(sessionFile), async () => {
+  return await withLease(sharedLockPath(sessionFile), async () => {
     const generation = await generationOf(sessionFile);
     const fromGeneration = await generationOf(template);
     const tip = await tipOf(template, fromGeneration);
@@ -1260,5 +1260,5 @@ export async function forget(sessionFile: string, projectDir?: string): Promise<
     await pending.sweepResults(sessionFile);
   };
   if (projectDir) await withTreeLocks(projectDir, sessionFile, drop);
-  else await withSessionLock(sharedLockPath(sessionFile), drop);
+  else await withLease(sharedLockPath(sessionFile), drop);
 }

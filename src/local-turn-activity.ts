@@ -31,6 +31,15 @@ interface TurnProgress {
   readonly results: Map<string, TurnToolCallOutcome>;
 }
 
+// No Activity around it when a check calls it directly.
+const cancellation = (): { signal?: AbortSignal } => {
+  try {
+    return { signal: Context.current().cancellationSignal };
+  } catch {
+    return {};
+  }
+};
+
 export function makeLocalTurnActivities(live: LiveTurns) {
   const progress = new Map<string, TurnProgress>();
 
@@ -112,7 +121,8 @@ export function makeLocalTurnActivities(live: LiveTurns) {
 
       let outcome: TurnToolCallOutcome | undefined;
       try {
-        outcome = await turn.steps.runToolCall(input.call.id);
+        // A cancelled Activity stops the tool like a user stop, so it reports what it did.
+        outcome = await turn.steps.runToolCall(input.call.id, cancellation());
       } catch (err) {
         // Don't retry on a stopped turn. The seal reports the call as unknown.
         if (turn.steps.interrupted()) {

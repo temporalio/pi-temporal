@@ -26,6 +26,9 @@ export interface Config {
   // API key for Temporal Cloud, or a certificate pair for mTLS. Never printed by `describe`.
   readonly apiKey?: string;
   readonly tls?: { readonly cert: string; readonly key: string; readonly ca?: string } | true;
+  // Only one of the mTLS certificate and key was set. Kept here because the variables are dropped
+  // from the environment once read, and no connection may go out with half a pair.
+  readonly brokenTlsPair?: boolean;
   // How long one tool call may run in stepped mode. Unset keeps the workflow's default.
   readonly toolTimeoutMinutes?: number;
   // Spend limits for a turn and a session. Unset means no limit.
@@ -92,6 +95,7 @@ export function fromEnv(): Config {
         : process.env.PI_TEMPORAL_TLS === "1"
           ? true
           : undefined,
+    brokenTlsPair: !cert !== !key,
   };
 }
 
@@ -111,6 +115,8 @@ export function dropFromEnv(names: readonly string[]): void {
 
 /** What the SDK's `Connection.connect` and `NativeConnection.connect` both take. */
 export function connectionOptions(cfg: Config) {
+  // Without the key, the certificate is ignored and the client connects as nobody.
+  if (cfg.brokenTlsPair) throw new Error(TLS_PAIR);
   const tls =
     cfg.tls === true || (cfg.apiKey && cfg.tls === undefined)
       ? true
@@ -126,6 +132,8 @@ export function connectionOptions(cfg: Config) {
     ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
   };
 }
+
+const TLS_PAIR = "PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY come as a pair";
 
 const LOOPBACK = /^(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(:|$)/;
 
@@ -157,9 +165,7 @@ export function preflight(cfg: Config): string[] {
       "an API key is set but TEMPORAL_NAMESPACE is `default`, which is not a Cloud namespace",
     );
   }
-  if (!!process.env.PI_TEMPORAL_TLS_CERT !== !!process.env.PI_TEMPORAL_TLS_KEY) {
-    problems.push("PI_TEMPORAL_TLS_CERT and PI_TEMPORAL_TLS_KEY come as a pair");
-  }
+  if (cfg.brokenTlsPair) problems.push(TLS_PAIR);
   return problems;
 }
 

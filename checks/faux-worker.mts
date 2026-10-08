@@ -119,10 +119,17 @@ function probeTool(dir: string): ToolDefinition {
     label: "Probe",
     description: "Records that it ran",
     parameters: typebox.Type.Object({ note: typebox.Type.String() }),
-    async execute(toolCallId: string) {
+    async execute(toolCallId: string, _params: unknown, signal?: AbortSignal) {
       appendFileSync(files(dir).probesStarted, `${toolCallId}\n`);
       if (existsSync(files(dir).slowProbe)) {
-        await new Promise((resolve) => setTimeout(resolve, 8_000));
+        // Like a real tool, it stops when its call is stopped.
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, 8_000);
+          signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new Error(`probe ${toolCallId} was stopped`));
+          });
+        });
       }
       appendFileSync(files(dir).probes, `${toolCallId}\n`);
       return { content: [{ type: "text", text: "probed" }], details: {} };

@@ -16,7 +16,7 @@ import { NativeConnection, Worker } from "@temporalio/worker";
 import { makeActivities } from "../src/activities.js";
 import { QUERIES } from "../src/protocol.js";
 import type { TurnState } from "../src/protocol.js";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const run = promisify(execFile);

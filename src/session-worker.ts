@@ -11,6 +11,10 @@ import {
 import { makeActivities, type ActivityOptions } from "./activities.js";
 import { queueForWorker } from "./queue.js";
 
+// A stop reaches a running Activity only with a heartbeat's answer. By default the SDK sends
+// heartbeats about every 24 seconds here, so a stopped tool would run on that long.
+const HEARTBEAT_THROTTLE = "3 seconds";
+
 export interface SessionWorkerOptions extends ActivityOptions {
   readonly address: string;
   // API key or mTLS settings, built by `connectionOptions` so client and worker always agree.
@@ -47,7 +51,7 @@ export async function createSessionWorker(
   // A failed start gives back what it opened. The extension tries again on the next task, and a
   // long-lived pi would otherwise keep a connection per failed attempt.
   let worker: Worker | undefined;
-  let pinned: Worker;
+  let hostWorker: Worker;
   try {
     worker = await Worker.create({
       connection,
@@ -56,15 +60,17 @@ export async function createSessionWorker(
       workflowsPath: fileURLToPath(new URL("./workflows.ts", import.meta.url)),
       activities,
       shutdownForceTime: opts.shutdownForceTime,
+      maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
     });
-    // Activities only, for work that must run on this host. Without this poller every pinned step
-    // would wait out schedule-to-start before falling back to the shared queue.
-    pinned = await Worker.create({
+    // Activities only, for work that must run on this host. Without this poller every step on the
+    // host queue would wait out schedule-to-start before falling back to the shared queue.
+    hostWorker = await Worker.create({
       connection,
       namespace: opts.namespace,
       taskQueue: stepQueue,
       activities,
       shutdownForceTime: opts.shutdownForceTime,
+      maxHeartbeatThrottleInterval: HEARTBEAT_THROTTLE,
     });
   } catch (err) {
     // A Worker holds its connection until its run ends, so one that never ran is run and shut
@@ -80,16 +86,16 @@ export async function createSessionWorker(
   const shared: Worker = worker;
 
   let running: Promise<void> | undefined;
-  let runningPinned: Promise<void> | undefined;
+  let runningHost: Promise<void> | undefined;
   let stopping: Promise<void> | undefined;
   return {
     worker: shared,
-    // Settles when either poller fails, or when both end on a shutdown. A dead pinned poller
-    // looks healthy otherwise, and every pinned unit waits out its queue timeout.
+    // Settles when either poller fails, or when both end on a shutdown. A dead host-queue poller
+    // looks healthy otherwise, and every host-queue unit waits out its queue timeout.
     run: () => {
-      runningPinned ??= pinned.run();
+      runningHost ??= hostWorker.run();
       running ??= shared.run();
-      return Promise.all([running, runningPinned]).then(() => undefined);
+      return Promise.all([running, runningHost]).then(() => undefined);
     },
     // Once only. A worker that died is stopped by its owner, which may also stop it on exit.
     stop: () => (stopping ??= stopOnce()),
@@ -107,11 +113,11 @@ export async function createSessionWorker(
     };
     // `shutdown()` throws unless the worker is running, e.g. when it already died.
     await attempt(() => shared.getState() === "RUNNING" && shared.shutdown());
-    await attempt(() => pinned.getState() === "RUNNING" && pinned.shutdown());
+    await attempt(() => hostWorker.getState() === "RUNNING" && hostWorker.shutdown());
     // A worker shut down mid-poll, or forced past `shutdownForceTime`, rejects. That's the
     // shutdown, not a failure.
     await running?.catch(() => {});
-    await runningPinned?.catch(() => {});
+    await runningHost?.catch(() => {});
     await attempt(() => connection.close());
     if (failure !== undefined) throw failure;
   }

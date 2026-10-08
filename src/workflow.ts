@@ -6,12 +6,13 @@
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
 import {
-  patched,
   ApplicationFailure,
   proxyActivities,
   sleep,
   defineSignal,
   defineQuery,
+  defineUpdate,
+  allHandlersFinished,
   setHandler,
   workflowInfo,
   condition,
@@ -19,32 +20,44 @@ import {
   CancellationScope,
   isCancellation,
   log,
+  setCurrentDetails,
+  upsertMemo,
+  ActivityCancellationType,
   ActivityFailure,
   TimeoutFailure,
 } from "@temporalio/workflow";
 import {
   FAILED_BEFORE_CLAIM,
+  fencePrefix,
   MAX_STEPS_PER_TURN,
+  DUPLICATE_PROMPT,
   QUERIES,
+  SESSION_MEMO,
   SIGNALS,
+  UPDATES,
   sessionIdProblem,
   WORKFLOW_ID_PREFIX,
 } from "./protocol.js";
 import type {
   PromptInput,
+  Quiet,
+  RetireInput,
+  Submitted,
   RunStepInput,
   RunStepResult,
   SessionTurnOptions,
   Spend,
   TurnState,
 } from "./protocol.js";
-import { makeSteppedStep, type SteppedActivities } from "./l2-step.js";
+import { makeSteppedStep, type SteppedActivities } from "./stepped-step.js";
 
 const activityOptions = {
   // A step is one model call plus its tools. The heartbeat is the real liveness bound.
   startToCloseTimeout: "30 minutes",
   heartbeatTimeout: "30 seconds",
-  retry: { maximumAttempts: 100 },
+  // For a lost worker or a storage error. Pi retries the provider itself, inside the step, and
+  // counts those retries in the transcript, so this layer doesn't need many.
+  retry: { maximumAttempts: 10, initialInterval: "1 second", maximumInterval: "1 minute" },
 } as const;
 
 // Total cap, so a unit that keeps timing out cannot hold the turn and queue for days.
@@ -54,11 +67,17 @@ const cappedOptions = {
   scheduleToCloseTimeout: `${CAP_MINUTES} minutes`,
 } as const;
 
+// A whole step runs its tools and its seal. A stop waits for both, so the step's results are
+// recorded before the session moves on.
 const { runStep } = proxyActivities<{
   runStep(input: RunStepInput): Promise<RunStepResult>;
-}>(cappedOptions);
+}>({ ...cappedOptions, cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED });
 
 const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
+
+// A stop waits for each running tool to stop and report, so the seal that follows records what
+// the tools did instead of unknown outcomes.
+const TOOL_CANCELLATION = ActivityCancellationType.WAIT_CANCELLATION_COMPLETED;
 
 // Overridable per deployment with PI_TEMPORAL_TOOL_TIMEOUT_MINUTES, read where the session starts.
 export const DEFAULT_TOOL_TIMEOUT_MINUTES = 30;
@@ -71,6 +90,7 @@ function toolCallActivities(timeoutMinutes: number) {
     startToCloseTimeout: `${timeoutMinutes} minutes`,
     scheduleToCloseTimeout: `${Math.max(CAP_MINUTES, timeoutMinutes)} minutes`,
     retry: { maximumAttempts: 20 },
+    cancellationType: TOOL_CANCELLATION,
   });
 }
 
@@ -78,12 +98,12 @@ function toolCallActivities(timeoutMinutes: number) {
 const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
-const PINNED_SCHEDULE_TO_START_SECONDS = 30;
-const PINNED_SCHEDULE_TO_START = `${PINNED_SCHEDULE_TO_START_SECONDS} seconds`;
+const HOST_SCHEDULE_TO_START_SECONDS = 30;
+const HOST_SCHEDULE_TO_START = `${HOST_SCHEDULE_TO_START_SECONDS} seconds`;
 
 /** The same activities on one worker's own queue. The queue comes from the model call's result in
  * history, so building this per queue is deterministic on replay. */
-const pinnedTo = (taskQueue: string, timeoutMinutes: number) => ({
+const onHost = (taskQueue: string, timeoutMinutes: number) => ({
   runToolCall: proxyActivities<SteppedActivities>({
     ...cappedOptions,
     startToCloseTimeout: `${timeoutMinutes} minutes`,
@@ -91,24 +111,25 @@ const pinnedTo = (taskQueue: string, timeoutMinutes: number) => ({
     // tool's own timeout. Otherwise a long tool loses the time it waited.
     scheduleToCloseTimeout: `${Math.max(
       CAP_MINUTES * 60,
-      timeoutMinutes * 60 + PINNED_SCHEDULE_TO_START_SECONDS,
+      timeoutMinutes * 60 + HOST_SCHEDULE_TO_START_SECONDS,
     )} seconds`,
     // A retry's queue timeout cannot rule out an earlier attempt still running.
     retry: { maximumAttempts: 1 },
+    cancellationType: TOOL_CANCELLATION,
     taskQueue,
-    scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
+    scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
   }).runToolCall,
-  // A seal runs under the session lock and is safe to repeat, so it may retry. A queue timeout is
+  // A seal is fenced and safe to repeat, so it may retry. A queue timeout is
   // never retried, so a lost host still fails fast.
   sealStep: proxyActivities<SteppedActivities>({
     ...cappedOptions,
     retry: { maximumAttempts: 3 },
     taskQueue,
-    scheduleToStartTimeout: PINNED_SCHEDULE_TO_START,
+    scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
   }).sealStep,
 });
 
-/** A pinned tool call has one attempt, so this timeout excludes an earlier started attempt. A
+/** A host-queue tool call has one attempt, so this timeout excludes an earlier started attempt. A
  * seal may have had an earlier attempt, but a seal is safe to repeat. */
 const isUnclaimed = (err: unknown) =>
   err instanceof ActivityFailure &&
@@ -125,16 +146,32 @@ const { adoptProject } = proxyActivities<{
 });
 
 // Housekeeping. Short leash, and the next prompt works whether or not it succeeded.
-const { retireSession } = proxyActivities<{
-  retireSession(input: { sessionFile: string }): Promise<void>;
-}>({
+const retireOptions = {
   startToCloseTimeout: "1 minute",
   // An unpolled queue must not hold the run open.
   scheduleToCloseTimeout: "5 minutes",
   retry: { maximumAttempts: 3 },
-});
+} as const;
+type Retire = { retireSession(input: RetireInput): Promise<void> };
+const { retireSession } = proxyActivities<Retire>(retireOptions);
+// On one host's own queue. A host that's gone doesn't hold the run open, and a later sweep or the
+// session's retired marker frees its directory.
+const retireOn = (taskQueue: string) =>
+  proxyActivities<Retire>({
+    ...retireOptions,
+    taskQueue,
+    scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
+    retry: { maximumAttempts: 1 },
+  }).retireSession;
 
+// For a client with no Worker to accept an Update. A Signal is kept with no Worker up. It can't be
+// rejected, so a bad or repeated prompt is dropped.
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
+export const submit = defineUpdate<Submitted, [PromptInput]>(UPDATES.submit);
+export const waitForQuiet = defineUpdate<Quiet, []>(UPDATES.waitForQuiet);
+
+// How many prompt ids a session remembers to refuse a resend. Far more than any client retries.
+const SEEN_PROMPTS = 200;
 export const interrupt = defineSignal<[]>(SIGNALS.interrupt);
 export const turnState = defineQuery<TurnState>(QUERIES.turnState);
 
@@ -147,23 +184,25 @@ export async function piSession(
   // workflow ids unique, so derive the session id from it.
   const id = sessionId || workflowInfo().workflowId.replace(WORKFLOW_ID_PREFIX, "");
   // No default to ".": that is each worker's own cwd, so two workers would use two files.
-  if (!sessionFile && !options?.sessionDir && patched("a-session-log-needs-a-named-home")) {
+  if (!sessionFile && !options?.sessionDir) {
     throw ApplicationFailure.nonRetryable(
       `session ${id} was started with no session file and no sessionDir`,
     );
   }
-  // A schedule id is the user's and becomes the file name here. Only an unsafe one reaches the
-  // patch, so runs with safe ids record nothing new.
+  // A schedule id is the user's and becomes the file name here.
   const problem = sessionFile ? undefined : sessionIdProblem(id);
-  if (problem && patched("a-session-id-names-one-file")) {
+  if (problem) {
     throw ApplicationFailure.nonRetryable(
       `session id ${JSON.stringify(id)} can't be used: ${problem}`,
     );
   }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
+  // One per Activity that writes the session file. See `fence.ts`.
+  let fenced = 0;
+  const fence = () => fencePrefix(workflowInfo().runStartTime.getTime(), ++fenced);
   // Set per turn, since it reads that turn's spend. The step driver is built once.
-  let outOfBudget = (): boolean => false;
+  let outOfBudget = (_pending?: Pick<RunStepResult, "spent" | "total">): boolean => false;
   const runTurnStep: (input: RunStepInput) => Promise<RunStepResult> = options?.stepped
     ? makeSteppedStep({
         activities: {
@@ -174,22 +213,20 @@ export async function piSession(
           sealStep,
         },
         isCancellation,
-        outOfBudget: () => outOfBudget(),
+        outOfBudget: (pending) => outOfBudget(pending),
+        fence,
         // No patch gate. Replay doesn't compare activity timeouts, so a running session takes the
-        // configured timeout from its next pinned call on.
-        pinnedTo: (queue) =>
-          pinnedTo(queue, options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES),
+        // configured timeout from its next host-queue call on.
+        onHost: (queue) =>
+          onHost(queue, options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES),
         isUnclaimed,
-        // False only when replaying older histories. See the dep.
-        refusesStartedFailures: () => patched("pinned-started-failure-does-not-migrate"),
-        resumesAfterLostHost: () => patched("lost-host-does-not-end-the-turn"),
         nonCancellable: (fn) => CancellationScope.nonCancellable(fn),
         // The SDK logger tags workflow and run ids and is quiet on replay.
         log: (message, attributes) => log.info(message, attributes),
       })
     : runStep;
   let projectAdopted = options?.template === undefined;
-  // Seeded from input, so a turn can start with no client. `queued` comes from a rollover.
+  // Seeded from input, so a turn can start with no client. `queued` comes from a Continue-As-New.
   const queue: PromptInput[] = [
     ...(options?.initialPrompt ? [options.initialPrompt] : []),
     ...(options?.queued ?? []),
@@ -197,15 +234,65 @@ export async function piSession(
   let current: CancellationScope | undefined;
   let running: TurnState["running"];
   let finished: TurnState["finished"] = options?.finished;
-  // Session spend, carried across rollovers so the allowance doesn't reset.
+  const hostQueues = new Set(options?.hostQueues ?? []);
+  // Session spend, carried across Continue-As-New so the allowance doesn't reset.
   const spent: { tokens: number; cost: number; seconds: number } = {
     tokens: options?.spent?.tokens ?? 0,
     cost: options?.spent?.cost ?? 0,
     seconds: options?.spent?.seconds ?? 0,
   };
 
-  setHandler(submitPrompt, (p) => {
+  // In the memo, so a List call shows every session's state without a Query to each. Upserted
+  // only when the state changes, since each upsert is a history event. The step number is in the
+  // current details, which cost no history.
+  let shown = "";
+  const show = () => {
+    const state = running ? "running" : "idle";
+    if (`${state}/${queue.length}` !== shown) {
+      shown = `${state}/${queue.length}`;
+      upsertMemo({ [SESSION_MEMO]: { state, queued: queue.length } });
+    }
+    setCurrentDetails(running ? `turn ${running.promptId}, step ${running.step}` : "idle");
+  };
+
+  const seen = [...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)];
+  const problemWith = (p: PromptInput) =>
+    !p?.promptId ? "a prompt needs an id" : !p.text?.trim() ? "a prompt needs text" : undefined;
+  const enqueue = (p: PromptInput) => {
+    seen.push(p.promptId);
+    if (seen.length > SEEN_PROMPTS) seen.splice(0, seen.length - SEEN_PROMPTS);
     queue.push(p);
+    show();
+  };
+  // Set right before the run ends or continues as new, so a waiting client is answered and asks
+  // the next run.
+  let ending = false;
+
+  setHandler(submitPrompt, (p) => {
+    if (problemWith(p) === undefined && !seen.includes(p.promptId)) enqueue(p);
+  });
+  setHandler(
+    submit,
+    (p) => {
+      enqueue(p);
+      return { ahead: queue.length - 1 + (running ? 1 : 0) };
+    },
+    {
+      validator: (p) => {
+        const problem = problemWith(p);
+        if (problem) throw ApplicationFailure.nonRetryable(problem, "BadPrompt");
+        if (seen.includes(p.promptId)) {
+          throw ApplicationFailure.nonRetryable(
+            `prompt ${p.promptId} is already in this session`,
+            DUPLICATE_PROMPT,
+          );
+        }
+      },
+    },
+  );
+  setHandler(waitForQuiet, async () => {
+    await condition(() => ending || (!running && queue.length === 0));
+    return !running && queue.length === 0 ? { finished } : { moved: true };
   });
   setHandler(interrupt, () => {
     current?.cancel();
@@ -216,24 +303,39 @@ export async function piSession(
     const woke = await condition(() => queue.length > 0, idleTimeout);
     if (!woke && queue.length === 0) {
       // Idle: release the project directory and exit. The next prompt starts a fresh run. Best
-      // effort, and it only frees the host that runs this activity.
-      await retireSession({ sessionFile: file }).catch((err) =>
-        log.warn("could not retire the session's directory", { sessionId: id, err: String(err) }),
-      );
+      // effort. Each host that held the directory is asked on its own queue.
+      // The Workflow's own count of the session's time, which also covers each turn's last seal
+      // and failed attempts. Written now, since the record is all the next run has.
+      const last = finished && { turn: finished.promptId, sessionSeconds: spent.seconds };
+      const warn = (err: unknown) =>
+        log.warn("could not retire the session's directory", { sessionId: id, err: String(err) });
+      await Promise.all([
+        retireSession({ sessionFile: file, ...last, fence: fence() }).catch(warn),
+        ...[...hostQueues].map((queue) => retireOn(queue)({ sessionFile: file }).catch(warn)),
+      ]);
       // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.
       if (queue.length > 0) continue;
+      // Answer waiting clients before the run closes. A prompt can still arrive meanwhile.
+      ending = true;
+      await condition(allHandlersFinished);
+      if (queue.length > 0) {
+        ending = false;
+        continue;
+      }
       return;
     }
 
-    // Roll over only between turns. The queue is then the whole control state. A busy stepped
+    // Continue-As-New only between turns. The queue is then the whole control state. A busy stepped
     // session can hit the history limit in hours.
     const info = workflowInfo();
     if (info.continueAsNewSuggested || info.historyLength >= (options?.maxHistory ?? Infinity)) {
-      log.info("rolling the session over", {
+      log.info("continuing the session as new", {
         sessionId: id,
         queued: queue.length,
         historyLength: info.historyLength,
       });
+      ending = true;
+      await condition(allHandlersFinished);
       await continueAsNew<typeof piSession>(id, file, {
         ...options,
         // The initial prompt is a schedule's task. Carry it only in the queue, or it repeats.
@@ -242,6 +344,8 @@ export async function piSession(
         queued: queue,
         finished,
         spent,
+        hostQueues: [...hostQueues],
+        seenPrompts: seen,
       });
     }
 
@@ -271,43 +375,45 @@ export async function piSession(
       await CancellationScope.cancellable(async () => {
         current = CancellationScope.current();
         // Hard deadline: stop where the turn is, not at the next step boundary.
-        if (options?.budget?.hardSeconds !== undefined && patched("a-turn-has-a-budget")) {
+        if (options?.budget?.hardSeconds !== undefined) {
           const hardMs = options.budget.hardSeconds * 1000;
           const expire = () => {
             deadline = true;
             current?.cancel();
           };
-          if (patched("a-deadline-dies-with-its-turn")) {
-            deadlineScope = new CancellationScope();
-            deadlineScope.run(() => sleep(hardMs)).then(expire, () => undefined);
-          } else {
-            // Unpatched shape, kept for replay of runs that recorded it.
-            sleep(hardMs).then(expire, () => undefined);
-          }
+          deadlineScope = new CancellationScope();
+          deadlineScope.run(() => sleep(hardMs)).then(expire, () => undefined);
         }
         if (!projectAdopted && options?.template) {
           // Part of the turn, so stop and query apply while it waits.
           running = { promptId: prompt.promptId, step: 0 };
+          show();
           await adoptProject({ sessionFile: file, template: options.template });
           projectAdopted = true;
         }
         // Workflow state, not file totals, since the session file is shared. `Date.now()` is the
         // workflow clock, so replay agrees. Passed to the step so it can stop mid-batch.
-        outOfBudget = () => {
+        const over = (pending?: Pick<RunStepResult, "spent" | "total">) => {
           const b = options?.budget;
           if (!b) return false;
           const turnSeconds = (Date.now() - startedAt) / 1000;
+          const turnTokens = tokens + (pending?.spent?.tokens ?? 0);
+          // The session total a model call read already includes its own spend.
+          const session = pending?.total ?? recorded;
           return (
-            (b.tokens !== undefined && tokens > b.tokens) ||
+            (b.tokens !== undefined && turnTokens > b.tokens) ||
             (b.seconds !== undefined && turnSeconds > b.seconds) ||
             (b.sessionTokens !== undefined &&
-              (recorded?.tokens ?? spent.tokens + tokens) > b.sessionTokens) ||
+              (session?.tokens ?? spent.tokens + turnTokens) > b.sessionTokens) ||
             (b.sessionSeconds !== undefined &&
               sessionSecondsBefore() + turnSeconds > b.sessionSeconds)
           );
         };
+        // Between the tools of one step, the step's own model call counts too.
+        outOfBudget = (pending) => over(pending);
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
+          show();
           const input: RunStepInput = {
             sessionId: id,
             sessionFile: file,
@@ -315,6 +421,8 @@ export async function piSession(
             retryAttempt,
             overflowRecoveryAttempted,
             sessionSeconds: sessionSecondsBefore() + (Date.now() - startedAt) / 1000,
+            // For `runStep`, or for the model call of a stepped step.
+            fence: fence(),
             ...prompt,
           };
           const result = await runTurnStep(input);
@@ -326,6 +434,7 @@ export async function piSession(
           cost += result.spent?.cost ?? 0;
           recorded = result.total ?? recorded;
           recordedSeconds = result.sessionSeconds ?? recordedSeconds;
+          if (result.hostQueue) hostQueues.add(result.hostQueue);
           if (result.done) {
             outcome = "answered";
             finalText = result.finalText;
@@ -333,7 +442,7 @@ export async function piSession(
           }
           // Checked between steps. A started call is left to finish, since an unanswered call
           // would break the session's next turn.
-          if (outOfBudget() && patched("a-turn-has-a-budget")) {
+          if (outOfBudget()) {
             outcome = "budget";
             log.warn("turn stopped where it was: it is out of budget", {
               sessionId: id,
@@ -373,6 +482,7 @@ export async function piSession(
       deadlineScope?.cancel();
       current = undefined;
       running = undefined;
+      show();
       // Counted here so failed and interrupted turns still count. The provider billed them.
       spent.tokens += tokens;
       spent.cost += cost;

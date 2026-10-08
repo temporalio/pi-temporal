@@ -1,11 +1,33 @@
-// Client helpers to submit a prompt to a session and to interrupt one. A prompt is a
-// signal-with-start: the first starts the per-session workflow, later ones join the running one.
+// Client helpers to submit a prompt to a session and to interrupt one. A prompt is an
+// Update-with-start: the first starts the per-session workflow, later ones join the running one.
+// The session checks the prompt and says where it sits in the queue.
 
 import { randomUUID } from "node:crypto";
-import { Client, Connection, WorkflowNotFoundError } from "@temporalio/client";
+import {
+  Client,
+  Connection,
+  WithStartWorkflowOperation,
+  WorkflowNotFoundError,
+  WorkflowUpdateFailedError,
+  WorkflowUpdateRPCTimeoutOrCancelledError,
+} from "@temporalio/client";
+import { ApplicationFailure } from "@temporalio/common";
 import { type Config, connectionOptions, fromEnv, sessionFileFor } from "./config.js";
-import { WORKFLOW_TYPE, workflowId } from "./protocol.js";
-import type { PromptInput, SessionTurnOptions } from "./protocol.js";
+import {
+  DUPLICATE_PROMPT,
+  SIGNALS,
+  UPDATES,
+  WORKFLOW_TYPE,
+  workflowId,
+} from "./protocol.js";
+import type { PromptInput, SessionTurnOptions, Submitted } from "./protocol.js";
+import type { piSession } from "./workflow.js";
+
+type Session = typeof piSession;
+
+// An Update needs a Worker to accept it. Past this, the prompt goes as a Signal, which the server
+// keeps until a Worker comes.
+const ACCEPT_MS = 10_000;
 
 /** Every client here is built by this, so the CLI and the extension follow sessions alike. */
 export async function openClient(cfg: Config = fromEnv()) {
@@ -25,23 +47,62 @@ export async function connect() {
   return { cfg, ...(await openClient(cfg)) };
 }
 
+/** What a session started from this config runs with. */
+export const sessionOptions = (cfg: Config): SessionTurnOptions => ({
+  idleTimeout: cfg.idleTimeout,
+  stepped: cfg.stepped,
+  toolTimeoutMinutes: cfg.toolTimeoutMinutes,
+  budget: cfg.budget,
+});
+
+/**
+ * Send a prompt, starting the session if it isn't running. Returns how many prompts are ahead of
+ * it, or undefined when no Worker answered in time and it went as a Signal. A prompt the session
+ * already has counts as sent, so a retry after a lost answer is safe.
+ */
+export async function sendPrompt(
+  client: Client,
+  cfg: Config,
+  sessionId: string,
+  prompt: PromptInput,
+): Promise<number | undefined> {
+  const file = sessionFileFor(cfg.sessionDir, sessionId);
+  const args: Parameters<Session> = [sessionId, file, sessionOptions(cfg)];
+  const start = { taskQueue: cfg.taskQueue, workflowId: workflowId(sessionId), args };
+  try {
+    const submitted = await client.withDeadline(Date.now() + ACCEPT_MS, () =>
+      client.workflow.executeUpdateWithStart<Session, Submitted, [PromptInput]>(UPDATES.submit, {
+        args: [prompt],
+        // The server keeps one answer per id, so a resent prompt gets the first one back.
+        updateId: prompt.promptId,
+        startWorkflowOperation: new WithStartWorkflowOperation<Session>(WORKFLOW_TYPE, {
+          ...start,
+          workflowIdConflictPolicy: "USE_EXISTING",
+        }),
+      }),
+    );
+    return submitted.ahead;
+  } catch (err) {
+    if (err instanceof WorkflowUpdateFailedError) {
+      const cause = err.cause;
+      if (cause instanceof ApplicationFailure && cause.type === DUPLICATE_PROMPT) return undefined;
+      throw cause ?? err;
+    }
+    if (!(err instanceof WorkflowUpdateRPCTimeoutOrCancelledError)) throw err;
+  }
+  // The session may already hold it from the Update, and drops a repeat.
+  await client.workflow.signalWithStart(WORKFLOW_TYPE, {
+    ...start,
+    signal: SIGNALS.submitPrompt,
+    signalArgs: [prompt],
+  });
+  return undefined;
+}
+
 export async function submitPrompt(sessionId: string, text: string, promptId = randomUUID()) {
   const { cfg, client, connection } = await connect();
-  const prompt: PromptInput = { promptId, text };
-  const options: SessionTurnOptions = {
-    idleTimeout: cfg.idleTimeout,
-    stepped: cfg.stepped,
-    toolTimeoutMinutes: cfg.toolTimeoutMinutes,
-    budget: cfg.budget,
-  };
   try {
-    await client.workflow.signalWithStart(WORKFLOW_TYPE, {
-      taskQueue: cfg.taskQueue,
-      workflowId: workflowId(sessionId),
-      args: [sessionId, sessionFileFor(cfg.sessionDir, sessionId), options],
-      signal: "submitPrompt",
-      signalArgs: [prompt],
-    });
+    await sendPrompt(client, cfg, sessionId, { promptId, text });
   } finally {
     await connection.close();
   }

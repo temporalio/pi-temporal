@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
+import { Context } from "@temporalio/activity";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { fromEnv, sessionFileFor } from "../src/config.js";
 import { WORKFLOW_TYPE, workflowId } from "../src/protocol.js";
@@ -27,6 +28,18 @@ const cfg = fromEnv();
 
 // Sessions whose tool calls should hang, so the interrupt has something in flight to cancel.
 const hangingCalls = new Set<string>();
+
+// Waits like a real activity: it heartbeats, so a stop reaches it, and it ends when stopped.
+async function stoppable(ms: number) {
+  const ctx = Context.current();
+  const beat = setInterval(() => ctx.heartbeat(), 200);
+  try {
+    await ctx.sleep(ms);
+  } finally {
+    clearInterval(beat);
+  }
+}
+
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail: unknown) => {
@@ -57,7 +70,7 @@ function stubs(stepped: boolean) {
     async runStep(input: RunStepInput): Promise<RunStepResult> {
       const count = note(input);
       if (input.text === "hang") {
-        await sleep(60_000);
+        await stoppable(60_000);
         return { done: true, retryAttempt: 0, finalText: "" };
       }
       const done = count === STEPS_TO_ANSWER;
@@ -77,7 +90,7 @@ function stubs(stepped: boolean) {
     },
     async runToolCall(input: ToolCallInput): Promise<ToolCallResult> {
       // The prompt text does not reach a tool call, so hanging is keyed by session.
-      if (hangingCalls.has(input.sessionId)) await sleep(60_000);
+      if (hangingCalls.has(input.sessionId)) await stoppable(60_000);
       return { outcome: "settled" };
     },
     async sealStep(input: SealStepInput): Promise<RunStepResult> {
@@ -104,6 +117,7 @@ async function runMode(stepped: boolean) {
     taskQueue,
     workflowsPath: fileURLToPath(new URL("../src/workflow.ts", import.meta.url)),
     activities,
+    maxHeartbeatThrottleInterval: "1 second",
   });
   const running = worker.run();
 

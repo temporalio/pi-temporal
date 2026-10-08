@@ -3,7 +3,7 @@
 // it so each tool call is its own unit of work. All re-open the session file, so any worker that
 // can reach it can run them.
 
-import { mkdir } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import {
@@ -18,6 +18,7 @@ import {
 import type {
   DeferredToolCall,
   ModelCallResult,
+  RetireInput,
   RunStepInput,
   RunStepResult,
   SealStepInput,
@@ -25,11 +26,11 @@ import type {
   ToolCallInput,
   ToolCallResult,
 } from "./protocol.js";
-import { FAILED_BEFORE_CLAIM } from "./protocol.js";
+import { FAILED_AFTER_CLAIM, FAILED_BEFORE_CLAIM, fencePrefix } from "./protocol.js";
 import { SHIP_TREE_NEEDS_STEPS } from "./config.js";
 import * as pending from "./pending.js";
-import * as worktree from "./worktree.js";
-import { withSessionLock } from "./session-lock.js";
+import * as worktree from "./tree/worktree.js";
+import { claimFence, fenceToken } from "./fence.js";
 import { textOf } from "./messages.js";
 
 // Retry delay after a host refuses the project directory. Short, so the work finds a free host.
@@ -41,6 +42,41 @@ const stopRequested = () => {
     return Context.current().cancellationSignal.aborted;
   } catch {
     return false;
+  }
+};
+
+// The Activity logger, so each line carries its Workflow and Activity ids. Plain console when a
+// check calls an activity directly, with no Activity around it.
+const say = (level: "info" | "warn", message: string) => {
+  try {
+    Context.current().log[level](message);
+  } catch {
+    console[level](message);
+  }
+};
+
+// Passed to a running tool, so a cancelled Activity stops its tool like a user stop. The tool
+// reports what it did, and the seal records that instead of an unknown outcome. Cancellation
+// arrives with a heartbeat, so it takes up to one heartbeat to reach the tool.
+const cancelled = (): { signal?: AbortSignal } => {
+  try {
+    return { signal: Context.current().cancellationSignal };
+  } catch {
+    return {};
+  }
+};
+
+// The model call, aborted like a user stop when the Activity is cancelled. Pi records an aborted
+// response, and the turn ends as stopped instead of waiting out a slow provider.
+const modelCallUntilCancelled = async (session: AgentSession) => {
+  const { signal } = cancelled();
+  const stop = () => void session.abort().catch(() => {});
+  if (signal?.aborted) stop();
+  else signal?.addEventListener("abort", stop, { once: true });
+  try {
+    return await session.modelCall();
+  } finally {
+    signal?.removeEventListener("abort", stop);
   }
 };
 
@@ -172,20 +208,27 @@ export function makeActivities(
       throw err;
     });
   };
-  // A lock can be reclaimed while its holder is blocked, so re-check before writing. On failure,
-  // Temporal retries and the retry takes the lock.
-  const stillOurs = async (owned: () => Promise<boolean>, what: string) => {
-    if (!(await owned())) {
-      throw new Error(`lost the session lock before ${what}; another attempt has it`);
+  // Runs `body` as the session file's writer, with the guard Pi asks before each append. The
+  // assistant message lands at the end of a stream that can run for minutes, so the guard, not a
+  // check up front, is what keeps a superseded attempt out.
+  //
+  // An Activity with no fence was scheduled by an older Workflow. It sorts below every fenced one,
+  // so it can't block the run that follows. A check calling an activity directly, with no
+  // Activity around it, gets one from this host's clock.
+  const withFence = async <T>(
+    sessionFile: string,
+    prefix: string | undefined,
+    body: (guard: () => void) => Promise<T>,
+  ) => {
+    let attempt: number | undefined;
+    try {
+      attempt = Context.current().info.attempt;
+    } catch {
+      // No Activity around it.
     }
-  };
-
-  // Guards Pi's own appends. The assistant message lands at the end of a stream that can run for
-  // minutes, long after any awaited check.
-  const writeGuard = (ownedNow: () => boolean, what: string) => () => {
-    if (!ownedNow()) {
-      throw new Error(`lost the session lock during ${what}; another attempt has it`);
-    }
+    const fallback = attempt === undefined ? fencePrefix(Date.now(), 0) : fencePrefix(0, 0);
+    const token = fenceToken(prefix ?? fallback, attempt ?? 1);
+    return await body(await claimFence(sessionFile, token));
   };
 
   // The files are set aside either way, since they're the only record of what the tool did. A
@@ -199,9 +242,9 @@ export function makeActivities(
   ) => {
     if (!opts.shipTree) return;
     await worktree.capture(opts.projectDir, sessionFile, of).catch(async (err) => {
-      console.error(`could not ship the project tree: ${String(err)}`);
+      say("warn", `could not ship the project tree: ${String(err)}`);
       await worktree.setAside(opts.projectDir, sessionFile).catch((keepErr) => {
-        console.error(`and could not set it aside either: ${String(keepErr)}`);
+        say("warn", `and could not set it aside either: ${String(keepErr)}`);
       });
       if (retryable && !worktree.isRefusal(err)) throw err;
     });
@@ -220,12 +263,16 @@ export function makeActivities(
   // The session's time before `turn`, from the latest total another turn wrote. This turn's own
   // entries are skipped, so a step that runs again can't count the turn twice.
   const secondsBefore = (session: AgentSession, turn: string): number | undefined => {
-    const branch = managerOf(session)?.getBranch() ?? [];
+    const manager = managerOf(session);
+    return manager ? latestSeconds(manager, turn) : undefined;
+  };
+  const latestSeconds = (manager: Record, skipping?: string): number | undefined => {
+    const branch = manager.getBranch();
     for (let i = branch.length - 1; i >= 0; i--) {
       const entry = branch[i];
       if (entry.type !== "custom" || entry.customType !== SESSION_SECONDS_ENTRY) continue;
       const data = entry.data as { turn?: unknown; seconds?: unknown } | undefined;
-      if (data?.turn === turn) continue;
+      if (skipping !== undefined && data?.turn === skipping) continue;
       return typeof data?.seconds === "number" ? data.seconds : undefined;
     }
     return undefined;
@@ -366,11 +413,11 @@ export function makeActivities(
     }
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
         await bringTree(input.sessionFile);
-        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the step"));
+        const session = await openSession(input.sessionFile, guard);
         try {
-          await stillOurs(owned, "the step");
+          guard();
           const settled = await readyForStep(session, input, false);
           if (settled) return settled;
 
@@ -378,7 +425,7 @@ export function makeActivities(
           // started unit runs to its end.
           if (stopRequested()) throw Context.current().cancellationSignal.reason;
           const before = billed(session);
-          const model = await session.modelCall();
+          const model = await modelCallUntilCancelled(session);
           const calls = model.ended ? [] : model.toolCalls;
           const results = new Map<string, TurnToolCallOutcome>();
           let stopped = false;
@@ -390,7 +437,7 @@ export function makeActivities(
               continue;
             }
             // One at a time. The session admits a single unit of work.
-            const outcome = await session.runToolCall(call.id);
+            const outcome = await session.runToolCall(call.id, cancelled());
             if (outcome) results.set(call.id, outcome);
           }
           stopped ||= stopRequested();
@@ -442,28 +489,28 @@ export function makeActivities(
 
   /** The model call of one step. The calls it reports are recorded and left for the workflow to
    * dispatch, one activity each. */
-  // With tree shipping and no pinned queue, parallel tools on different hosts would overwrite each
-  // other's captures, so they run in order. A pinned queue keeps them on one directory.
+  // With tree shipping and no host queue, parallel tools on different hosts would overwrite each
+  // other's captures, so they run in order. A host queue keeps them on one directory.
   const mustSerialize = (sequential: boolean) =>
     sequential || (opts.shipTree === true && opts.stepQueue === undefined);
 
   async function runModelCall(input: RunStepInput): Promise<ModelCallResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
         await bringTree(input.sessionFile);
         const session = await openSession(
           input.sessionFile,
-          writeGuard(ownedNow, "the model call"),
+          guard,
         );
         try {
           // Before the first write (recording the prompt).
-          await stillOurs(owned, "the model call");
+          guard();
           const settled = await readyForStep(session, input, true);
           if (settled) return { settled, calls: [], sequential: false, ended: true };
 
           const before = billed(session);
-          const outcome = await session.modelCall();
+          const outcome = await modelCallUntilCancelled(session);
           const spent = spentSince(before, session);
           const total = billed(session);
           return {
@@ -487,7 +534,7 @@ export function makeActivities(
   // Typed only when no attempt left a dispatch note. An earlier attempt may still run the tool.
   const beforeClaim = async (err: unknown, input: ToolCallInput): Promise<unknown> => {
     // A refusal comes from `bringTree`, which always runs before the claim. Typed like any other
-    // failure before the claim, so a pinned step moves to a free host.
+    // failure before the claim, so a host-queue step moves to a free host.
     const refused = err instanceof ApplicationFailure && err.type === "WorktreeQuarantined";
     if (err instanceof ApplicationFailure && !refused) return err;
     const { sessionFile, turn, step, call } = input;
@@ -507,24 +554,18 @@ export function makeActivities(
     const stop = heartbeatEvery(3000);
     let claimed = false;
     try {
-      // This host may not have run the model call, so restore the project files first. Under the
-      // session lease to order it against transcript recovery. The tree store has its own leases.
+      // This host may not have run the model call, so restore the project files first. The tree
+      // store has its own leases.
       const writer: worktree.Writer = { turn: input.turn, step: input.step, callId: input.call.id };
-      await withSessionLock(input.sessionFile, () => bringTree(input.sessionFile, writer));
-      // Opening can append (a thinking-level entry), so the open is locked. The lock is released
-      // before the tool runs so siblings stay parallel. After that, any append is refused, which
-      // also catches an extension writing from `tool_execution_end`.
-      let opening = true;
-      const session = await withSessionLock(input.sessionFile, (_owned, ownedNow) =>
-        openSession(input.sessionFile, () => {
-          if (opening) return writeGuard(ownedNow, "opening the session")();
-          throw new Error(
-            "a tool activity must not write to the session: " +
-              "the seal records what the step produced",
-          );
-        }),
-      );
-      opening = false;
+      await bringTree(input.sessionFile, writer);
+      // A tool call never writes the session, so siblings need no order between them. What
+      // opening could add, the model call already wrote. The seal records what the step produced.
+      // This also catches an extension writing from `tool_execution_end`.
+      const session = await openSession(input.sessionFile, () => {
+        throw new Error(
+          "a tool activity must not write to the session: the seal records what the step produced",
+        );
+      });
       try {
         // Already sealed. Clean up the leftover kept result.
         if (answeredInTranscript(session.state.messages as Msg[], input.call.id)) {
@@ -555,7 +596,7 @@ export function makeActivities(
         // Local marker that a tool is running here. A later turn checks it before reusing this
         // directory, since a timed-out attempt may still be running.
         if (opts.shipTree) await worktree.beginWrite(opts.projectDir, writer);
-        const outcome = await session.runToolCall(input.call.id).finally(async () => {
+        const outcome = await session.runToolCall(input.call.id, cancelled()).finally(async () => {
           if (opts.shipTree) await worktree.endWrite(opts.projectDir, writer);
         });
         if (!outcome) return { outcome: "already-settled" };
@@ -570,10 +611,9 @@ export function makeActivities(
         // Ship from here. Only this host has the tool's changes, and the seal may land elsewhere.
         // The result is kept, so a failure here must not fail the call. The next step's restore
         // or a later capture can carry the files.
-        await withSessionLock(input.sessionFile, () =>
-          shipTree(input.sessionFile, { current: writer, fence: { turn, step } }),
-        ).catch((err: unknown) => {
-          console.error(`could not ship the project tree after ${call.id}: ${String(err)}`);
+        const ship = shipTree(input.sessionFile, { current: writer, fence: { turn, step } });
+        await ship.catch((err: unknown) => {
+          say("warn", `could not ship the project tree after ${call.id}: ${String(err)}`);
         });
         return { outcome: "settled" };
       } finally {
@@ -581,7 +621,12 @@ export function makeActivities(
       }
     } catch (err) {
       // A stop stays a stop. Typed as a failure, it would hide the cancellation.
-      throw claimed || stopRequested() ? err : await beforeClaim(err, input);
+      if (stopRequested()) throw err;
+      if (!claimed) throw await beforeClaim(err, input);
+      throw ApplicationFailure.nonRetryable(
+        `tool call ${input.call.id} failed after it started: ${String(err)}`,
+        FAILED_AFTER_CLAIM,
+      );
     } finally {
       stop();
     }
@@ -591,7 +636,7 @@ export function makeActivities(
   async function sealStep(input: SealStepInput): Promise<RunStepResult> {
     const stop = heartbeatEvery(3000);
     try {
-      return await withSessionLock(input.sessionFile, async (owned, ownedNow) => {
+      return await withFence(input.sessionFile, input.fence, async (guard) => {
         // Close the step first. The lost host, or a stopped tool still running there, may publish
         // from a stale tip later, and this lets that capture be refused.
         if (input.interrupted && opts.shipTree) {
@@ -599,7 +644,7 @@ export function makeActivities(
         }
         // A cancelled tool may still be writing on another host.
         if (!input.interrupted) await bringTree(input.sessionFile);
-        const session = await openSession(input.sessionFile, writeGuard(ownedNow, "the seal"));
+        const session = await openSession(input.sessionFile, guard);
         try {
           const results: TurnToolCallOutcome[] = [];
           for (const call of input.calls) {
@@ -617,7 +662,7 @@ export function makeActivities(
           }
 
           // `expectCalls` stops results being attached to a message appended since the model call.
-          await stillOurs(owned, "the seal");
+          guard();
           const before = billed(session);
           const sealed = await session.sealStep(results, {
             expectCalls: input.calls.map((call) => call.id),
@@ -660,13 +705,33 @@ export function makeActivities(
     }
   }
 
+  // The steps record the session's time as they go, but the last one of a turn writes before its
+  // seal ends, and failed attempts never write. The Workflow counted all of it, and its run is
+  // about to end, so its total goes in the record. Only ever raised, never lowered.
+  async function keepSeconds(input: RetireInput): Promise<void> {
+    const { sessionFile, turn, sessionSeconds } = input;
+    if (turn === undefined || sessionSeconds === undefined) return;
+    if (!(await access(sessionFile).then(() => true, () => false))) return;
+    await withFence(sessionFile, input.fence, async (guard) => {
+      const manager = dependencies.openSession
+        ? managerOf(await dependencies.openSession(sessionFile, guard))
+        : SessionManager.open(sessionFile);
+      if (!manager) return;
+      if (manager instanceof SessionManager) manager.setWriteGuard(guard);
+      const known = latestSeconds(manager);
+      if (known !== undefined && known >= sessionSeconds) return;
+      manager.appendCustomEntry(SESSION_SECONDS_ENTRY, { turn, seconds: sessionSeconds });
+    });
+  }
+
   /** Release the project directory when the session goes idle, or this worker refuses every other
    * session. Also records the session as over, so other hosts can release theirs. */
-  async function retireSession(input: { readonly sessionFile: string }): Promise<void> {
+  async function retireSession(input: RetireInput): Promise<void> {
+    await keepSeconds(input);
     if (!opts.shipTree) return;
     // Thrown, so Temporal retries. The Workflow gives up quietly once retries run out.
     const freed = await worktree.retire(opts.projectDir, input.sessionFile);
-    if (freed) console.log(`handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
+    if (freed) say("info", `handed ${opts.projectDir} back: ${input.sessionFile} went idle`);
   }
 
   /** Copy a template project into a scheduled session before its first step. A no-op once the
@@ -677,7 +742,7 @@ export function makeActivities(
   }): Promise<void> {
     if (!opts.shipTree) return;
     const copied = await worktree.adopt(input.template, input.sessionFile);
-    if (copied) console.log(`took the project from ${input.template} for ${input.sessionFile}`);
+    if (copied) say("info", `took the project from ${input.template} for ${input.sessionFile}`);
   }
 
   return { runStep, runModelCall, runToolCall, sealStep, retireSession, adoptProject };

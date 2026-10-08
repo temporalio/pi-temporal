@@ -1,12 +1,11 @@
-// Checks that this workflow code replays both its own history and the kept ones in `histories/`.
-// Each kept history predates a rule that changed which activities a step schedules, so it only
-// replays if that rule sits behind `patched()`. To record another, revert the rule and run this
-// with `REPLAY_HISTORY` pointing at the file to keep.
+// Checks that a worker on this code replays a history this code wrote. A change that alters which
+// commands a Workflow issues breaks running sessions. Once sessions run in production, put it
+// behind `patched()`, or ship it as a new Worker Deployment Version, and keep its old history here.
 //
 // Needs a Temporal server, no model key. Usage: npx tsx checks/replay-check.mts
 
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { Worker, NativeConnection } from "@temporalio/worker";
@@ -21,7 +20,7 @@ import type { RunStepInput } from "../src/protocol.js";
 const address = process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
 const namespace = "default";
 const queue = `pi-replay-${Date.now()}`;
-const pinnedQueue = `${queue}-pinned`;
+const hostQueue = `${queue}-host`;
 const path = process.env.REPLAY_HISTORY ?? "/tmp/replay-history.json";
 
 const failures: string[] = [];
@@ -30,7 +29,7 @@ const check = (what: string, ok: boolean, detail?: unknown) => {
   if (!ok) failures.push(what);
 };
 
-let pinnedAttempts = 0;
+let hostAttempts = 0;
 let sharedTools = 0;
 const activities = {
   async adoptProject() {},
@@ -40,7 +39,7 @@ const activities = {
   },
   async runModelCall() {
     const calls = [{ id: "call", name: "probe" }];
-    return { calls, sequential: false, ended: false, queue: pinnedQueue };
+    return { calls, sequential: false, ended: false, queue: hostQueue };
   },
   async sealStep() {
     return { done: true, retryAttempt: 0, finalText: "closed" };
@@ -65,20 +64,20 @@ async function main() {
       },
     },
   });
-  const pinned = await Worker.create({
+  const host = await Worker.create({
     connection: native,
     namespace,
-    taskQueue: pinnedQueue,
+    taskQueue: hostQueue,
     activities: {
       ...activities,
       async runToolCall() {
-        pinnedAttempts = Math.max(pinnedAttempts, Context.current().info.attempt);
-        throw new Error("the pinned attempt failed after starting");
+        hostAttempts = Math.max(hostAttempts, Context.current().info.attempt);
+        throw new Error("the host-queue attempt failed after starting");
       },
     },
   });
   const running = shared.run();
-  const runningPinned = pinned.run();
+  const runningHost = host.run();
 
   try {
     const handle = await client.workflow.start("piSession", {
@@ -109,15 +108,15 @@ async function main() {
     )?.activityTaskScheduledEventAttributes;
     assert.equal(Number(tool?.startToCloseTimeout?.seconds), 60);
     assert.equal(Number(tool?.scheduleToCloseTimeout?.seconds), 7200);
-    assert.equal(tool?.taskQueue?.name, pinnedQueue);
-    console.log("PASS the pinned tool uses its configured timeout");
+    assert.equal(tool?.taskQueue?.name, hostQueue);
+    console.log("PASS the host-queue tool uses its configured timeout");
     check(
-      "a step with a failed pinned dispatch produced a history",
+      "a step with a failed host-queue dispatch produced a history",
       (history.events?.length ?? 0) > 0,
     );
     check("this code refused to migrate the started failure", sharedTools === 0, {
       sharedTools,
-      pinnedAttempts,
+      hostAttempts,
     });
 
     let ownReplay: unknown;
@@ -133,33 +132,6 @@ async function main() {
       String(ownReplay),
     );
 
-    // Each kept history fails replay with nondeterminism if its rule's patch is removed.
-    const kept = (name: string) => fileURLToPath(new URL(`./histories/${name}`, import.meta.url));
-    for (const older of [
-      { path: process.env.OLD_POLICY_HISTORY ?? kept("before-the-migration-rule.json"),
-        what: "before a started failure stopped migrating" },
-      { path: process.env.END_TURN_HISTORY ?? kept("before-the-lost-host-rule.json"),
-        what: "before a lost host stopped ending the turn" },
-    ]) {
-      const before = await readFile(older.path, "utf8").catch(() => undefined);
-      if (before === undefined) {
-        console.log(`SKIP a history from ${older.what} (${older.path} is not here)`);
-        continue;
-      }
-      let oldReplay: unknown;
-      await Worker.runReplayHistory(
-        { workflowsPath: fileURLToPath(new URL("../src/workflows.ts", import.meta.url)) },
-        historyFromJSON(JSON.parse(before)),
-      ).catch((err) => {
-        oldReplay = err;
-      });
-      check(
-        `and one written ${older.what}, through its patch`,
-        oldReplay === undefined,
-        String(oldReplay).slice(0, 200),
-      );
-    }
-
     console.log(
       failures.length === 0
         ? "replay-check: OK"
@@ -167,8 +139,8 @@ async function main() {
     );
   } finally {
     shared.shutdown();
-    pinned.shutdown();
-    await Promise.allSettled([running, runningPinned]);
+    host.shutdown();
+    await Promise.allSettled([running, runningHost]);
     await connection.close();
     native.close();
   }

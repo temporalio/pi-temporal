@@ -21,14 +21,14 @@ import {
   type TurnToolCallOutcome,
 } from "@earendil-works/pi-coding-agent";
 import { makeActivities } from "../src/activities.js";
-import { makeSteppedStep } from "../src/l2-step.js";
+import { makeSteppedStep } from "../src/stepped-step.js";
 import * as pending from "../src/pending.js";
 
 class Cancelled extends Error {}
 for (const { failure, atSeal } of [
   { failure: new Cancelled(), atSeal: false },
-  { failure: new Error("pinned tool attempt timed out"), atSeal: false },
-  { failure: new Error("pinned seal attempt timed out"), atSeal: true },
+  { failure: new Error("host-queue tool attempt timed out"), atSeal: false },
+  { failure: new Error("host-queue seal attempt timed out"), atSeal: true },
   { failure: new Cancelled(), atSeal: true },
 ]) {
   const root = await mkdtemp(join(tmpdir(), "pi-interrupted-seal-"));
@@ -40,7 +40,7 @@ for (const { failure, atSeal } of [
   let finished!: () => void;
   const completed = new Promise<void>((resolve) => { finished = resolve; });
   let nonCancellable = false;
-  let pinnedSeals = 0;
+  let hostSeals = 0;
   let postRun: boolean | undefined;
 
   try {
@@ -63,9 +63,9 @@ for (const { failure, atSeal } of [
     const step = makeSteppedStep({
       activities: {
         ...activities,
-        runModelCall: async () => ({ calls, sequential: false, ended: false, queue: "pinned" }),
+        runModelCall: async () => ({ calls, sequential: false, ended: false, queue: "host" }),
       },
-      pinnedTo: () => ({
+      onHost: () => ({
         async runToolCall(input) {
           if (input.call.id === "cancelled") {
             await completed;
@@ -81,7 +81,7 @@ for (const { failure, atSeal } of [
           return { outcome: "settled" };
         },
         async sealStep() {
-          pinnedSeals++;
+          hostSeals++;
           if (atSeal) throw failure;
           throw new Error("the failed step must use the transcript-only seal");
         },
@@ -93,10 +93,16 @@ for (const { failure, atSeal } of [
         try { return await fn(); } finally { nonCancellable = false; }
       },
     });
-    await assert.rejects(
-      step({ sessionId: "session", sessionFile: file, step: 1, promptId: "prompt", text: "run" }),
-      (error) => error === failure,
-    );
+    const ran = step({
+      sessionId: "session",
+      sessionFile: file,
+      step: 1,
+      promptId: "prompt",
+      text: "run",
+    });
+    // A stop ends the turn. A lost host doesn't: the step is recorded and the turn goes on.
+    if (failure instanceof Cancelled) await assert.rejects(ran, (error) => error === failure);
+    else assert.equal((await ran).done, false);
     await pending.sweepResults(file);
     const results = JSON.parse(await readFile(file, "utf8")) as TurnToolCallOutcome[];
     assert.equal(results[0]?.message.toolCallId, "finished");
@@ -104,7 +110,7 @@ for (const { failure, atSeal } of [
     assert.deepEqual(results[0]?.message.content, [{ type: "text", text: "finished tool output" }]);
     assert.equal(results[1]?.message.toolCallId, "cancelled");
     assert.equal(postRun, false);
-    assert.equal(pinnedSeals, atSeal ? 1 : 0);
+    assert.equal(hostSeals, atSeal ? 1 : 0);
     console.log(
       `PASS a completed result survives ${
         failure instanceof Cancelled ? "cancellation" : "a started-attempt failure"

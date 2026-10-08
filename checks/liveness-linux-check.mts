@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir, uptime } from "node:os";
 import { join } from "node:path";
-import * as worktree from "../src/worktree.js";
+import * as worktree from "../src/tree/worktree.js";
 
 const failures: string[] = [];
 const check = (what: string, ok: boolean, detail?: unknown) => {
