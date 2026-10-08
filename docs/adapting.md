@@ -19,7 +19,9 @@ behind a guard. Most agent loops need some change for that. Pi needed its fork.
 | `runToolCall(id, signal)` | Runs one recorded call and reports the outcome. Writes nothing. |
 | `sealStep(outcomes, options)` | Writes the step's outcomes in the model's order and says whether the turn is over. |
 | `answered`, `asked`, `unanswered`, `endsWithResponse`, `lastAnswer` | Reads the session, so a retry can tell what an earlier attempt did. |
+| `abort()`, `waitForIdle()`, `dispose()` | Stops the running work, waits for work the session started after a seal, and closes it. |
 | `spend()`, `latestEntry`, `appendEntry` | Token totals, and a place for the core's bookkeeping. |
+| `openRecord(file, guard)` | The session's record alone, without the model, for one bookkeeping entry. |
 | `unknownOutcome(call)`, `notRunOutcome(call)` | What the model is told about a call that may have run, or never started. |
 
 Then wire it the way [`src/pi/activities.ts`](../src/pi/activities.ts) does:
@@ -47,8 +49,8 @@ makeCoreActivities({ agent: yourAgent(options), hostQueue });
 | if you don't need | delete |
 |---|---|
 | Workers on different hosts sharing a project | `src/tree/`, and the `store` option |
-| a retry and timeout per tool call | stepped mode: `src/core/stepped-step.ts` and the three stepped Activities |
-| a Workflow behind each live turn | `src/pi/local-turn-*` and its Worker in the extension |
+| a retry and timeout per tool call | stepped mode: `src/core/stepped-step.ts`, `makeSteppedStep` in `workflow.ts`, and the three stepped Activities |
+| a Workflow behind each live turn | `src/pi/local-turn-*`, its export in `src/workflow-bundle.ts`, and its Worker in the extension |
 | bounds on spend | `TurnBudget`, `overBudget`, and the deadline scope in `runTurn` |
 | schedules | `adoptProject`, `template`, and `cli.ts schedule` |
 

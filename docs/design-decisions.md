@@ -85,7 +85,9 @@ a host's local state.
 | tool call, shared queue | `PI_TEMPORAL_TOOL_TIMEOUT_MINUTES` | 20 | failures before the claim, such as a host refusing the project |
 | tool call, host queue | same | 1 | a second attempt's queue timeout couldn't rule out the first still running |
 | seal | 30 minutes | 10, or 3 on a host queue | fenced and safe to repeat |
-| everything | 120 minutes total | | a unit that keeps timing out can't hold the session for days |
+| model call, tool call, seal | 120 minutes total, or a longer tool timeout | | a unit that keeps timing out can't hold the session for days |
+| model call, tool call, seal | 30-second heartbeat | | a Worker that died is found in seconds, not at the timeout |
+| retire, adopt a template | 5 and 30 minutes total | 3 and 10 | housekeeping, which must not hold a run open |
 
 The agent retries its provider on its own, inside the seal, and counts those retries in
 `agentState`. So the Activity retries are for a lost Worker or storage, not for the model.
@@ -122,4 +124,8 @@ its Workflow and Activity ids.
 Prompts, answers, and error text pass through history, and for a coding agent they often hold
 code or secrets. `PI_TEMPORAL_CODEC_KEY` turns on an AES-GCM payload codec in every client and
 Worker, and the server then stores only ciphertext. The UI needs a codec server with the same key
-to show them.
+to show them. Search attributes, such as `PiSessionState`, are never encrypted.
+
+The codec still reads a plain payload, so history written before the key was set stays readable.
+That also means it doesn't guard against someone who can write history directly. It protects
+what the server stores, not the server's write path.

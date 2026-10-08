@@ -149,7 +149,9 @@ sequential tool calls, so a running call can exceed them.
 
 The standard Temporal settings work too: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`,
 `TEMPORAL_API_KEY`, the `TEMPORAL_TLS_*` variables, and a `TEMPORAL_PROFILE` in `temporal.toml`.
-A `PI_TEMPORAL_*` setting wins where both are set.
+Where both set a credential, the `PI_TEMPORAL_*` one wins, and a profile's other TLS settings, such
+as its CA, still apply. Tools never see either set of credentials. They can still read a
+`temporal.toml` on disk, so keep it out of the project directory.
 
 For Temporal Cloud, export an API key with the namespace's address before you start a Worker or
 run the CLI.

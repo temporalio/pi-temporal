@@ -1,7 +1,8 @@
 // Not a check. Records the histories `replay-check` replays, one per kind of session run, into
-// `checks/histories/`. Run it when a change to the Workflows is meant to change what they do, and
-// commit the new files next to the old ones. A history from an older release that no longer
-// replays means running sessions of that release would break on upgrade.
+// `checks/histories/`, named with today's date so older ones are kept. Run it when a change to the
+// Workflows is meant to change what they do, and commit the new files next to the old ones. A
+// history from an older release that no longer replays means running sessions of that release
+// would break on upgrade.
 //
 // Needs a Temporal server, no model key. Usage: npx tsx checks/record-histories.mts
 
@@ -99,7 +100,9 @@ const save = async (name: string, handle: WorkflowHandle, runId?: string) => {
     "workflow", "show", "--workflow-id", handle.workflowId,
     ...(runId ? ["--run-id", runId] : []), "--output", "json", "--address", address,
   ], { maxBuffer: 64 * 1024 * 1024 });
-  await writeFile(`${out}${name}.json`, stdout);
+  // Never overwrites. An older file stands for sessions an older release may still be running.
+  const today = new Date().toISOString().slice(0, 10);
+  await writeFile(`${out}${name}-${today}.json`, stdout, { flag: "wx" });
   console.log(`recorded ${name}`);
 };
 

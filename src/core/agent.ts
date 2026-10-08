@@ -79,7 +79,7 @@ export interface AgentSession {
   answered(callId: string): boolean;
   /** Whether the latest response asked for `callId`. An older response can reuse the id. */
   asked(callId: string): boolean;
-  /** Calls the latest response asked for that have no result yet. */
+  /** Calls in the session that have no result yet. */
   unanswered(): readonly string[];
   /** Whether the latest entry in the session is a model response. */
   endsWithResponse(): boolean;
