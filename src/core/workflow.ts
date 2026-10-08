@@ -83,13 +83,13 @@ const { runStep } = proxyActivities<{
   summary: "step",
 });
 
-// One model call. Each attempt is a paid call, so fewer attempts than the other units, and a
-// shorter timeout, so a provider stream that hangs ends long before the step's cap. Retries here
-// are for a lost Worker or storage. Pi retries the provider inside the seal, with its own budget.
+// One model call, with a shorter timeout, so a provider stream that hangs ends long before the
+// step's cap. Most retries come before the call, from a host that refuses the project, and cost
+// nothing. A billed retry needs a Worker lost during the call. Pi retries the provider itself,
+// inside the seal, with its own budget.
 const { runModelCall } = proxyActivities<SteppedActivities>({
   ...cappedOptions,
   startToCloseTimeout: "10 minutes",
-  retry: { maximumAttempts: 5, initialInterval: "2 seconds", maximumInterval: "1 minute" },
   summary: "model call",
 });
 
