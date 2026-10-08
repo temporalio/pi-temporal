@@ -47,7 +47,8 @@ export async function claimDispatch(
   step: number,
   callId: string,
 ): Promise<boolean> {
-  await mkdir(dirFor(sessionFile, turn, step), { recursive: true });
+  // Owner only. Kept results hold tool output until the seal writes it to the session.
+  await mkdir(dirFor(sessionFile, turn, step), { recursive: true, mode: 0o700 });
   try {
     await writeFile(dispatchPath(sessionFile, turn, step, callId), "", {
       encoding: "utf8",
@@ -94,7 +95,7 @@ export async function keepResult(
   // Unique per writer. A timed-out attempt may still be writing while its retry writes too.
   const scratch = `${target}.${randomUUID()}.writing`;
   try {
-    await writeFile(scratch, JSON.stringify(outcome), "utf8");
+    await writeFile(scratch, JSON.stringify(outcome), { encoding: "utf8", mode: 0o600 });
     await rename(scratch, target);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;

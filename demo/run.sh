@@ -28,6 +28,8 @@ sessions="$name-sessions"
 queue="$name"
 session="demo-$run_id"
 image="pi-temporal:demo"
+# Pinned by digest. Dependabot reads the copy in docker/compose.yml, so change both together.
+admin_tools="temporalio/admin-tools:1.29@sha256:4a17b5be706c56a9238fb7b5b32a36966cee14939658b20597837b2443b277c8"
 
 case "$restart_mode" in
   replace | start) ;;
@@ -98,8 +100,8 @@ docker volume create "$sessions" >/dev/null || die "could not create volume $ses
 
 say "starting a Temporal dev server (UI on http://localhost:$ui_port)"
 docker run -d --name "$name-temporal" --network "$net" \
-  -p "$grpc_port:7233" -p "$ui_port:8233" \
-  --entrypoint temporal temporalio/admin-tools:1.29 \
+  -p "127.0.0.1:$grpc_port:7233" -p "127.0.0.1:$ui_port:8233" \
+  --entrypoint temporal "$admin_tools" \
   server start-dev --ip 0.0.0.0 --ui-ip 0.0.0.0 --log-level warn \
   --search-attribute PiSessionState=Keyword >/dev/null \
   || die "the Temporal server did not start"

@@ -11,12 +11,14 @@ name: pi-temporal-l3
 services:
   # The dev server. `--ip 0.0.0.0` so other containers reach it by service name.
   temporal:
-    image: temporalio/admin-tools:1.29
+    image: temporalio/admin-tools:1.29@sha256:4a17b5be706c56a9238fb7b5b32a36966cee14939658b20597837b2443b277c8
     # The image's entrypoint is `sleep infinity`, so override it.
     entrypoint: ["temporal"]
     command: ["server", "start-dev", "--ip", "0.0.0.0", "--log-level", "warn"]
     ports:
-      - "7242:7233"
+      # Loopback only. The dev server has no auth, and anyone who reaches it can start Workflows
+      # that run Pi's tools, bash included, in Workers that hold the model key.
+      - "127.0.0.1:7242:7233"
     healthcheck:
       test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
       interval: 5s

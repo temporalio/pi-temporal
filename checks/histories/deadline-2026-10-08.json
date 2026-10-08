@@ -25,7 +25,7 @@
         },
         "workflowTaskTimeout": "10s",
         "originalExecutionRunId": "01a11a03-16ae-74e2-a5ce-338aec02504e",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "firstExecutionRunId": "01a11a03-16ae-74e2-a5ce-338aec02504e",
         "attempt": 1,
         "firstWorkflowTaskBackoff": "0s",
@@ -54,7 +54,7 @@
       "taskId": "1689878",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "2",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "e27f268d-03e6-41fd-9478-ab386164eb78",
         "historySizeBytes": "425",
         "workerVersion": {
@@ -70,7 +70,7 @@
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "2",
         "startedEventId": "3",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "workerVersion": {
           "buildId": "@temporalio/worker@1.22.0+ef85623cd8aeadfdd2c0f7f0dcbc743a76ac43222fd14ac3423f350093ad823b"
         },
@@ -114,7 +114,7 @@
             }
           ]
         },
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "header": {}
       }
     },
@@ -125,7 +125,7 @@
       "taskId": "1689885",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "18563@Moes-MacBook-Pro.local-fdc40950774c4e34ae29a3d11963efd0",
+          "name": "recorder@pi-temporal-fdc40950774c4e34ae29a3d11963efd0",
           "kind": "TASK_QUEUE_KIND_STICKY",
           "normalName": "pi-histories-eaf87e58"
         },
@@ -140,7 +140,7 @@
       "taskId": "1689886",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "7",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "request-from-RespondWorkflowTaskCompleted",
         "historySizeBytes": "620",
         "workerVersion": {
@@ -156,7 +156,7 @@
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "7",
         "startedEventId": "8",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "workerVersion": {
           "buildId": "@temporalio/worker@1.22.0+ef85623cd8aeadfdd2c0f7f0dcbc743a76ac43222fd14ac3423f350093ad823b"
         },
@@ -196,7 +196,7 @@
         "timerId": "1",
         "startedEventId": "5",
         "workflowTaskCompletedEventId": "9",
-        "identity": "18563@Moes-MacBook-Pro.local"
+        "identity": "recorder@pi-temporal"
       }
     },
     {
@@ -293,7 +293,7 @@
       "taskId": "1689905",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "18563@Moes-MacBook-Pro.local-fdc40950774c4e34ae29a3d11963efd0",
+          "name": "recorder@pi-temporal-fdc40950774c4e34ae29a3d11963efd0",
           "kind": "TASK_QUEUE_KIND_STICKY",
           "normalName": "pi-histories-eaf87e58"
         },
@@ -308,7 +308,7 @@
       "taskId": "1689909",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "16",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "d353a602-eb74-4910-b960-7fea61e3974a",
         "historySizeBytes": "2264",
         "workerVersion": {
@@ -324,7 +324,7 @@
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "16",
         "startedEventId": "17",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "workerVersion": {
           "buildId": "@temporalio/worker@1.22.0+ef85623cd8aeadfdd2c0f7f0dcbc743a76ac43222fd14ac3423f350093ad823b"
         },
@@ -349,7 +349,7 @@
       "taskId": "1689916",
       "activityTaskStartedEventAttributes": {
         "scheduledEventId": "14",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "915b5799-51b0-4a6f-beda-3687fb9bf68a",
         "attempt": 1
       }
@@ -363,7 +363,7 @@
         "latestCancelRequestedEventId": "19",
         "scheduledEventId": "14",
         "startedEventId": "20",
-        "identity": "18563@Moes-MacBook-Pro.local"
+        "identity": "recorder@pi-temporal"
       }
     },
     {
@@ -373,7 +373,7 @@
       "taskId": "1689918",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "18563@Moes-MacBook-Pro.local-fdc40950774c4e34ae29a3d11963efd0",
+          "name": "recorder@pi-temporal-fdc40950774c4e34ae29a3d11963efd0",
           "kind": "TASK_QUEUE_KIND_STICKY",
           "normalName": "pi-histories-eaf87e58"
         },
@@ -388,7 +388,7 @@
       "taskId": "1689922",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "22",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "a9ebc22f-bcd0-415a-b772-bfe58380c8aa",
         "historySizeBytes": "2934",
         "workerVersion": {
@@ -404,7 +404,7 @@
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "22",
         "startedEventId": "23",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "workerVersion": {
           "buildId": "@temporalio/worker@1.22.0+ef85623cd8aeadfdd2c0f7f0dcbc743a76ac43222fd14ac3423f350093ad823b"
         },
@@ -459,7 +459,7 @@
       "taskId": "1689933",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "18563@Moes-MacBook-Pro.local-fdc40950774c4e34ae29a3d11963efd0",
+          "name": "recorder@pi-temporal-fdc40950774c4e34ae29a3d11963efd0",
           "kind": "TASK_QUEUE_KIND_STICKY",
           "normalName": "pi-histories-eaf87e58"
         },
@@ -474,7 +474,7 @@
       "taskId": "1689937",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "28",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "485ae564-7f43-4af1-8cf1-444750525f64",
         "historySizeBytes": "3578",
         "workerVersion": {
@@ -490,7 +490,7 @@
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "28",
         "startedEventId": "29",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "workerVersion": {
           "buildId": "@temporalio/worker@1.22.0+ef85623cd8aeadfdd2c0f7f0dcbc743a76ac43222fd14ac3423f350093ad823b"
         },
@@ -544,7 +544,7 @@
       "taskId": "1689948",
       "activityTaskStartedEventAttributes": {
         "scheduledEventId": "31",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "e3b95f29-4649-41aa-96f5-2409adafad57",
         "attempt": 1,
         "workerVersion": {
@@ -569,7 +569,7 @@
         },
         "scheduledEventId": "31",
         "startedEventId": "32",
-        "identity": "18563@Moes-MacBook-Pro.local"
+        "identity": "recorder@pi-temporal"
       }
     },
     {
@@ -579,7 +579,7 @@
       "taskId": "1689950",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "18563@Moes-MacBook-Pro.local-fdc40950774c4e34ae29a3d11963efd0",
+          "name": "recorder@pi-temporal-fdc40950774c4e34ae29a3d11963efd0",
           "kind": "TASK_QUEUE_KIND_STICKY",
           "normalName": "pi-histories-eaf87e58"
         },
@@ -594,7 +594,7 @@
       "taskId": "1689954",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "34",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "requestId": "6a68f5c3-7d1b-4bbe-afea-c98b71f67997",
         "historySizeBytes": "4598",
         "workerVersion": {
@@ -610,7 +610,7 @@
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "34",
         "startedEventId": "35",
-        "identity": "18563@Moes-MacBook-Pro.local",
+        "identity": "recorder@pi-temporal",
         "workerVersion": {
           "buildId": "@temporalio/worker@1.22.0+ef85623cd8aeadfdd2c0f7f0dcbc743a76ac43222fd14ac3423f350093ad823b"
         },

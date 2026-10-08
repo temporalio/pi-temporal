@@ -65,9 +65,12 @@ const activities = {
 };
 
 const connection = await Connection.connect({ address });
-const client = new Client({ connection, namespace: "default" });
+// A fixed identity, so a kept history names no machine or user.
+const identity = "recorder@pi-temporal";
+const client = new Client({ connection, namespace: "default", identity });
 const native = await NativeConnection.connect({ address });
 const worker = await Worker.create({
+  identity,
   connection: native,
   namespace: "default",
   taskQueue: queue,
