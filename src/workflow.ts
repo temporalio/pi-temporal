@@ -215,8 +215,8 @@ export async function piSession(
         isCancellation,
         outOfBudget: (pending) => outOfBudget(pending),
         fence,
-        // No patch gate. Replay doesn't compare activity timeouts, so a running session takes the
-        // configured timeout from its next host-queue call on.
+        // Replay doesn't compare activity timeouts, so a running session takes a changed tool
+        // timeout from its next host-queue call on.
         onHost: (queue) =>
           onHost(queue, options.toolTimeoutMinutes ?? DEFAULT_TOOL_TIMEOUT_MINUTES),
         isUnclaimed,

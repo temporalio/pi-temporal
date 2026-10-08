@@ -128,7 +128,7 @@ export async function sessionExists(
 export async function interrupt(sessionId: string) {
   const { client, connection } = await connect();
   try {
-    await client.workflow.getHandle(workflowId(sessionId)).signal("interrupt");
+    await client.workflow.getHandle(workflowId(sessionId)).signal(SIGNALS.interrupt);
   } finally {
     await connection.close();
   }

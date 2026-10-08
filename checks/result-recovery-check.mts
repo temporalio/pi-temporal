@@ -1,3 +1,9 @@
+// Checks how kept tool results recover. A second dispatch of a call that already ran reports an
+// unknown outcome, runs the tool no second time, and leaves the first result in place. A call id
+// that can't be a file name still gets a claim of its own, inside its step. No server needed.
+//
+// Usage: npx tsx checks/result-recovery-check.mts [scenario]
+
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -84,15 +90,15 @@ async function invalidCallIds() {
   const ids = ["../outside", "../../outside", "a/b", "a\\b", "a\0b", "", "x".repeat(201), "~x"];
   // Each one still gets a claim of its own, inside its step and nowhere else.
   for (const id of ids) {
-    assert.equal(await pending.noteDispatch(input.sessionFile, "invalid", 1, id), true);
-    assert.equal(await pending.noteDispatch(input.sessionFile, "invalid", 1, id), false);
+    assert.equal(await pending.claimDispatch(input.sessionFile, "invalid", 1, id), true);
+    assert.equal(await pending.claimDispatch(input.sessionFile, "invalid", 1, id), false);
   }
   const step = join(`${input.sessionFile}.pending`, "invalid", "1");
   const files = await fs.readdir(step);
   assert.equal(files.length, ids.length, "each ID has its own claim in its step");
   assert.ok(files.every((name) => name.startsWith("~")));
   assert.deepEqual(await fs.readdir(join(`${input.sessionFile}.pending`, "invalid")), ["1"]);
-  assert.equal(await pending.noteDispatch(input.sessionFile, "valid", 1, "call_123-abc"), true);
+  assert.equal(await pending.claimDispatch(input.sessionFile, "valid", 1, "call_123-abc"), true);
   console.log("PASS invalid call IDs get a claim of their own inside their step");
 }
 

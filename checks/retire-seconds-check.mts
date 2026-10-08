@@ -45,3 +45,12 @@ console.log("PASS an idle exit writes the Workflow's total");
 await retireSession({ sessionFile: file, turn: "t1", sessionSeconds: 3 });
 assert.equal(latest()?.seconds, 5);
 console.log("PASS and never lowers what the record says");
+
+// A file that can't be read is not a missing one. The Activity fails, so Temporal retries it.
+const unreadable = join(file, "inside-a-file.jsonl");
+const failed = await retireSession({ sessionFile: unreadable, turn: "t1", sessionSeconds: 5 }).then(
+  () => "",
+  (err: NodeJS.ErrnoException) => err.code ?? String(err),
+);
+assert.equal(failed, "ENOTDIR");
+console.log("PASS a session file that can't be read fails the retirement instead of skipping it");

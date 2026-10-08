@@ -1,3 +1,9 @@
+// Checks how the tree lease recovers from races and storage faults. A paused contender can't
+// reuse a released epoch, a failed or late renewal doesn't extend the lease, a lost lease stays
+// lost, and an unreadable claim admits nobody. No server needed.
+//
+// Usage: npx tsx checks/lease-recovery-check.mts [scenario]
+
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";

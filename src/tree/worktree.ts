@@ -1255,7 +1255,7 @@ export async function forget(sessionFile: string, projectDir?: string): Promise<
       await rm(join(shareDir(sessionFile), name), { recursive: true, force: true });
     }
     if (projectDir) await rm(heldPath(projectDir, sessionFile), { force: true });
-    // Results only. A timed-out tool Activity can outlive its Workflow, and its dispatch note is
+    // Results only. A timed-out tool Activity can outlive its Workflow, and its dispatch claim is
     // what stops it running the tool after the session is gone.
     await pending.sweepResults(sessionFile);
   };

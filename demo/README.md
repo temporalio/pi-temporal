@@ -17,8 +17,8 @@ interrupted and repeated.
 
 The task writes and runs a small program, then saves its output and replies with the result.
 Three commands sleep for 30 seconds to give the kill loop time to interrupt them. The loop waits
-for progress between kills because recovery needs a heartbeat timeout and the lease’s stale
-window.
+for progress between kills because recovery needs a heartbeat timeout, and a project tree store
+held by the killed Worker needs its lease's stale window.
 
 ## What to watch
 

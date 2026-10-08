@@ -41,7 +41,7 @@ const dispatchPath = (sessionFile: string, turn: string, step: number, callId: s
 export const stepDirFor = dirFor;
 
 /** Record that a dispatch is about to run the tool, before it can have any effect. */
-export async function noteDispatch(
+export async function claimDispatch(
   sessionFile: string,
   turn: string,
   step: number,
@@ -64,7 +64,7 @@ export async function noteDispatch(
  * Whether a dispatch already started this call. If so, do not run the tool again. The first one
  * may have had side effects before it died.
  */
-export async function wasDispatched(
+export async function dispatchClaimed(
   sessionFile: string,
   turn: string,
   step: number,
@@ -123,7 +123,7 @@ export async function readResult(
   return JSON.parse(kept) as TurnToolCallOutcome;
 }
 
-/** Drop the results kept for the given calls of one step. Their notes stay: see `sweep`. */
+/** Drop the results kept for the given calls of one step. Their claims stay: see `sweep`. */
 export async function forgetResults(
   sessionFile: string,
   turn: string,
@@ -135,7 +135,7 @@ export async function forgetResults(
   }
 }
 
-/** Drop every result a session kept, from this turn and any before it. Their notes stay. */
+/** Drop every result a session kept, from this turn and any before it. Their claims stay. */
 export async function sweepResults(sessionFile: string): Promise<void> {
   let turns: string[];
   try {
@@ -151,7 +151,7 @@ export async function sweepResults(sessionFile: string): Promise<void> {
   }
 }
 
-// Everything in a step's directory except the dispatch notes.
+// Everything in a step's directory except the dispatch claims.
 async function dropResults(dir: string): Promise<void> {
   for (const entry of await readdir(dir).catch(() => [] as string[])) {
     if (entry.endsWith(STARTED)) continue;
@@ -174,8 +174,8 @@ export async function sweep(sessionFile: string, turn: string, before: number): 
   for (const name of steps) {
     const step = Number(name);
     if (!Number.isInteger(step) || step >= before) continue;
-    // Results go, dispatch notes stay. A stalled attempt can return after the seal, and without
-    // its note the call looks fresh and the tool runs twice.
+    // Results go, dispatch claims stay. A stalled attempt can return after the seal, and without
+    // its claim the call looks fresh and the tool runs twice.
     await dropResults(join(turnDir(sessionFile, turn), name));
   }
 }

@@ -107,8 +107,9 @@ try {
   await mkdir(join(pending.stepDirFor(unreadable, "prompt", 1), "call.started"), {
     recursive: true,
   });
-  await assert.rejects(pending.wasDispatched(unreadable, "prompt", 1, "call"), { code: "EISDIR" });
-  console.log("PASS an unreadable dispatch note is not treated as absent");
+  const claimed = pending.dispatchClaimed(unreadable, "prompt", 1, "call");
+  await assert.rejects(claimed, { code: "EISDIR" });
+  console.log("PASS an unreadable dispatch claim is not treated as absent");
 } finally {
   fs.writeFile = originalWriteFile;
   syncBuiltinESMExports();

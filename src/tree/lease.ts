@@ -4,8 +4,8 @@
 // after a stalled heartbeat.
 //
 // A lease, not a fence. Callers must re-check ownership right before each write. The lock is a
-// directory of claims named by epoch. Taking over is an exclusive create of epoch N+1, and the
-// claim counts only while no newer epoch exists. A released claim stays on disk, expired, so
+// directory of epoch files. Taking over is an exclusive create of epoch N+1, and the
+// epoch counts only while no newer one exists. A released epoch stays on disk, expired, so
 // epochs only grow and a contender that paused can't reuse one.
 
 import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
@@ -26,35 +26,35 @@ const MARGIN_MS = 10_000;
 // disk and one NFSv4 mount. NFSv3 and SMB are untested.
 const lockDir = (path: string) => `${path}.lock`;
 // Epoch only, so two contenders for the same epoch compete on one path. The token goes inside.
-const claimName = (epoch: number) => String(epoch).padStart(8, "0");
+const epochName = (epoch: number) => String(epoch).padStart(8, "0");
 
 const held = (token: string) => JSON.stringify({ token, host: hostname(), pid: process.pid });
 
-interface Claim {
+interface Epoch {
   readonly epoch: number;
   readonly name: string;
   readonly mtimeMs: number;
 }
 
-// A stale handle doesn't prove a claim is gone, only that this read can't say. So the whole scan
+// A stale handle doesn't prove an epoch is gone, only that this read can't say. So the whole scan
 // runs again, and a stale handle that stays is an error. Only a missing entry is absence.
-async function claims(dir: string): Promise<Claim[]> {
+async function epochs(dir: string): Promise<Epoch[]> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await scanClaims(dir);
+      return await scanEpochs(dir);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ESTALE" || attempt >= 3) throw err;
     }
   }
 }
 
-async function scanClaims(dir: string): Promise<Claim[]> {
+async function scanEpochs(dir: string): Promise<Epoch[]> {
   const names = await readdir(dir);
-  const found: Claim[] = [];
+  const found: Epoch[] = [];
   for (const name of names) {
     const epoch = Number.parseInt(name, 10);
     if (!Number.isFinite(epoch)) continue;
-    // Another client can delete a superseded claim between the listing and the stat.
+    // Another client can delete a superseded epoch between the listing and the stat.
     const info = await stat(join(dir, name)).catch((err: NodeJS.ErrnoException) => {
       if (err.code === "ENOENT") return undefined;
       throw err;
@@ -73,8 +73,8 @@ export async function withLease<T>(
   path: string,
   body: (owned: () => Promise<boolean>, ownedNow: () => boolean) => Promise<T>,
   waitMs = 60_000,
-  // Test hook: stall between reading claims and taking the next epoch, to reproduce the race.
-  claimPauseMs = 0,
+  // Test hook: stall between reading epochs and taking the next epoch, to reproduce the race.
+  epochPauseMs = 0,
 ): Promise<T> {
   const dir = lockDir(path);
   const token = randomUUID();
@@ -86,14 +86,14 @@ export async function withLease<T>(
 
   for (;;) {
     await mkdir(dir, { recursive: true });
-    const existing = await claims(dir);
+    const existing = await epochs(dir);
     const owner = existing[existing.length - 1];
     const contended = owner !== undefined && Date.now() - owner.mtimeMs < STALE_MS;
     if (!contended) {
       const epoch = (owner?.epoch ?? 0) + 1;
-      const name = claimName(epoch);
+      const name = epochName(epoch);
       const path = join(dir, name);
-      if (claimPauseMs > 0) await new Promise((resolve) => setTimeout(resolve, claimPauseMs));
+      if (epochPauseMs > 0) await new Promise((resolve) => setTimeout(resolve, epochPauseMs));
       const confirmedAt = Date.now();
       let created = false;
       try {
@@ -111,9 +111,9 @@ export async function withLease<T>(
             if (stale.epoch < epoch) await rm(join(dir, stale.name), { force: true });
           }
           // The create alone isn't a compare-and-set. A contender that paused before it can
-          // recreate an epoch that was already superseded. So the claim counts only if it's
+          // recreate an epoch that was already superseded. So the epoch counts only if it's
           // still the newest after the cleanup.
-          if ((await claims(dir)).at(-1)?.epoch === epoch) {
+          if ((await epochs(dir)).at(-1)?.epoch === epoch) {
             // The create stamps the server's clock. Stamp ours, so a client whose clock runs ahead
             // doesn't look stale to contenders until its first refresh.
             const stamp = new Date(confirmedAt);
@@ -124,7 +124,7 @@ export async function withLease<T>(
           await rm(path, { force: true });
           continue;
         } catch (err) {
-          // Nobody can tell whether this claim holds, so expire it. Otherwise every contender,
+          // Nobody can tell whether this epoch holds, so expire it. Otherwise every contender,
           // the retry of this activity included, waits out the stale window.
           await utimes(path, new Date(0), new Date(0)).catch(() => {});
           throw err;
@@ -158,9 +158,9 @@ export async function withLease<T>(
     return false;
   };
 
-  // Past this, a contender may already have read the claim as stale and be taking the next
+  // Past this, a contender may already have read the epoch as stale and be taking the next
   // epoch. A late renewal can't win that back, because the contender doesn't read again before it
-  // claims. So the lease is lost for good before storage is even asked.
+  // takes it. So the lease is lost for good before storage is even asked.
   const expired = () => Date.now() - lastConfirmed >= STALE_MS - MARGIN_MS;
 
   let refreshing: Promise<void> | undefined;
@@ -172,7 +172,7 @@ export async function withLease<T>(
     }
     refreshing = (async () => {
       const confirmedAt = Date.now();
-      const list = await claims(dir).catch(() => undefined);
+      const list = await epochs(dir).catch(() => undefined);
       if (!list || lost) return;
       const owner = list[list.length - 1];
       if (!owner || owner.epoch !== mine.epoch) {
@@ -217,7 +217,7 @@ export async function withLease<T>(
   const owned = async () => {
     if (lost) return false;
     if (expired()) return markLost();
-    const list = await claims(dir).catch(() => undefined);
+    const list = await epochs(dir).catch(() => undefined);
     if (lost || list === undefined) return false;
     const owner = list[list.length - 1];
     if (!owner || owner.epoch !== mine.epoch) return markLost();
@@ -237,7 +237,7 @@ export async function withLease<T>(
     // Pi keeps the `ownedNow` closure for the session's life, so it must answer no after release.
     lost = true;
     await refreshing;
-    // Epoch reuse would let a paused contender overtake a new holder. Keep one expired claim.
+    // Epoch reuse would let a paused contender overtake a new holder. Keep one expired epoch.
     // Expiring it only makes the handoff faster, since it goes stale anyway. A failure here must
     // not turn the body's result into a failed activity.
     if ((await holderOf(mine.name)) === token) {
