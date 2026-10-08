@@ -24,7 +24,9 @@ if listening "$port"; then
   exit 0
 fi
 
-args=(server start-dev --port "$port" --ui-port "$ui_port" --log-level warn)
+# Registered so `PI_TEMPORAL_SEARCH_ATTRIBUTE=1` works out of the box.
+args=(server start-dev --port "$port" --ui-port "$ui_port" --log-level warn
+  --search-attribute PiSessionState=Keyword)
 [ -n "${TEMPORAL_DB_FILE:-}" ] && args+=(--db-filename "$TEMPORAL_DB_FILE")
 
 echo "Temporal on 127.0.0.1:$port    UI http://127.0.0.1:$ui_port"

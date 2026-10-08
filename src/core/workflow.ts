@@ -5,6 +5,7 @@
 //
 // Sandbox-safe: only @temporalio/workflow and type-only protocol imports. No Pi SDK, no Node.
 
+import { defineSearchAttributeKey, SearchAttributeType } from "@temporalio/common";
 import {
   ApplicationFailure,
   proxyActivities,
@@ -22,6 +23,7 @@ import {
   log,
   setCurrentDetails,
   upsertMemo,
+  upsertSearchAttributes,
   ActivityCancellationType,
   ActivityFailure,
   TimeoutFailure,
@@ -33,6 +35,7 @@ import {
   DUPLICATE_PROMPT,
   QUERIES,
   SESSION_MEMO,
+  SESSION_STATE_ATTRIBUTE,
   SIGNALS,
   UPDATES,
   sessionIdProblem,
@@ -48,6 +51,7 @@ import type {
   RunStepResult,
   SessionInput,
   Spend,
+  ToolCallInput,
   TurnBudget,
   TurnState,
 } from "./protocol.js";
@@ -73,9 +77,24 @@ const cappedOptions = {
 // recorded before the session moves on.
 const { runStep } = proxyActivities<{
   runStep(input: RunStepInput): Promise<RunStepResult>;
-}>({ ...cappedOptions, cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED });
+}>({
+  ...cappedOptions,
+  cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+  summary: "step",
+});
 
-const { runModelCall } = proxyActivities<SteppedActivities>(cappedOptions);
+// One model call. Each attempt is a paid call, so fewer attempts than the other units, and a
+// shorter timeout, so a provider stream that hangs ends long before the step's cap. Retries here
+// are for a lost Worker or storage. Pi retries the provider inside the seal, with its own budget.
+const { runModelCall } = proxyActivities<SteppedActivities>({
+  ...cappedOptions,
+  startToCloseTimeout: "10 minutes",
+  retry: { maximumAttempts: 5, initialInterval: "2 seconds", maximumInterval: "1 minute" },
+  summary: "model call",
+});
+
+// The tool's name and call id in the UI and CLI, so a stuck tool is found without the transcript.
+const toolSummary = (input: ToolCallInput) => `tool ${input.call.name} (${input.call.id})`;
 
 // A stop waits for each running tool to stop and report, so the seal that follows records what
 // the tools did instead of unknown outcomes.
@@ -87,17 +106,23 @@ export const DEFAULT_TOOL_TIMEOUT_MINUTES = 30;
 function toolCallActivities(timeoutMinutes: number) {
   // The step waits on every call, so this bounds the whole step. A bound past the cap still gets
   // room for one attempt.
-  return proxyActivities<SteppedActivities>({
+  const options = {
     ...activityOptions,
     startToCloseTimeout: `${timeoutMinutes} minutes`,
     scheduleToCloseTimeout: `${Math.max(CAP_MINUTES, timeoutMinutes)} minutes`,
     retry: { maximumAttempts: 20 },
     cancellationType: TOOL_CANCELLATION,
-  });
+  } as const;
+  return {
+    runToolCall: (input: ToolCallInput) =>
+      proxyActivities<SteppedActivities>({ ...options, summary: toolSummary(input) }).runToolCall(
+        input,
+      ),
+  };
 }
 
 // The seal may run a provider retry and a compaction, so it keeps the step-sized cap.
-const { sealStep } = proxyActivities<SteppedActivities>(cappedOptions);
+const { sealStep } = proxyActivities<SteppedActivities>({ ...cappedOptions, summary: "seal" });
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
 const HOST_SCHEDULE_TO_START_SECONDS = 30;
@@ -106,21 +131,23 @@ const HOST_SCHEDULE_TO_START = `${HOST_SCHEDULE_TO_START_SECONDS} seconds`;
 /** The same activities on one worker's own queue. The queue comes from the model call's result in
  * history, so building this per queue is deterministic on replay. */
 const onHost = (taskQueue: string, timeoutMinutes: number) => ({
-  runToolCall: proxyActivities<SteppedActivities>({
-    ...cappedOptions,
-    startToCloseTimeout: `${timeoutMinutes} minutes`,
-    // The total starts when the call is queued, so it has room for the queue wait on top of the
-    // tool's own timeout. Otherwise a long tool loses the time it waited.
-    scheduleToCloseTimeout: `${Math.max(
-      CAP_MINUTES * 60,
-      timeoutMinutes * 60 + HOST_SCHEDULE_TO_START_SECONDS,
-    )} seconds`,
-    // A retry's queue timeout cannot rule out an earlier attempt still running.
-    retry: { maximumAttempts: 1 },
-    cancellationType: TOOL_CANCELLATION,
-    taskQueue,
-    scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
-  }).runToolCall,
+  runToolCall: (input: ToolCallInput) =>
+    proxyActivities<SteppedActivities>({
+      ...cappedOptions,
+      startToCloseTimeout: `${timeoutMinutes} minutes`,
+      // The total starts when the call is queued, so it has room for the queue wait on top of the
+      // tool's own timeout. Otherwise a long tool loses the time it waited.
+      scheduleToCloseTimeout: `${Math.max(
+        CAP_MINUTES * 60,
+        timeoutMinutes * 60 + HOST_SCHEDULE_TO_START_SECONDS,
+      )} seconds`,
+      // A retry's queue timeout cannot rule out an earlier attempt still running.
+      retry: { maximumAttempts: 1 },
+      cancellationType: TOOL_CANCELLATION,
+      taskQueue,
+      scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
+      summary: toolSummary(input),
+    }).runToolCall(input),
   // A seal is fenced and safe to repeat, so it may retry. A queue timeout is
   // never retried, so a lost host still fails fast.
   sealStep: proxyActivities<SteppedActivities>({
@@ -128,6 +155,7 @@ const onHost = (taskQueue: string, timeoutMinutes: number) => ({
     retry: { maximumAttempts: 3 },
     taskQueue,
     scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
+    summary: "seal",
   }).sealStep,
 });
 
@@ -171,6 +199,13 @@ const retireOn = (taskQueue: string) =>
 export const submitPrompt = defineSignal<[PromptInput]>(SIGNALS.submitPrompt);
 export const submit = defineUpdate<Submitted, [PromptInput]>(UPDATES.submit);
 export const waitForQuiet = defineUpdate<Quiet, []>(UPDATES.waitForQuiet);
+
+const MAX_PROMPT_CHARS = 64 * 1024;
+
+const SESSION_STATE = defineSearchAttributeKey(
+  SESSION_STATE_ATTRIBUTE,
+  SearchAttributeType.KEYWORD,
+);
 
 // How many prompt ids a session remembers to refuse a resend. Far more than any client retries.
 const SEEN_PROMPTS = 200;
@@ -270,13 +305,22 @@ export async function piSession(input: SessionInput): Promise<void> {
     if (`${state}/${queue.length}` !== shown) {
       shown = `${state}/${queue.length}`;
       upsertMemo({ [SESSION_MEMO]: { state, queued: queue.length } });
+      if (options.searchAttribute) upsertSearchAttributes([{ key: SESSION_STATE, value: state }]);
     }
     setCurrentDetails(running ? `turn ${running.promptId}, step ${running.step}` : "idle");
   };
 
   const seen = [...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)];
+  // The prompt goes into history, and Continue-As-New carries a queued one on, so its size is
+  // capped. A bigger input belongs in a file the agent reads.
   const problemWith = (p: PromptInput) =>
-    !p?.promptId ? "a prompt needs an id" : !p.text?.trim() ? "a prompt needs text" : undefined;
+    !p?.promptId
+      ? "a prompt needs an id"
+      : !p.text?.trim()
+        ? "a prompt needs text"
+        : p.text.length > MAX_PROMPT_CHARS
+          ? `a prompt can't be longer than ${MAX_PROMPT_CHARS} characters`
+          : undefined;
   const enqueue = (p: PromptInput) => {
     seen.push(p.promptId);
     if (seen.length > SEEN_PROMPTS) seen.splice(0, seen.length - SEEN_PROMPTS);
@@ -467,6 +511,7 @@ export async function piSession(input: SessionInput): Promise<void> {
         log.warn("could not retire the session's directory", { sessionId: id, err: String(err) });
       await Promise.all([
         retireSession({ sessionFile: file, ...last, fence: fence() }).catch(warn),
+        // Every host since the last idle exit. One that's gone costs only its queue timeout.
         ...[...hostQueues].map((queue) => retireOn(queue)({ sessionFile: file }).catch(warn)),
       ]);
       // A prompt may have arrived during the await. Exiting now would drop an accepted prompt.

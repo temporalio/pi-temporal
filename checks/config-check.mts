@@ -35,3 +35,17 @@ dropFromEnv(["PI_TEMPORAL_TLS_CERT"]);
 assert.throws(() => connectionOptions(half), /come as a pair/);
 assert.ok(preflight(half).some((problem) => /come as a pair/.test(problem)));
 console.log("PASS half an mTLS pair never connects");
+
+// The standard Temporal settings work too, and the `PI_TEMPORAL_*` ones win over them.
+delete process.env.PI_TEMPORAL_API_KEY;
+delete process.env.PI_TEMPORAL_API_KEY_FILE;
+process.env.TEMPORAL_ADDRESS = "example.tmprl.cloud:7233";
+process.env.TEMPORAL_NAMESPACE = "example.a1b2c";
+process.env.TEMPORAL_API_KEY = "standard-key";
+const standard = fromEnv();
+assert.equal(standard.address, "example.tmprl.cloud:7233");
+assert.equal(standard.namespace, "example.a1b2c");
+assert.equal(connectionOptions(standard).apiKey, "standard-key");
+process.env.PI_TEMPORAL_API_KEY = "ours";
+assert.equal(connectionOptions(fromEnv()).apiKey, "ours");
+console.log("PASS the standard Temporal settings apply, under the PI_TEMPORAL ones");
