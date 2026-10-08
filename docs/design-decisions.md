@@ -214,6 +214,10 @@ if (patched("snapshot-between-turns")) {
 await runTurn(queue.shift()!);
 ```
 
+The session Workflow has three gates of this kind in `src/core/workflow.ts`, as worked examples:
+`budget-before-step`, `seal-waits-for-cancel` and `adopt-not-cancellable`. Each has a kept history
+recorded on the code before it.
+
 Remove the gate in two more releases.
 
 1. Once no open run started before the gated build, replace `patched(...)` with

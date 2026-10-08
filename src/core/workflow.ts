@@ -25,6 +25,7 @@ import {
   upsertSearchAttributes,
   ActivityCancellationType,
   ActivityFailure,
+  patched,
   TemporalFailure,
   TimeoutFailure,
   setWorkflowOptions,
@@ -127,13 +128,20 @@ function toolCallActivities(timeoutMinutes: number) {
   };
 }
 
-// The seal may run a provider retry and a compaction, so it keeps the step-sized cap. A stop waits
-// for it to end, so the recovery seal never writes the session file while this one still does.
-const { sealStep } = proxyActivities<SteppedActivities>({
-  ...cappedOptions,
-  cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-  summary: "seal",
-});
+// A stop waits for a seal to end, so the recovery seal never writes the session file while this one
+// still does. A history without the marker scheduled its recovery seal at once, and replays so.
+const sealCancellation = () =>
+  patched("seal-waits-for-cancel")
+    ? ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
+    : ActivityCancellationType.TRY_CANCEL;
+
+// The seal may run a provider retry and a compaction, so it keeps the step-sized cap.
+const sealStep: SteppedActivities["sealStep"] = (input) =>
+  proxyActivities<SteppedActivities>({
+    ...cappedOptions,
+    cancellationType: sealCancellation(),
+    summary: "seal",
+  }).sealStep(input);
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
 const HOST_SCHEDULE_TO_START_SECONDS = 30;
@@ -161,14 +169,15 @@ const onHost = (taskQueue: string, timeoutMinutes: number) => ({
     }).runToolCall(input),
   // A seal is fenced and safe to repeat, so it may retry. A queue timeout is
   // never retried, so a lost host still fails fast.
-  sealStep: proxyActivities<SteppedActivities>({
-    ...cappedOptions,
-    retry: { maximumAttempts: 3 },
-    cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-    taskQueue,
-    scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
-    summary: "seal",
-  }).sealStep,
+  sealStep: (input: Parameters<SteppedActivities["sealStep"]>[0]) =>
+    proxyActivities<SteppedActivities>({
+      ...cappedOptions,
+      retry: { maximumAttempts: 3 },
+      cancellationType: sealCancellation(),
+      taskQueue,
+      scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
+      summary: "seal",
+    }).sealStep(input),
 });
 
 /** A host-queue tool call has one attempt, so this timeout excludes an earlier started attempt. A
@@ -331,9 +340,7 @@ export async function piSession(input: SessionInput): Promise<void> {
     setCurrentDetails(running ? `turn ${running.promptId}, step ${running.step}` : "idle");
   };
 
-  // A set first, since a carried queue's ids are already in `seenPrompts`. Doubled, they'd shrink
-  // the window of finished ids at every Continue-As-New.
-  const seen = [...new Set([...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)])];
+  const seen = [...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)];
   // The prompt goes into history, and Continue-As-New carries a queued one on, so its size is
   // capped. A bigger input belongs in a file the agent reads.
   const problemWith = (p: PromptInput) =>
@@ -450,8 +457,9 @@ export async function piSession(input: SessionInput): Promise<void> {
         outOfBudget = (pending) => over(pending);
         // A session already past a session bound must not pay for one more step per prompt. This
         // run's own count carries across Continue-As-New. A run woken after an idle exit starts
-        // with none, and learns the session's total from its first step.
-        if (over()) {
+        // with none, and learns the session's total from its first step. A history without the
+        // marker scheduled that step, and replays so.
+        if (over() && patched("budget-before-step")) {
           outcome = "budget";
           log.warn("turn not started: the session is out of budget", {
             sessionId: id,
@@ -462,12 +470,14 @@ export async function piSession(input: SessionInput): Promise<void> {
         }
         if (!projectAdopted && options?.template) {
           // Part of the turn, so a query shows it. Not cancellable, since the copy has no
-          // heartbeat to hear a stop, and a second copy would start while it still runs.
+          // heartbeat to hear a stop, and a second copy would start while it still runs. A
+          // history without the marker sent the stop, and replays so.
           running = { promptId: prompt.promptId, step: 0 };
           show();
-          await CancellationScope.nonCancellable(() =>
-            adoptProject({ sessionFile: file, template: options.template! }),
-          );
+          const adopt = () => adoptProject({ sessionFile: file, template: options.template! });
+          await (patched("adopt-not-cancellable")
+            ? CancellationScope.nonCancellable(adopt)
+            : adopt());
           projectAdopted = true;
         }
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
