@@ -9,7 +9,9 @@
 //   the claim reports an unknown outcome rather than run the tool twice.
 // - A tool call keeps its result beside the session, and only the seal writes results in.
 
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { access } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import type {
   Agent,
@@ -36,31 +38,48 @@ import { takeFence, fenceToken } from "./fence.js";
 // Retry delay after a host refuses the project directory. Short, so the work finds a free host.
 const REFUSAL_RETRY = "2 seconds";
 const QUARANTINED = "WorktreeQuarantined";
+const OUTSIDE_SESSION_ROOT = "SessionOutsideRoot";
 
 // The session's turn time lives in its record, like its token count, so a run woken after an idle
 // exit still counts the turns before it. The Workflow's own count only spans one run.
 const SESSION_SECONDS = "pi-temporal.session-seconds";
 
-// A Worker that shuts down cancels its running Activities too, once `shutdownGraceTime` passes.
-// That isn't a user stop. The work must go on elsewhere, so this Activity keeps running until
-// the process ends, and recovery treats it like a crash. Recording a stop would end the turn.
+// A Worker shutdown cancels the attempt, but the step must go on here until the Worker exits. A
+// lang-side shutdown sends no details, only the reason.
 const shuttingDown = (context: Context) =>
   context.cancellationDetails?.workerShutdown === true ||
   (context.cancellationSignal.reason as Error | undefined)?.message === "WORKER_SHUTDOWN";
 
+// Only a cancel the Workflow asked for is a stop. A timeout, a pause, a reset or an attempt the
+// server no longer knows also cancels it, but the step must go on in a retry. Recording a stop
+// would end the turn.
+const stopAsked = (context: Context) => {
+  const details = context.cancellationDetails;
+  if (details) return details.cancelRequested;
+  // No details, as from a server too old to send them. Only a shutdown says why.
+  return !shuttingDown(context);
+};
+
 // Whether the Workflow asked this Activity to stop. Only as fresh as the last heartbeat.
 const stopRequested = () => {
   const context = Context.current();
-  return context.cancellationSignal.aborted && !shuttingDown(context);
+  return context.cancellationSignal.aborted && stopAsked(context);
 };
+
+// Cancelled, but not stopped and not shutting down: the attempt is no longer the step's. A retry
+// may already hold the same fence token, since a reset rewinds the attempt number, so the fence
+// alone can't keep this one out.
+const abandoned = (context: Context) =>
+  context.cancellationSignal.aborted && !shuttingDown(context) && !stopAsked(context);
 
 // The Activity logger, so each line carries its Workflow and Activity ids.
 const say = (level: "info" | "warn", message: string) => {
   Context.current().log[level](message);
 };
 
-// Passed to a running tool or model call, so a cancelled Activity stops it like a user stop. It
-// reports what it did, and the seal records that instead of an unknown outcome. Cancellation
+// Passed to a running tool or model call, so a cancelled Activity stops it like a user stop. After
+// a stop it reports what it did, and the seal records that instead of an unknown outcome. Any other
+// cancel but a shutdown stops it too, and the fence guard keeps what it reports out. Cancellation
 // arrives with a heartbeat, so it takes up to one heartbeat to get there.
 const cancellation = (): AbortSignal => {
   const context = Context.current();
@@ -97,9 +116,82 @@ export interface CoreActivityOptions {
   readonly store?: ProjectStore;
   // This Worker's host queue. The model call reports it, so the rest of the step runs here.
   readonly hostQueue?: string;
+  // Every session file must be directly in this directory. Anyone who can start a Workflow in the
+  // namespace picks its input, so a path from it is untrusted, and the Worker writes beside it.
+  readonly sessionRoot: string;
 }
 
-export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOptions) {
+// The session file, then the claim, fence and tree directories the core keeps beside it.
+const SIBLINGS = ["", ".pending", ".fence", ".tree"];
+// Errors that say the path itself leads nowhere. The same input gets them on every attempt.
+const PATH_ERRORS = new Set(["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"]);
+
+export function makeCoreActivities(options: CoreActivityOptions) {
+  const activities = makeUncheckedActivities(options);
+  const { sessionRoot } = options;
+  // Made here, once, so a fresh Worker takes its first session. Never a directory from input.
+  // Owner only, as the Pi agent makes it, since session files hold the whole conversation.
+  mkdirSync(sessionRoot, { recursive: true, mode: 0o700 });
+  const root = realpathSync(sessionRoot);
+  // A direct child of the root, compared by real path. A link under the root can't lead out, a
+  // root reached through a link still takes its files, and a file can't hide in another
+  // session's claim or fence directory. The parent is resolved the way the file system will
+  // resolve it, so a `..` after a link goes where the link goes.
+  const direct = (path: string) => {
+    if (!/^[^/\\]+\.jsonl$/.test(basename(path))) return false;
+    let parent: string;
+    try {
+      parent = realpathSync(dirname(path));
+    } catch (err) {
+      // Only an answer about the path refuses it. Any other error, as an EACCES from a lost
+      // mount, fails the attempt so it's retried.
+      if (!PATH_ERRORS.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
+      // A root gone under a running Worker is more likely a lost mount than a fresh install.
+      // Making it again would start sessions on a local disk where no other Worker sees them,
+      // so the attempt fails until the root is back.
+      if (!existsSync(root)) throw new Error(`the session directory ${sessionRoot} is gone`);
+      return false;
+    }
+    if (parent !== root) return false;
+    // The session and what the core keeps beside it must be real files in the root. A link
+    // there would send its writes elsewhere. Input can't make one, but anything that writes the
+    // root can, as a tool on any host of a shared session directory. The check runs before the
+    // Activity does, so a link made after it still gets through. Only the agent's own open could
+    // close that gap, and making one needs that write access already.
+    // Any other error, as from a lost mount, goes up as is, so the attempt fails and is retried.
+    const at = join(root, basename(path));
+    return SIBLINGS.every(
+      (suffix) => !lstatSync(at + suffix, { throwIfNoEntry: false })?.isSymbolicLink(),
+    );
+  };
+  const inRoot = (path: string | undefined, what: string) => {
+    if (path === undefined || direct(path)) return;
+    // The same input fails the same way on every attempt, so a retry would only repeat this.
+    throw ApplicationFailure.nonRetryable(
+      `${what} ${path} is outside the session directory ${sessionRoot}`,
+      OUTSIDE_SESSION_ROOT,
+    );
+  };
+  const checked =
+    <I extends { readonly sessionFile: string; readonly template?: string }, O>(
+      activity: (input: I) => Promise<O>,
+    ) =>
+    (input: I): Promise<O> => {
+      inRoot(input.sessionFile, "session file");
+      inRoot(input.template, "template");
+      return activity(input);
+    };
+  return {
+    runStep: checked(activities.runStep),
+    runModelCall: checked(activities.runModelCall),
+    runToolCall: checked(activities.runToolCall),
+    sealStep: checked(activities.sealStep),
+    retireSession: checked(activities.retireSession),
+    adoptProject: checked(activities.adoptProject),
+  };
+}
+
+function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOptions) {
   // Restore the project before work runs here. A step must not run against the wrong files, so
   // errors go up and send the work to a host that can do it.
   const bringTree = async (sessionFile: string, writer?: Writer) => {
@@ -137,7 +229,8 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
 
   // Runs `body` as the session file's writer, with the guard the agent asks before each append.
   // The model's response lands at the end of a stream that can run for minutes, so the guard, not
-  // a check up front, is what keeps a superseded attempt out.
+  // a check up front, is what keeps a superseded attempt out. An abandoned one is kept out the same
+  // way, so what its aborted call reports never lands.
   //
   // An Activity with no fence was scheduled by an older Workflow. It sorts below every fenced one,
   // so it can't block the run that follows.
@@ -146,9 +239,13 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
     prefix: string | undefined,
     body: (guard: () => void) => Promise<T>,
   ) => {
-    const { attempt } = Context.current().info;
-    const token = fenceToken(prefix ?? fencePrefix(0, 0), attempt);
-    return await body(await takeFence(sessionFile, token));
+    const context = Context.current();
+    const token = fenceToken(prefix ?? fencePrefix(0, 0), context.info.attempt);
+    const fence = await takeFence(sessionFile, token);
+    return await body(() => {
+      if (abandoned(context)) throw context.cancellationSignal.reason;
+      fence();
+    });
   };
 
   // The session's time before `turn`, from the latest total another turn wrote. This turn's own
@@ -235,8 +332,9 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
     return undefined;
   }
 
-  /** A model call, stopped like a user stop when the Activity is cancelled. The agent records an
-   * aborted response, and the turn ends as stopped instead of waiting out a slow provider. */
+  /** A model call, stopped like a user stop when the Activity is cancelled. After a stop the agent
+   * records an aborted response, and the turn ends as stopped instead of waiting out a slow
+   * provider. */
   const modelCall = (session: AgentSession) => session.modelCall(cancellation());
 
   async function runStep(input: RunStepInput): Promise<RunStepResult> {
@@ -267,6 +365,8 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
           let stopped = false;
           const notStarted = new Set<string>();
           for (const call of calls) {
+            // An attempt the step no longer owns starts no more tools.
+            guard();
             if (stopped || stopRequested()) {
               stopped = true;
               notStarted.add(call.id);
@@ -292,6 +392,8 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
               agentState: input.agentState,
               // A stopped turn records results only. No retry, no compaction.
               postRun: !stopped,
+              // An aborted signal would refuse the seal, and a stopped one must still record.
+              ...(stopped ? {} : { signal: cancellation() }),
             },
           );
           await session.waitForIdle();
@@ -405,8 +507,10 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
           throw new Error(`no recorded tool call ${call.id} in ${input.sessionId}`);
         }
 
-        // A stopped turn's seal may be about to take this claim. Don't race it.
-        if (stopRequested()) throw Context.current().cancellationSignal.reason;
+        // A stopped turn's seal may be about to take this claim. Don't race it. An abandoned
+        // attempt leaves the call to its retry.
+        const context = Context.current();
+        if (stopRequested() || abandoned(context)) throw context.cancellationSignal.reason;
         if (!(await pending.claimDispatch(input.sessionFile, turn, step, call.id))) {
           // An earlier dispatch started this tool, so it may have taken effect. Report unknown
           // rather than run a push or a delete again. The first attempt may still return, and
@@ -419,9 +523,15 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
         // directory, since a timed-out attempt may still be running.
         await store?.beginWrite(writer);
         const outcome = await session.runToolCall(call.id, cancellation()).finally(async () => {
-          await store?.endWrite(writer);
+          // The outcome outranks the marker. A marker left behind only holds the directory until
+          // its process is shown gone. A lost outcome turns a tool that worked into an unknown one.
+          await store?.endWrite(writer).catch((err: unknown) => {
+            say("warn", `could not clear the writer marker after ${call.id}: ${err}`);
+          });
         });
         if (outcome === undefined) return { outcome: "already-settled" };
+        // The claim stays, so the retry reports unknown. The aborted result says nothing true.
+        if (abandoned(context)) throw context.cancellationSignal.reason;
 
         await pending.keepResult(input.sessionFile, turn, step, call.id, outcome);
         // Ship from here. Only this host has the tool's changes, and the seal may land elsewhere.
@@ -435,8 +545,9 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
         session.dispose();
       }
     } catch (err) {
-      // A stop stays a stop. Typed as a failure, it would hide the cancellation.
-      if (stopRequested()) throw err;
+      // A cancel stays a cancel. Typed as a failure, it would hide it, and a non-retryable one
+      // would end a paused call for good.
+      if (stopRequested() || abandoned(Context.current())) throw err;
       if (!claimed) throw await beforeClaim(err, input);
       throw ApplicationFailure.nonRetryable(
         `tool call ${input.call.id} failed after it started: ${String(err)}`,
@@ -482,6 +593,8 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
             agentState: input.agentState,
             // A stopped turn records results only. No retry, no compaction.
             postRun: !input.interrupted,
+            // A stop that lands during a retry or compaction ends it, rather than waiting it out.
+            signal: cancellation(),
           });
           await session.waitForIdle();
           const seconds = secondsBefore(session, input.turn);
@@ -559,5 +672,5 @@ export function makeCoreActivities({ agent, store, hostQueue }: CoreActivityOpti
   return { runStep, runModelCall, runToolCall, sealStep, retireSession, adoptProject };
 }
 
-export type CoreActivities = ReturnType<typeof makeCoreActivities>;
+export type CoreActivities = ReturnType<typeof makeUncheckedActivities>;
 export type { ToolCallRef };

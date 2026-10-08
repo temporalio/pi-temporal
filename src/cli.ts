@@ -7,7 +7,8 @@ import { randomUUID } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { connect, interrupt, sessionExists, submitPrompt } from "./core/client.js";
+import { connect, interrupt, sessionStart } from "./client.js";
+import { sendPrompt, sessionExists } from "./core/client.js";
 import { flushTracing } from "./core/tracing.js";
 import {
   clientProblems,
@@ -140,12 +141,13 @@ async function start(args: string[]) {
   const sessionId = flag("session") ?? `task-${randomUUID().slice(0, 8)}`;
   // Reachable first. Seeding claims the project directory, and a server that's down would leave
   // that claim on a session that never starts, refusing every later one there.
-  const { client, connection } = await connect();
+  const { cfg, client, connection } = await connect();
   try {
     // Seed before the prompt, or the first worker to run an activity would supply the project.
     const seeded = await seedProject(sessionId, flag("project"));
     // Creates the session and delivers the prompt. Doesn't wait for the turn.
-    await submitPrompt(sessionId, text).catch(async (err: unknown) => {
+    const prompt = { promptId: randomUUID(), text };
+    await sendPrompt(client, sessionStart(cfg, sessionId), prompt).catch(async (err: unknown) => {
       // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.
       if (seeded && (await sessionExists(client, sessionId)) === false) {
         await worktree.forget(seeded.file, seeded.projectDir);

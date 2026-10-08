@@ -126,7 +126,8 @@ common_env=(
 [ -n "${PI_MODEL:-}" ] && common_env+=(-e PI_MODEL)
 
 start_worker() {
-  docker run -d --name "$name-worker-$1" --hostname "worker-$1" --network "$net" \
+  # --init reaps what a tool leaves running in the background.
+  docker run -d --init --name "$name-worker-$1" --hostname "worker-$1" --network "$net" \
     -v "$sessions:/sessions" "${common_env[@]}" "$image" >/dev/null
 }
 

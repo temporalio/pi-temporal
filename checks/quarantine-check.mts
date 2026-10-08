@@ -337,7 +337,7 @@ async function main() {
   const marked: boolean[] = [];
   const seen = { turn: "turn-5", step: 1, callId: "call-f" };
   const activities = makeActivities(
-    { projectDir: project, shipTree: true },
+    { projectDir: project, shipTree: true, sessionRoot: sessions },
     {
       openSession: async () =>
         ({

@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { loadClientConnectConfig } from "@temporalio/envconfig";
 import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
-import { sessionIdProblem, type TurnBudget } from "./core/protocol.js";
+import { durationProblem, type TurnBudget } from "./core/protocol.js";
 
 export type Profile = "local" | "fleet";
 
@@ -65,7 +65,7 @@ const secret = (name: string) =>
   given(name) ? process.env[name] : read(process.env[`${name}_FILE`])?.trim();
 
 // A typo must not quietly turn a switch off, so anything unrecognized is refused.
-function onOff(name: string, fallback: boolean): boolean {
+export function onOff(name: string, fallback: boolean): boolean {
   if (!given(name)) return fallback;
   const value = process.env[name]!.trim().toLowerCase();
   if (["1", "true", "on", "yes"].includes(value)) return true;
@@ -109,7 +109,7 @@ export function fromEnv(): Config {
     sessionDir: given("PI_SESSION_DIR")
       ? resolve(process.env.PI_SESSION_DIR!)
       : `${homedir()}/.pi-temporal/sessions`,
-    idleTimeout: process.env.PI_SESSION_IDLE_TIMEOUT ?? "5 minutes",
+    idleTimeout: durationFromEnv("PI_SESSION_IDLE_TIMEOUT", "5 minutes"),
     // A fleet wants the smaller unit, so a dead worker loses one tool call, not a whole step.
     stepped: onOff("PI_TEMPORAL_STEPPED", fleet),
     searchAttribute: onOff("PI_TEMPORAL_SEARCH_ATTRIBUTE", false),
@@ -130,7 +130,7 @@ export function fromEnv(): Config {
             key: readFileSync(key, "utf8"),
             ca: read(process.env.PI_TEMPORAL_TLS_CA),
           }
-        : process.env.PI_TEMPORAL_TLS === "1"
+        : onOff("PI_TEMPORAL_TLS", false)
           ? true
           : undefined,
     // The standard config's pair too, which it otherwise skips without a word.
@@ -334,6 +334,16 @@ export function describe(cfg: Config): Record<string, string> {
 
 export const minutesFromEnv = (name: string) => wholeFromEnv(name, "minutes");
 
+// Checked here, since the Workflow parses it. A typo found there fails every Workflow Task of the
+// session, and its prompts wait as Signals until someone notices.
+function durationFromEnv(name: string, fallback: string): string {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const problem = durationProblem(raw);
+  if (problem) throw new Error(`${name} ${problem}, got ${JSON.stringify(raw)}`);
+  return raw;
+}
+
 function wholeFromEnv(name: string, unit: string): number | undefined {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return undefined;
@@ -369,8 +379,4 @@ function budgetFromEnv(): TurnBudget | undefined {
   return set.length > 0 ? (Object.fromEntries(set) as TurnBudget) : undefined;
 }
 
-export const sessionFileFor = (sessionDir: string, sessionId: string) => {
-  const problem = sessionIdProblem(sessionId);
-  if (problem) throw new Error(`session id ${JSON.stringify(sessionId)} can't be used: ${problem}`);
-  return `${sessionDir}/${sessionId}.jsonl`;
-};
+export { sessionFileFor } from "./core/protocol.js";

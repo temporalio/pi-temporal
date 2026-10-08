@@ -20,6 +20,7 @@ import type {
   Quiet,
   RunStepInput,
   RunStepResult,
+  SealStepInput,
   SessionInput,
   ToolCallInput,
   ToolCallResult,
@@ -46,6 +47,10 @@ const activities = {
   async runStep(input: RunStepInput): Promise<RunStepResult> {
     const taken = (steps.get(input.promptId) ?? 0) + 1;
     steps.set(input.promptId, taken);
+    // Past its session bound after one step.
+    if (input.sessionId.includes("over-budget")) {
+      return { done: false, finalText: "", spent: { tokens: 100, cost: 0 } };
+    }
     if (input.text?.includes("hang")) await stoppable(60_000);
     return { done: taken >= 2, finalText: taken >= 2 ? "answered" : "", agentState: { taken } };
   },
@@ -57,11 +62,15 @@ const activities = {
     if (input.sessionId.includes("stopped")) await stoppable(60_000);
     return { outcome: "settled" };
   },
-  async sealStep(): Promise<RunStepResult> {
+  async sealStep(input: SealStepInput): Promise<RunStepResult> {
+    // Only the first seal waits for a stop. The recovery seal after it must end.
+    if (input.sessionId.includes("stop-in-seal") && !input.interrupted) await stoppable(60_000);
     return { done: true, finalText: "closed" };
   },
   async retireSession() {},
-  async adoptProject() {},
+  async adoptProject(input: { sessionFile: string }) {
+    if (input.sessionFile.includes("stop-in-adopt")) await stoppable(60_000);
+  },
 };
 
 const connection = await Connection.connect({ address });
@@ -112,6 +121,29 @@ const save = async (name: string, handle: WorkflowHandle, runId?: string) => {
 try {
   await mkdir(out, { recursive: true });
 
+  // A stop while a stepped turn seals: the seal stops, the recovery seal records the step.
+  const sealing = await session("stop-in-seal", { stepped: true });
+  await sealing.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "run" });
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  await sealing.signal(SIGNALS.interrupt);
+  await save("stop-in-seal", sealing);
+
+  // A stop while a scheduled session copies its template project.
+  const adopting = await session("stop-in-adopt", {
+    template: "/unused/template",
+    initialPrompt: { promptId: "p1", text: "run" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  await adopting.signal(SIGNALS.interrupt);
+  await save("stop-in-adopt", adopting);
+
+  // A prompt to a session already past its session bound.
+  const spent = await session("over-budget", { budget: { sessionTokens: 50 } });
+  await spent.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "one" });
+  await spent.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
+  await spent.signal(SIGNALS.submitPrompt, { promptId: "p2", text: "two" });
+  await save("over-budget", spent);
+
   // A whole-step turn, a resent prompt the session drops, and an idle exit.
   const whole = await session("whole-step");
   await whole.executeUpdate(UPDATES.submit, { args: [{ promptId: "p1", text: "run" }] });
@@ -134,6 +166,15 @@ try {
   const deadline = await session("deadline", { budget: { hardSeconds: 1 } });
   await deadline.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "hang" });
   await save("deadline", deadline);
+
+  // Values that older code took and the start check now refuses. Only a raw client sends them.
+  const loose = await session("loose-input", {
+    budget: { sessionTokens: "250" as unknown as number },
+    toolTimeoutMinutes: 0,
+  });
+  await loose.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "run" });
+  await loose.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
+  await save("loose-input", loose);
 
   // Continue-As-New between turns, with a prompt carried over.
   const carried = await session("continue-as-new", { maxHistory: 20 });

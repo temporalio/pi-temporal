@@ -48,7 +48,7 @@ for (const { failure, atSeal } of [
   try {
     await mkdir(project);
     await writeFile(join(project, "local.txt"), "local work\n");
-    const activities = makeActivities({ projectDir: project, shipTree: true }, {
+    const activities = makeActivities({ projectDir: project, shipTree: true, sessionRoot: root }, {
       openSession: async (_file, guard) => ({
         state: { messages: [] },
         async sealStep(results: TurnToolCallOutcome[], options: { postRun: boolean }) {

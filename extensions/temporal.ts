@@ -4,7 +4,7 @@
 //
 // `/background` tasks survive Pi exit because a Worker owns their sessions. The embedded Worker
 // needs the Pi fork build. It's off by default in the `fleet` profile, where the fleet's Workers
-// own the queue. `PI_TEMPORAL_EMBEDDED_WORKER` set to `1` or `0` overrides that.
+// own the queue. `PI_TEMPORAL_EMBEDDED_WORKER` set on or off overrides that.
 
 import type {
   ExtensionAPI,
@@ -12,6 +12,7 @@ import type {
   TurnExecutorContext,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   type Client,
   type Connection,
@@ -40,7 +41,8 @@ import { makeActivities } from "../src/pi/activities.js";
 import { dataConverterFor } from "../src/core/codec.js";
 import { startTracing } from "../src/core/tracing.js";
 import * as worktree from "../src/tree/worktree.js";
-import { openClient, sendPrompt, sessionExists } from "../src/core/client.js";
+import { sendPrompt, sessionExists } from "../src/core/client.js";
+import { openClient, sessionStart } from "../src/client.js";
 import {
   clientProblems,
   type Config,
@@ -48,12 +50,15 @@ import {
   dropFromEnv,
   fromEnv,
   modelApiKey,
+  onOff,
   preflight,
   sessionFileFor,
   TEMPORAL_CREDENTIAL_VARS,
 } from "../src/config.js";
 
 const STATUS_KEY = "pi-temporal";
+// Pi's live-turn Workflow beside the core session, for both Workers this extension runs.
+const WORKFLOWS = fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url));
 const POLL_MS = 2000;
 // Shorter than the poll interval, so a Worker that never answers cannot stack polls behind it.
 const QUERY_MS = 1500;
@@ -79,13 +84,13 @@ type Env = Config & {
 // session directory. The rest are extension-only.
 const env = (): Env => {
   const shared = fromEnv();
-  const embedded = process.env.PI_TEMPORAL_EMBEDDED_WORKER;
   return {
     ...shared,
     // Off by default in the fleet profile. On the fleet's queue, this pi would take other
-    // sessions' work and run it with the user's key in the user's directory.
-    embeddedWorker: embedded === undefined ? shared.profile !== "fleet" : embedded !== "0",
-    liveTurns: process.env.PI_TEMPORAL_LIVE_TURNS !== "0",
+    // sessions' work and run it with the user's key in the user's directory. Read like every
+    // other switch, so `false` means off and a typo is refused.
+    embeddedWorker: onOff("PI_TEMPORAL_EMBEDDED_WORKER", shared.profile !== "fleet"),
+    liveTurns: onOff("PI_TEMPORAL_LIVE_TURNS", true),
     provider: process.env.PI_TEMPORAL_PROVIDER,
     modelHint: process.env.PI_MODEL,
   };
@@ -137,6 +142,7 @@ export default function (pi: ExtensionAPI) {
         taskQueue: cfg.taskQueue,
         // Only when Workers on other hosts have their own copy of the project.
         ...(cfg.shipTree ? { hostQueueFor: ctx.cwd } : {}),
+        workflowsPath: WORKFLOWS,
         activities: (hostQueue) =>
           makeActivities({
             // Tools run where you are, so a background task sees the project you asked from.
@@ -146,6 +152,7 @@ export default function (pi: ExtensionAPI) {
             apiKey: modelApiKey(cfg.provider ?? ctx.model?.provider),
             shipTree: cfg.shipTree,
             hostQueue,
+            sessionRoot: cfg.sessionDir,
           }),
         shutdownForceTime: EMBEDDED_STOP,
         maxConcurrentActivities: cfg.maxActivities,
@@ -266,6 +273,7 @@ export default function (pi: ExtensionAPI) {
         taskQueue: turnQueue,
         // Only this process's live turns. The queue is already this process's own.
         activities: () => makeLocalTurnActivities(liveTurns),
+        workflowsPath: WORKFLOWS,
         shutdownForceTime: EMBEDDED_STOP,
         dataConverter: dataConverterFor(cfg),
         // The same tracing as the client that starts each turn, so a foreground prompt's trace
@@ -425,7 +433,7 @@ export default function (pi: ExtensionAPI) {
           await worktree.capture(ctx.cwd, sessionFile, { seed: true });
           seeded = true;
         }
-        await sendPrompt(client, cfg, task.sessionId, prompt);
+        await sendPrompt(client, sessionStart(cfg, task.sessionId), prompt);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
         // Only a session the server says doesn't exist is safe to drop. Otherwise it may run.

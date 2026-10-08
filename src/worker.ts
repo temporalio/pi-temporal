@@ -2,6 +2,7 @@
 // The Pi extension runs the same Worker in its own process.
 
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Runtime } from "@temporalio/worker";
 import {
   connectionOptions,
@@ -75,7 +76,7 @@ async function main() {
   ]);
 
   const tracing = cfg.tracing ? startTracing("pi-temporal-worker") : undefined;
-  const { run } = await createSessionWorker({
+  const { run, stop } = await createSessionWorker({
     address: cfg.address,
     connect: connectionOptions(cfg),
     namespace: cfg.namespace,
@@ -84,6 +85,8 @@ async function main() {
     // directory, any Worker can run any unit.
     ...(cfg.shipTree ? { hostQueueFor: projectDir } : {}),
     dataConverter: dataConverterFor(cfg),
+    // Pi's live-turn Workflow too, so this Worker serves every kind of session.
+    workflowsPath: fileURLToPath(new URL("./workflow-bundle.ts", import.meta.url)),
     workflowBundlePath: process.env.PI_TEMPORAL_WORKFLOW_BUNDLE,
     shutdownGraceTime: cfg.shutdownGrace,
     maxConcurrentActivities: cfg.maxActivities,
@@ -97,13 +100,25 @@ async function main() {
         apiKey,
         shipTree: cfg.shipTree,
         hostQueue,
+        sessionRoot: cfg.sessionDir,
       }),
   });
 
   console.log("pi-temporal worker");
   for (const [name, value] of Object.entries(describe(cfg))) console.log(`  ${name}: ${value}`);
   console.log(`  project: ${projectDir}`);
-  await run();
+  try {
+    await run();
+  } catch (err) {
+    // One poller died, but the other may still be running Activities. Let them finish within
+    // the grace, so they end here instead of waiting out a heartbeat timeout elsewhere. Bounded,
+    // since Activities don't stop for a shutdown and a long tool would hold the exit.
+    await Promise.race([
+      stop().catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, cfg.shutdownGrace + 10_000).unref()),
+    ]);
+    throw err;
+  }
   // The Worker drained. Send the spans still buffered before the process ends.
   await tracing?.shutdown();
 }

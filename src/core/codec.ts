@@ -9,6 +9,7 @@
 // closes, and for as long as archived histories are kept.
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import type { DataConverter, Payload, PayloadCodec } from "@temporalio/common";
 
 const ENCODING = "binary/encrypted";
@@ -111,11 +112,19 @@ const fromJson = (json: JsonPayload): Payload => ({
   data: Buffer.from(json.data, "base64"),
 });
 
+/** Moves failure messages into payloads, so the codec encrypts them too. */
+export const FAILURE_CONVERTER_PATH = createRequire(import.meta.url).resolve(
+  "./failure-converter.cjs",
+);
+
 /** The data converter for the configured keys, or undefined to store payloads as plain JSON. */
 export const dataConverterFor = (keys: {
   readonly codecKey?: Buffer;
   readonly codecOldKeys?: readonly Buffer[];
 }): DataConverter | undefined =>
   keys.codecKey
-    ? { payloadCodecs: [new AesGcmCodec(keys.codecKey, keys.codecOldKeys)] }
+    ? {
+        payloadCodecs: [new AesGcmCodec(keys.codecKey, keys.codecOldKeys)],
+        failureConverterPath: FAILURE_CONVERTER_PATH,
+      }
     : undefined;

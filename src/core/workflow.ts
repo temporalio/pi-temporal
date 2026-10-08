@@ -25,6 +25,7 @@ import {
   upsertSearchAttributes,
   ActivityCancellationType,
   ActivityFailure,
+  patched,
   TemporalFailure,
   TimeoutFailure,
   setWorkflowOptions,
@@ -41,6 +42,7 @@ import {
   SIGNALS,
   UPDATES,
   sessionIdProblem,
+  sessionInputProblem,
   WORKFLOW_ID_PREFIX,
 } from "./protocol.js";
 import type {
@@ -127,8 +129,20 @@ function toolCallActivities(timeoutMinutes: number) {
   };
 }
 
+// A stop waits for a seal to end, so the recovery seal never writes the session file while this one
+// still does. A history without the marker scheduled its recovery seal at once, and replays so.
+const sealCancellation = () =>
+  patched("seal-waits-for-cancel")
+    ? ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
+    : ActivityCancellationType.TRY_CANCEL;
+
 // The seal may run a provider retry and a compaction, so it keeps the step-sized cap.
-const { sealStep } = proxyActivities<SteppedActivities>({ ...cappedOptions, summary: "seal" });
+const sealStep: SteppedActivities["sealStep"] = (input) =>
+  proxyActivities<SteppedActivities>({
+    ...cappedOptions,
+    cancellationType: sealCancellation(),
+    summary: "seal",
+  }).sealStep(input);
 
 // A missing or saturated worker must not leave an unstarted dispatch queued indefinitely.
 const HOST_SCHEDULE_TO_START_SECONDS = 30;
@@ -156,13 +170,15 @@ const onHost = (taskQueue: string, timeoutMinutes: number) => ({
     }).runToolCall(input),
   // A seal is fenced and safe to repeat, so it may retry. A queue timeout is
   // never retried, so a lost host still fails fast.
-  sealStep: proxyActivities<SteppedActivities>({
-    ...cappedOptions,
-    retry: { maximumAttempts: 3 },
-    taskQueue,
-    scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
-    summary: "seal",
-  }).sealStep,
+  sealStep: (input: Parameters<SteppedActivities["sealStep"]>[0]) =>
+    proxyActivities<SteppedActivities>({
+      ...cappedOptions,
+      retry: { maximumAttempts: 3 },
+      cancellationType: sealCancellation(),
+      taskQueue,
+      scheduleToStartTimeout: HOST_SCHEDULE_TO_START,
+      summary: "seal",
+    }).sealStep(input),
 });
 
 /** A host-queue tool call has one attempt, so this timeout excludes an earlier started attempt. A
@@ -262,6 +278,13 @@ export async function piSession(input: SessionInput): Promise<void> {
     throw ApplicationFailure.nonRetryable(
       `session id ${JSON.stringify(id)} can't be used: ${problem}`,
     );
+  }
+  // Before any handler, so a buffered prompt fails with the session and no task retries forever.
+  // Behind a patch, because an open run may hold a value that older code took, and failing it
+  // now would not match its history.
+  const inputProblem = sessionInputProblem(options);
+  if (inputProblem && patched("refuse-bad-input")) {
+    throw ApplicationFailure.nonRetryable(`session ${id} can't start: ${inputProblem}`);
   }
   const file = sessionFile || `${options?.sessionDir ?? "."}/${id}.jsonl`;
   const idleTimeout = options?.idleTimeout ?? "5 minutes";
@@ -424,13 +447,6 @@ export async function piSession(input: SessionInput): Promise<void> {
           deadlineScope = new CancellationScope();
           deadlineScope.run(() => sleep(hardMs)).then(expire, () => undefined);
         }
-        if (!projectAdopted && options?.template) {
-          // Part of the turn, so stop and query apply while it waits.
-          running = { promptId: prompt.promptId, step: 0 };
-          show();
-          await adoptProject({ sessionFile: file, template: options.template });
-          projectAdopted = true;
-        }
         // Workflow state, not file totals, since the session file is shared. `Date.now()` is the
         // workflow clock, so replay agrees. Passed to the step so it can stop mid-batch.
         const over = (pending?: Pick<RunStepResult, "spent" | "total">) => {
@@ -447,6 +463,31 @@ export async function piSession(input: SessionInput): Promise<void> {
         };
         // Between the tools of one step, the step's own model call counts too.
         outOfBudget = (pending) => over(pending);
+        // A session already past a session bound must not pay for one more step per prompt. This
+        // run's own count carries across Continue-As-New. A run woken after an idle exit starts
+        // with none, and learns the session's total from its first step. A history without the
+        // marker scheduled that step, and replays so.
+        if (over() && patched("budget-before-step")) {
+          outcome = "budget";
+          log.warn("turn not started: the session is out of budget", {
+            sessionId: id,
+            promptId: prompt.promptId,
+            budget: options?.budget,
+          });
+          return;
+        }
+        if (!projectAdopted && options?.template) {
+          // Part of the turn, so a query shows it. Not cancellable, since the copy has no
+          // heartbeat to hear a stop, and a second copy would start while it still runs. A
+          // history without the marker sent the stop, and replays so.
+          running = { promptId: prompt.promptId, step: 0 };
+          show();
+          const adopt = () => adoptProject({ sessionFile: file, template: options.template! });
+          await (patched("adopt-not-cancellable")
+            ? CancellationScope.nonCancellable(adopt)
+            : adopt());
+          projectAdopted = true;
+        }
         for (let step = 1; step <= MAX_STEPS_PER_TURN; step++) {
           running = { promptId: prompt.promptId, step };
           show();
@@ -510,7 +551,8 @@ export async function piSession(input: SessionInput): Promise<void> {
         }
       } else if (err instanceof TemporalFailure) {
         outcome = "failed";
-        error = err.message;
+        // An Activity's failure only says that it failed. Its cause says why.
+        error = err.cause instanceof ApplicationFailure ? err.cause.message : err.message;
         log.warn("turn failed", { sessionId: id, promptId: prompt.promptId, error });
       } else {
         // A bug in this code, such as a `TypeError`. Thrown on, it fails the Workflow Task, and
@@ -523,9 +565,10 @@ export async function piSession(input: SessionInput): Promise<void> {
       current = undefined;
       running = undefined;
       show();
-      // Counted here so failed and interrupted turns still count. The provider billed them.
-      spent.tokens += tokens;
-      spent.cost += cost;
+      // Counted here so failed and interrupted turns still count. The provider billed them. The
+      // record's total carries turns of earlier runs, which a run woken after an idle exit lacks.
+      spent.tokens = Math.max(spent.tokens + tokens, recorded?.tokens ?? 0);
+      spent.cost = Math.max(spent.cost + cost, recorded?.cost ?? 0);
       spent.seconds = sessionSecondsBefore() + (Date.now() - startedAt) / 1000;
       finished = { promptId: prompt.promptId, outcome, finalText, error, spent: { ...spent } };
     }

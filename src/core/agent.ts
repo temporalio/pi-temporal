@@ -59,6 +59,7 @@ export interface AgentSession {
   /**
    * Record a step's outcomes, in the order the model asked for the calls, and decide whether the
    * turn goes on. `postRun` false records only: no retry, no compaction, as for a stopped turn.
+   * Stops its retry or compaction like a user stop when `signal` aborts.
    */
   sealStep(
     outcomes: readonly ToolOutcome[],
@@ -66,6 +67,7 @@ export interface AgentSession {
       readonly expectCalls: readonly string[];
       readonly agentState?: AgentState;
       readonly postRun: boolean;
+      readonly signal?: AbortSignal;
     },
   ): Promise<Sealed>;
   /** Wait for work the session started on its own after a seal, such as a compaction. */

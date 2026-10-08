@@ -34,8 +34,11 @@ call its own environment and `attempt`.
 `dispatch-check`, `stale-dispatch-check`, `seal-claim-check`, `result-recovery-check`,
 `compacted-prompt-check`, `spend-check`, `retire-seconds-check`, `quarantine-check`
 
-`shutdown-check` cancels `runStep` through its `MockActivityEnvironment`, once as a Worker shutdown
-and once as a stop.
+`shutdown-check` cancels `runStep` through its `MockActivityEnvironment` for each reason the SDK
+gives, and only a requested cancel stops it.
+
+`writer-marker-check` and `session-root-check` run the core Activities over the echo agent, with no
+Pi. `echo-journal-check` cuts the echo agent's session file mid-append.
 
 ## The Workflow with stub Activities, on a dev server
 
@@ -70,6 +73,10 @@ whose host-queue tool failed after it started.
 model, run as a child process so a check can `SIGKILL` or `SIGSTOP` it mid-Activity.
 
 `seal-check`, `fence-check`, `quarantine-routing-check`, `detached-check`
+
+`echo-check` does the same with no Pi. It runs `examples/echo/` as its README says, then
+`SIGKILL`s a Worker while the echo tool runs, and checks that a new Worker reports the tool's
+outcome as unknown instead of running it again. Start here to test your own agent.
 
 ## Docker
 

@@ -27,6 +27,10 @@ can continue after you quit.
 You can use this repo as a template for your own agent's loop. The Temporal code in `src/core/`
 uses the `Agent` interface. Pi is one implementation.
 
+- [examples/echo/](examples/echo/) is the place to start. It's a whole agent with a scripted
+  model, a Worker and a client, built on `src/core/` alone. It runs against a dev server with no
+  Pi, no model key, and no Docker.
+
 - [docs/architecture.md](docs/architecture.md) describes state ownership and the optional modules.
   It also gives a reading order for the code.
 - [docs/design-decisions.md](docs/design-decisions.md) says why each Temporal choice was made.
@@ -132,7 +136,7 @@ assumptions described in [docs/guarantees.md](docs/guarantees.md).
 | variable | what it sets | default |
 |---|---|---|
 | `PI_TEMPORAL_PROFILE` | `local` or `fleet`, the defaults below | `local` |
-| `PI_SESSION_DIR` | where session files live, shared storage in a fleet | `~/.pi-temporal/sessions` |
+| `PI_SESSION_DIR` | where session files live, shared storage in a fleet. Workers refuse a session file outside it, so it must resolve to the same absolute path on every client and Worker | `~/.pi-temporal/sessions` |
 | `PI_PROJECT_DIR` | the directory a standalone Worker's tools run in, required in `fleet` | the Worker's working directory |
 | `PI_TEMPORAL_STEPPED` | `1` runs each model call, tool call, and seal as its own Activity | off, on in `fleet` |
 | `PI_TEMPORAL_SHIP_TREE` | `1` ships the project's files between hosts | off, on in `fleet` |
@@ -251,18 +255,13 @@ The workflow's checks stop mistakes, not someone who means harm. GitHub runs the
 tagged commit has it. So protect `v*` tags with a ruleset that lets only release maintainers
 create, move or delete them.
 
-`package.json` is at `0.1.0`, so the first release only needs its tag.
+A release bumps the version first. Merge the bump to `main`, then tag that commit.
 
 ```shell
-git tag v0.1.0 origin/main
-git push origin v0.1.0
-```
-
-A later release bumps the version first. Merge the bump to `main`, then tag that commit the same
-way.
-
-```shell
-npm version 0.2.0 --no-git-tag-version
+npm version 0.3.0 --no-git-tag-version
+# After the bump is on main.
+git tag v0.3.0 origin/main
+git push origin v0.3.0
 ```
 
 ## Prior art

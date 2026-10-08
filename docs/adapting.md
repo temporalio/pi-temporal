@@ -1,7 +1,9 @@
 # Putting your own agent on it
 
 Implement `Agent` from [`src/core/agent.ts`](../src/core/agent.ts) to use the Temporal loop with
-your own agent. Pi's implementation in [`src/pi/agent.ts`](../src/pi/agent.ts) is about 230 lines.
+your own agent. Start from [`examples/echo/`](../examples/echo/). It's a whole agent over its own
+session file, with a Worker and a client, and it runs with only a dev server: no Pi, no model key,
+no Docker. Pi's implementation in [`src/pi/agent.ts`](../src/pi/agent.ts) is about 220 lines.
 The sections below describe the contract and the modules you can omit.
 
 ## What your agent must provide
@@ -16,23 +18,41 @@ through a write guard. Most agent loops need changes to support this. Pi needed 
 | `hasPrompt(id)`, `recordPrompt(id, text)` | Puts the prompt in the session once, without running the model. |
 | `modelCall(signal)` | One model call. Records the response and its tool calls, runs none. |
 | `runToolCall(id, signal)` | Runs one recorded call and reports the outcome. Writes nothing. |
-| `sealStep(outcomes, options)` | Writes the step's outcomes in the model's order and says whether the turn is over. |
+| `sealStep(outcomes, options)` | Writes the step's outcomes in the model's order and says whether the turn is over. Stops its retry or compaction when `options.signal` aborts. |
 | `answered`, `asked`, `unanswered`, `endsWithResponse`, `lastAnswer` | Reads the session, so a retry can tell what an earlier attempt did. |
 | `waitForIdle()`, `dispose()` | Waits for work the session started after a seal, and closes it. |
 | `spend()`, `latestEntry`, `appendEntry` | Token totals, and a place for the core's bookkeeping. |
 | `openRecord(file, guard)` | The session's record alone, without the model, for one bookkeeping entry. |
 | `unknownOutcome(call)`, `notRunOutcome(call)` | What the model is told about a call that may have run, or never started. |
 
-Use [`src/pi/activities.ts`](../src/pi/activities.ts) as the wiring example.
+Use [`examples/echo/worker.ts`](../examples/echo/worker.ts) as the wiring example. It imports
+nothing outside `src/core/`.
 
 ```ts
-makeCoreActivities({ agent: yourAgent(options), hostQueue });
+const worker = await createSessionWorker({
+  address,
+  namespace,
+  taskQueue,
+  // Anyone who can start a Workflow picks its input. The Worker writes only under this directory.
+  activities: () => makeCoreActivities({ agent: yourAgent(options), sessionRoot }),
+});
+await worker.run();
 ```
+
+`createSessionWorker` registers the core session Workflow (`src/core/workflows.ts`) unless you
+pass `workflowsPath`. Pi passes `src/workflow-bundle.ts`, which adds its live-turn Workflow.
+To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, prompt)` from
+`src/core/client.ts`, where `input` is the `SessionInput` the session starts with.
+[`examples/echo/send.ts`](../examples/echo/send.ts) sends one and waits for the answer.
 
 ## What must hold
 
 - Every append must call the guard first. An unguarded write can let a superseded attempt change
   the session.
+- A crash can cut the last entry in half. Reading must skip a cut entry, and the next append must
+  end it first, so it can't join the new entry. Writes must only append. A superseded writer can
+  still write once after its guard, and a rewrite then could erase what a newer writer added.
+  `echo-journal-check` shows the echo agent doing this.
 - Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
   the seal must write their results together to avoid conflicting writes.
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.
@@ -50,6 +70,21 @@ makeCoreActivities({ agent: yourAgent(options), hostQueue });
   needs that outcome to record what happened.
 - Keep state between steps in `agentState`. Each Activity opens the session again, so a retry
   count kept only in memory would reset at each step.
+- The session is one file path. Its sibling paths (`${sessionFile}.*`) must be writable too,
+  since dispatch claims, kept results and fence tokens live there.
+- A failure that won't change on retry must throw `ApplicationFailure.nonRetryable`, such as a
+  bad key or a session file that can't be parsed. Any other error burns all of the Activity's
+  retries first.
+- Retry the provider yourself, inside the step. The Activity retry policy assumes the agent
+  does, and only retries what a lost Worker left behind.
+- Return what each method promises.
+  - `runToolCall` returns `undefined` when the session already holds a result for the call.
+  - `recordPrompt` returns false when it didn't record the prompt. The turn fails without retry.
+  - `prepareStep` returns `"busy"` when something else drives the session. The Activity fails
+    and Temporal retries it.
+  - `ModelCall.ended` means the response ended the run, such as an aborted call. Nothing is
+    dispatched, but the step is still sealed.
+  - `ModelCall.sequential` means the step's tools must run one at a time, in order.
 
 ## What you can delete
 
@@ -57,8 +92,9 @@ makeCoreActivities({ agent: yourAgent(options), hostQueue });
 |---|---|
 | Workers on different hosts sharing a project | `src/tree/`, and the `store` option |
 | a retry and timeout per tool call | stepped mode: `src/core/stepped-step.ts`, `makeSteppedStep` in `workflow.ts`, and the three stepped Activities. `src/pi/local-turn-workflow.ts` imports `dispatchStepCalls` from `stepped-step.ts`, so change it too, or delete live turns |
-| Activities that use a host's local files | host queues: `src/core/queue.ts`, the `hostQueueFor` option of `createSessionWorker`, and `onHost` and `retireOn` in `workflow.ts`. Only tree shipping turns them on |
-| a Workflow behind each live turn | `src/pi/local-turn-*`, its export in `src/workflow-bundle.ts`, and its Worker in the extension |
+| Activities that use a host's local files | host queues: `src/core/queue.ts`, the `hostQueueFor` option of `createSessionWorker`, `onHost` and `retireOn` in `workflow.ts`, `onHost` and `viaHost` in `stepped-step.ts`, and the `hostQueue` option of `makeCoreActivities` in `activities.ts`. Only tree shipping turns them on |
+| a Workflow behind each live turn | `src/pi/local-turn-*`, its export in `src/workflow-bundle.ts`, and its Worker in the extension. A Worker with no `workflowsPath` never loads it |
+| Pi's names | they are in every recorded history: `WORKFLOW_TYPE` (`piSession`, also the Workflow function's name), the `pi-session-` id prefix, the memo name `SESSION_MEMO`, the `PiSessionState` search attribute, and the static summary in `sendPrompt`. Renaming them breaks `replay-kept-check`, so delete `checks/histories/` and record yours with `checks/record-histories.mts` |
 | bounds on spend | `TurnBudget`, `overBudget`, and the deadline scope in `runTurn` |
 | schedules | `adoptProject`, `template`, and `cli.ts schedule` |
 

@@ -103,13 +103,14 @@ function wrap(session: PiSession): AgentSession {
       };
     },
     runToolCall: (callId, signal) => session.runToolCall(callId, { signal }),
-    async sealStep(outcomes, { expectCalls, agentState, postRun }) {
+    async sealStep(outcomes, { expectCalls, agentState, postRun, signal }) {
       const state = (agentState ?? {}) as PiState;
       const sealed = await session.sealStep(outcomes as TurnToolCallOutcome[], {
         expectCalls,
         retryAttempt: state.retryAttempt ?? 0,
         overflowRecoveryAttempted: state.overflowRecoveryAttempted,
         postRun,
+        signal,
       });
       const next: PiState = {
         retryAttempt: sealed.retryAttempt,

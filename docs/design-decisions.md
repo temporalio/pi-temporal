@@ -119,22 +119,29 @@ The agent retries its provider on its own, inside the seal, and counts those ret
 
 A stop cancels the turn's scope. Tool and model Activities use `WAIT_CANCELLATION_COMPLETED`, so
 the Workflow waits for each to stop and report. The Activity passes its cancellation signal to the
-tool and the model call, which end like a user stop in the agent. The recovery seal then records
-what each tool reported instead of unknown outcomes. Cancellation reaches an Activity only with a
-heartbeat's answer, so Workers send heartbeats at least every 3 seconds.
+tool and the model call, which end like a user stop in the agent. The seal gets it too, since its
+retry or compaction is another model call. The recovery seal then records what each tool reported
+instead of unknown outcomes. Once a stop is asked the server doesn't retry a seal, so a lost seal
+attempt comes back as a timeout, and the recovery seal runs for that as well. Cancellation reaches
+an Activity only with a heartbeat's answer, so Workers send heartbeats at least every 3 seconds.
 
-## A Worker shutdown is not a stop
+## Only a requested cancel is a stop
 
-A deploy must not end turns. When a Worker shuts down, the SDK waits `shutdownGraceTime` and then
-cancels the Activities still running. The Activities tell this apart from a stop through
-`Context.cancellationDetails.workerShutdown`. They keep running until the process ends, so
-recovery treats it like a crash and the step retries on another Worker. A user stop still ends the
-call, and the seal records what it did.
+A deploy must not end turns. The SDK cancels a running Activity for several reasons: the Workflow
+asked, the Worker shuts down, the attempt timed out, an operator paused or reset it, or the server
+no longer knows the attempt (`notFound`, as after the Workflow is terminated). Only the first is a
+user stop, and `Context.cancellationDetails.cancelRequested` says which. A stop ends the call, and
+the seal records what it did. A shutdown leaves the Activity running, and the SDK first waits
+`shutdownGraceTime`. Any other cancel aborts the model call or tool too, and a whole step runs no
+more tools, since a retry takes the step or nobody waits for it. That attempt records no stop: the
+fence guard refuses every write once it's cancelled, and a tool call keeps no result. The guard
+matters even past the fence token, since a reset rewinds the attempt number and a retry can take
+the same token.
 
 The standalone Worker sets `shutdownGraceTime` to 60 seconds by default, through
 `PI_TEMPORAL_SHUTDOWN_GRACE_SECONDS`. Most model calls finish in that time, so a step isn't cut off
 and paid for twice. `docker/compose.yml` sets `stop_grace_period: 90s`, past the grace, so Docker
-doesn't kill the process first. `shutdown-check` shows the difference between the two cancels.
+doesn't kill the process first. `shutdown-check` shows each kind of cancel.
 
 ## A bug fails the Workflow Task, not the turn
 
@@ -157,6 +164,12 @@ limit there.
 
 Workers send heartbeats at least every 3 seconds (`maxHeartbeatThrottleInterval`). The SDK would
 send them about every 24 seconds here, and a stop would reach a running tool that much later.
+
+Some file reads on the Activity path are synchronous. The fence check lists the fence directory
+before each append, and Pi reads the whole session file when it opens one. They block the event
+loop, and heartbeats with it. On local disk that's a few milliseconds. On slow NFS with a large
+session and many slots, they can add up past the 30-second heartbeat timeout. Keep slots low on
+slow storage, or watch heartbeat timeouts in the metrics.
 
 ## Worker Versioning, and `patched()` for long sessions
 
@@ -207,6 +220,10 @@ if (patched("snapshot-between-turns")) {
 await runTurn(queue.shift()!);
 ```
 
+The session Workflow has four gates of this kind in `src/core/workflow.ts`, as worked examples:
+`budget-before-step`, `seal-waits-for-cancel`, `adopt-not-cancellable` and `refuse-bad-input`.
+Each has a kept history recorded on the code before it.
+
 Remove the gate in two more releases.
 
 1. Once no open run started before the gated build, replace `patched(...)` with
@@ -239,13 +256,31 @@ step, across Workers. The prebuilt bundle always has the Workflow interceptors, 
 about twice the size. The same image then traces or not by the variable alone. Without tracing,
 the sink drops their spans. `tracing-check` shows one trace from the client to the Activity.
 
+## Workflow input is untrusted
+
+Anyone who can start a Workflow in the namespace picks its input, and the client in this repo is
+only one way to do it. The session file in that input names where a Worker writes the session,
+its dispatch claims and its fence tokens. So the core Activities require a `sessionRoot` and
+refuse, without a retry, any session file or template that isn't a `*.jsonl` file directly in it.
+The parent is compared by real path, so a link under the root can't lead out, and a root reached
+through a link (macOS's `/var`, an NFS mount) still takes its files. A file nested deeper could sit
+in another session's claim or fence directory, so it's refused too. The Worker makes the root at
+setup if it's missing. Pi's Workers pass their session directory. `session-root-check` shows the
+refusal.
+
 ## Payloads can be encrypted
 
 Prompt and answer payloads pass through history, along with error text. Coding tasks can put
 code or secrets in those payloads. `PI_TEMPORAL_CODEC_KEY` turns on an AES-GCM payload codec
-in every client and Worker, and the server then stores only ciphertext. The UI needs a codec
-server with the same key to show them. Search attributes, such as `PiSessionState`, are never
-encrypted.
+in every client and Worker, and the server then stores only ciphertext. A failure's message and
+stack trace are plain fields by default, and tool and provider errors can quote the task. So the
+codec's failure converter moves them into a payload too (`encodeCommonAttributes`). The prebuilt
+bundle doesn't carry it, so failures the Workflow raises itself, such as a refused prompt, stay
+plain. They hold no task text. The bundle is built once for every Worker, with a key or without,
+and the converter encodes whether or not a key is set. Built into the bundle, it would hide
+every Workflow failure behind `Encoded failure` in the UI, even where no key is set. The UI
+needs a codec server with the same key to show any of this. Search attributes, such as
+`PiSessionState`, are never encrypted.
 
 The codec still reads a plain payload, so history written before the key was set stays readable.
 That also means it doesn't guard against someone who can write history directly. It protects

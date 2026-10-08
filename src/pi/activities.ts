@@ -9,6 +9,8 @@ export interface ActivityOptions extends PiOptions {
   readonly shipTree?: boolean;
   // This Worker's host queue. The model call reports it, so the rest of the step runs here.
   readonly hostQueue?: string;
+  // The directory every session file must be under. See `CoreActivityOptions`.
+  readonly sessionRoot: string;
 }
 
 export function makeActivities(opts: ActivityOptions, dependencies: PiDependencies = {}) {
@@ -16,6 +18,7 @@ export function makeActivities(opts: ActivityOptions, dependencies: PiDependenci
     agent: piAgent(opts, dependencies),
     ...(opts.shipTree ? { store: treeStore(opts.projectDir) } : {}),
     ...(opts.hostQueue === undefined ? {} : { hostQueue: opts.hostQueue }),
+    sessionRoot: opts.sessionRoot,
   });
 }
 

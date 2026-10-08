@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { sendPrompt } from "../src/core/client.js";
+import { sessionStart } from "../src/client.js";
 import { fromEnv } from "../src/config.js";
 import { UPDATES, workflowId } from "../src/core/protocol.js";
 import type { Quiet, RunStepInput, RunStepResult } from "../src/core/protocol.js";
@@ -69,7 +70,7 @@ try {
   const early = `submit-early-${randomUUID().slice(0, 8)}`;
   sessions.push(early);
   const parked = { promptId: randomUUID(), text: "run when a worker comes" };
-  const ahead = await sendPrompt(client, cfg, early, parked);
+  const ahead = await sendPrompt(client, sessionStart(cfg, early), parked);
   check("with no Worker, a prompt is still sent", ahead === undefined, ahead);
   await startWorker();
   const late = await quiet(early);
@@ -82,9 +83,9 @@ try {
   const session = `submit-${randomUUID().slice(0, 8)}`;
   sessions.push(session);
   const prompt = { promptId: randomUUID(), text: "run once" };
-  const first = await sendPrompt(client, cfg, session, prompt);
+  const first = await sendPrompt(client, sessionStart(cfg, session), prompt);
   check("a prompt to a new session starts it, with nothing ahead", first === 0, first);
-  const again = await sendPrompt(client, cfg, session, prompt);
+  const again = await sendPrompt(client, sessionStart(cfg, session), prompt);
   const done = await quiet(session);
   check("a resent prompt counts as sent", again === undefined || again === 0, again);
   check(
@@ -94,7 +95,7 @@ try {
   );
 
   const huge = { promptId: randomUUID(), text: "x".repeat(64 * 1024 + 1) };
-  const tooBig = await sendPrompt(client, cfg, session, huge).then(
+  const tooBig = await sendPrompt(client, sessionStart(cfg, session), huge).then(
     () => "",
     (err: unknown) => String(err),
   );
@@ -103,7 +104,7 @@ try {
   // With the search attribute on, a List call can filter sessions by state on the server.
   const indexed = `submit-indexed-${randomUUID().slice(0, 8)}`;
   sessions.push(indexed);
-  await sendPrompt(client, { ...cfg, searchAttribute: true }, indexed, {
+  await sendPrompt(client, sessionStart({ ...cfg, searchAttribute: true }, indexed), {
     promptId: randomUUID(),
     text: "index me",
   });
@@ -117,7 +118,8 @@ try {
   }
   check("the search attribute filters sessions by state", listed);
 
-  const empty = await sendPrompt(client, cfg, session, { promptId: randomUUID(), text: "  " }).then(
+  const blank = { promptId: randomUUID(), text: "  " };
+  const empty = await sendPrompt(client, sessionStart(cfg, session), blank).then(
     () => "",
     (err: unknown) => String(err),
   );
@@ -127,11 +129,11 @@ try {
   // queued must be refused, or it runs twice.
   const backlog = `submit-backlog-${randomUUID().slice(0, 8)}`;
   sessions.push(backlog);
-  await sendPrompt(client, cfg, backlog, { promptId: randomUUID(), text: "hold" });
+  await sendPrompt(client, sessionStart(cfg, backlog), { promptId: randomUUID(), text: "hold" });
   const queued = Array.from({ length: 205 }, () => ({ promptId: randomUUID(), text: "queued" }));
   const handle = client.workflow.getHandle(workflowId(backlog));
   for (const each of queued) await handle.signal("submitPrompt", each);
-  const resent = await sendPrompt(client, cfg, backlog, queued[0]);
+  const resent = await sendPrompt(client, sessionStart(cfg, backlog), queued[0]);
   release();
   await quiet(backlog);
   check(

@@ -7,6 +7,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
 import { makeLocalTurnActivities, type LiveTurns } from "../src/pi/local-turn-activity.js";
 import { LOCAL_TURN_WORKFLOW } from "../src/core/protocol.js";
@@ -44,6 +45,7 @@ async function main() {
     namespace: "default",
     taskQueue: queue,
     activities: () => makeLocalTurnActivities(live),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
     shutdownForceTime: "2s",
   });
   const running = worker.run().catch(() => {});
@@ -82,6 +84,27 @@ async function main() {
     await connection.close();
     await rm(root, { recursive: true, force: true });
   }
+
+  // A Worker built but never run still holds its connection. stop() must give it back.
+  const idle = await createSessionWorker({
+    address,
+    namespace: "default",
+    taskQueue: `${queue}-idle`,
+    activities: () => makeLocalTurnActivities(live),
+    workflowsPath: fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url)),
+  });
+  const idleStop = await Promise.race([
+    idle.stop().then(
+      () => "stopped",
+      (err: unknown) => `threw: ${String(err)}`,
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 10_000)),
+  ]);
+  check(
+    "stop() on a worker that never ran gives its connection back",
+    idleStop === "stopped",
+    idleStop,
+  );
 
   console.log(
     failures.length === 0

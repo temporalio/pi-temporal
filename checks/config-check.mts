@@ -5,6 +5,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connectionOptions, dropFromEnv, fromEnv, modelApiKey, preflight } from "../src/config.js";
+import { sessionInputProblem } from "../src/core/protocol.js";
 
 const dir = await mkdtemp(join(tmpdir(), "pi-config-"));
 const keyFile = join(dir, "key");
@@ -97,3 +98,24 @@ assert.equal(fromEnv().codecOldKeys?.length, 1);
 delete process.env.PI_TEMPORAL_CODEC_OLD_KEYS;
 delete process.env.PI_TEMPORAL_CODEC_KEY;
 console.log("PASS old codec keys need a current one");
+
+// The Workflow parses the idle timeout. A typo found there fails every Workflow Task.
+process.env.PI_SESSION_IDLE_TIMEOUT = "5 minuets";
+assert.throws(() => fromEnv(), /must be a duration/);
+// A bare number would be read as milliseconds.
+process.env.PI_SESSION_IDLE_TIMEOUT = "300";
+assert.throws(() => fromEnv(), /needs a unit/);
+process.env.PI_SESSION_IDLE_TIMEOUT = "90 seconds";
+assert.equal(fromEnv().idleTimeout, "90 seconds");
+delete process.env.PI_SESSION_IDLE_TIMEOUT;
+// A client's start options follow the same rule, so `send` and the env take the same values.
+assert.match(sessionInputProblem({ idleTimeout: "300" }) ?? "", /needs a unit/);
+assert.match(sessionInputProblem({ idleTimeout: "5 minuets" }) ?? "", /must be a duration/);
+assert.equal(sessionInputProblem({ idleTimeout: "90 seconds" }), undefined);
+// A typo in a switch is refused rather than read as off.
+process.env.PI_TEMPORAL_TLS = "true";
+assert.equal(fromEnv().tls, true);
+process.env.PI_TEMPORAL_TLS = "ture";
+assert.throws(() => fromEnv(), /PI_TEMPORAL_TLS must be/);
+delete process.env.PI_TEMPORAL_TLS;
+console.log("PASS a bad idle timeout or TLS switch is refused at start");

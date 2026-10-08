@@ -11,5 +11,11 @@
     "types": ["node"]
   },
   // The checks too, since they build the same protocol shapes as the workers.
-  "include": ["src/**/*.ts", "extensions/**/*.ts", "checks/**/*.mts", "scripts/**/*.mts"]
+  "include": [
+    "src/**/*.ts",
+    "extensions/**/*.ts",
+    "examples/**/*.ts",
+    "checks/**/*.mts",
+    "scripts/**/*.mts"
+  ]
 }
