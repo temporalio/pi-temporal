@@ -177,7 +177,7 @@ export interface SessionTurnOptions {
   // checks reach that path.
   readonly maxHistory?: number;
   // Bound on one tool call in stepped mode. A call that crosses it is not re-run, because its
-  // dispatch note says it started.
+  // dispatch claim says it started.
   readonly toolTimeoutMinutes?: number;
 }
 

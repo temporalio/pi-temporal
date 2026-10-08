@@ -131,13 +131,20 @@ The hard deadline stops the Workflow from waiting for the call. An external comm
 running after cancellation. Token and other wall-clock budgets are checked between steps or
 sequential tool calls, so a running call can exceed them.
 
-For Temporal Cloud or mTLS, use the API key or certificate settings below.
+For Temporal Cloud, export an API key with the namespace's address before you start a Worker or
+run the CLI.
 
 ```bash
-TEMPORAL_ADDRESS=your-ns.a1b2c.tmprl.cloud:7233 TEMPORAL_NAMESPACE=your-ns.a1b2c \
-  PI_TEMPORAL_API_KEY_FILE=/run/secrets/temporal-key
-TEMPORAL_ADDRESS=temporal.internal:7233 PI_TEMPORAL_TLS_CERT=/run/secrets/tls.crt \
-  PI_TEMPORAL_TLS_KEY=/run/secrets/tls.key PI_TEMPORAL_TLS_CA=/run/secrets/ca.crt
+export TEMPORAL_ADDRESS=your-ns.a1b2c.tmprl.cloud:7233 TEMPORAL_NAMESPACE=your-ns.a1b2c
+export PI_TEMPORAL_API_KEY_FILE=/run/secrets/temporal-key
+```
+
+For a cluster with mTLS, export the certificate pair instead.
+
+```bash
+export TEMPORAL_ADDRESS=temporal.internal:7233
+export PI_TEMPORAL_TLS_CERT=/run/secrets/tls.crt PI_TEMPORAL_TLS_KEY=/run/secrets/tls.key
+export PI_TEMPORAL_TLS_CA=/run/secrets/ca.crt
 ```
 
 If Temporal can’t be reached before a turn starts, the extension says so and runs that turn as
