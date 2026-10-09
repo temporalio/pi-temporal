@@ -60,9 +60,6 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
   superseded writer can still write once after its guard, and a rewrite could erase what a newer
   writer added. These recovery rules require atomic appends; see the filesystem limits in
   [guarantees.md](guarantees.md#the-rules).
-  `pi-journal-check` covers late cuts in the shipped Pi adapter, including complete batches. Pi
-  also loads current-version sessions without a repair write; ending a cut tail belongs to the
-  next guarded append.
 - Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
   the seal must write their results together to avoid conflicting writes.
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.
@@ -100,6 +97,13 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
   - `ModelCall.ended` means the response ended the run, such as an aborted call. Nothing is
     dispatched, but the step is still sealed.
   - `ModelCall.sequential` means the step's tools must run one at a time, in order.
+
+The pinned Pi adapter starts every append to an existing file with a newline. Its session files
+contain blank separator lines and are not strict JSON Lines; readers and session tooling must
+skip empty lines. `pi-journal-check` covers late cuts and complete batches. Opening a
+current-version Pi session with a valid header is read-only. Empty-file initialization and
+older-format migration still write without a guard; migration rewrites the whole file and can
+erase newer entries. See [guarantees.md](guarantees.md#the-rules).
 
 ## What you can delete
 

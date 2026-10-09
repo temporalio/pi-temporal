@@ -14,6 +14,10 @@ These checks run logic that needs no Temporal server.
 `stall-check`, `session-id-check`, `config-check`, `stale-tip-check`, `worktree-check`,
 `storage-repair-check`, `liveness-linux-check`, `release-tag-check`, `session-dir-check`
 
+`echo-journal-check` cuts the echo agent's session file mid-append. `pi-journal-check` drives the
+real `SessionManager` from the pinned Pi fork, checking late torn appends, complete multi-entry
+batches, exact reloaded entries and leaf, and read-only loading. Neither needs a model key.
+
 ## The step driver with injected fakes, no server
 
 `src/core/stepped-step.ts` takes its Activities and SDK pieces as arguments, so it runs with fakes
@@ -38,12 +42,11 @@ call its own environment and `attempt`.
 gives, and only a requested cancel stops it.
 
 `writer-marker-check` and `session-root-check` run the core Activities over the echo agent, with no
-Pi. `echo-journal-check` cuts the echo agent's session file mid-append.
+Pi.
+
 `echo-shape-check` rejects malformed complete entries on load, and before an append or a seal
 writes one, without a retry or a write. It checks that valid entries remain readable, and that a
-session that can't be read is still retired. Neither echo check needs a server.
-`pi-journal-check` exercises late torn appends and read-only loading against the pinned Pi fork,
-including complete multi-entry batches. Neither journal check needs a server or model key.
+session that can't be read is still retired. This check needs no server.
 
 ## The Workflow with stub Activities, on a dev server
 

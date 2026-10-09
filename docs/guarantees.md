@@ -59,12 +59,25 @@ tool's external effects, which is what the claim is for.
 
 The fence is checked, not enforced by storage. An attempt that stalls between its check and its
 append can still land that one append. Loading a current-version Pi session with a valid header
-does not repair its torn tail or change its bytes. Each guarded append starts with a newline,
-so complete entries and batches stay readable even if a superseded writer left a cut line after
-the session opened or last wrote (`pi-journal-check`). Initializing an empty file or migrating an
-older session format can still write during open, before a guard is installed. The fence needs
-exclusive create and a directory listing that shows new files at once. On NFS, mount with
-`actimeo=0` (at least `acdirmin=0,acdirmax=0`).
+does not repair its torn tail or change its bytes. On local filesystems with atomic `O_APPEND`,
+each guarded append starts with a newline, so complete entries and batches stay readable even
+if a superseded writer left a cut line after the session opened or last wrote
+(`pi-journal-check`). This introduces blank separator lines; session readers must skip them.
+This assumes each append's payload lands in one write; a short write can let another writer's
+bytes interleave with it.
+
+Empty-file initialization and older-format migration still write during open, before a guard is
+installed. Migration truncates and rewrites the whole file with the entries it loaded, so it
+can erase entries a newer writer appended since that load. Tool Activities open sessions too,
+even with a guard that refuses writes, and are exposed to this unguarded rewrite after a format
+version bump. Guarding or deferring initialization and migration remains follow-up work.
+
+The fence needs exclusive create and a directory listing that shows new files at once. On NFS,
+`actimeo=0` (at least `acdirmin=0,acdirmax=0`) addresses listing visibility, but does not make
+`O_APPEND` atomic across clients. A superseded writer on another host can write at a stale offset
+over a newer writer's complete batch; the separator cannot prevent this loss. Transcript
+recovery across NFS clients is therefore not guaranteed; see
+[#53](https://github.com/temporalio/pi-temporal/issues/53).
 
 Tree shipping (`src/tree/`) keeps a lease, since clients and hosts write tree stores and project
 directories outside any Workflow. Its 50-second validity and 60-second reclaim windows allow for

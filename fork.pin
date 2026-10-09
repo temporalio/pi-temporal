@@ -2,8 +2,9 @@
 # `recordPrompt`, `modelCall`/`runToolCall`/`sealStep`, `setWriteGuard`, `registerTurnExecutor`)
 # isn't in the published @earendil-works/pi-coding-agent.
 # To bump it, set PI_FORK_REF to the new fork commit, then re-run scripts/setup-fork.sh.
-# Pinned commits are retained by a `pi-temporal-*` tag or a pull request in the fork, so they
+# Pinned commits are retained by a `pi-temporal-*` tag in the fork, so they
 # stay fetchable after the branch they came from moves on.
+# This pin is retained by pi-temporal-pin-8f71207 and includes the session-format documentation.
 
 PI_FORK_REPO=https://github.com/temporalio/pi.git
-PI_FORK_REF=d4cf9b8ac865093ba65e865b9382616e31716a63
+PI_FORK_REF=8f71207c89d2fea8b56ad1964fc8ae0f71af030a
