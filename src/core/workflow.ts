@@ -350,15 +350,20 @@ export async function piSession(input: SessionInput): Promise<void> {
 
   const seen = [...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)];
   // The prompt goes into history, and Continue-As-New carries a queued one on, so its size is
-  // capped. A bigger input belongs in a file the agent reads.
+  // capped. A bigger input belongs in a file the agent reads. Text that isn't a string used to
+  // throw here and fail the task, so no history holds a prompt that this now refuses.
   const problemWith = (p: PromptInput) =>
     !p?.promptId
       ? "a prompt needs an id"
-      : !p.text?.trim()
+      : typeof p.text !== "string" || !p.text.trim()
         ? "a prompt needs text"
         : p.text.length > MAX_PROMPT_CHARS
           ? `a prompt can't be longer than ${MAX_PROMPT_CHARS} characters`
           : undefined;
+  // A raw Update or Signal can carry any JSON. An id that isn't a string reaches the agent, where
+  // 1 and "1" can name one prompt that `known` tells apart.
+  const idProblem = (p: PromptInput) =>
+    typeof p?.promptId === "string" ? undefined : "a prompt's id must be a string";
   // The cap on `seen` can drop an id that's still queued when the backlog is long. The queue and
   // the running turn are checked too, so a resend of work not yet done never runs twice.
   const known = (promptId: string) =>
@@ -377,7 +382,12 @@ export async function piSession(input: SessionInput): Promise<void> {
 
   // A Signal can't answer, so a refused prompt is only logged. `submit` reports it instead.
   setHandler(submitPrompt, (p) => {
-    const problem = problemWith(p) ?? (known(p.promptId) ? "already seen" : undefined);
+    // Older code queued an id that wasn't a string, and a run that did must replay so.
+    const badId = idProblem(p);
+    const problem =
+      problemWith(p) ??
+      (badId && patched("refuse-bad-prompt-id") ? badId : undefined) ??
+      (known(p.promptId) ? "already seen" : undefined);
     if (problem === undefined) enqueue(p);
     else log.warn("dropped a prompt sent as a signal", { promptId: p?.promptId, problem });
   });
@@ -389,7 +399,8 @@ export async function piSession(input: SessionInput): Promise<void> {
     },
     {
       validator: (p) => {
-        const problem = problemWith(p);
+        // Not run on replay, so it needs no patch.
+        const problem = problemWith(p) ?? idProblem(p);
         if (problem) throw ApplicationFailure.nonRetryable(problem, "BadPrompt");
         if (known(p.promptId)) {
           throw ApplicationFailure.nonRetryable(
