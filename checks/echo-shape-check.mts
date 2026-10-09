@@ -5,6 +5,8 @@
 // unchanged broken journal cannot repair it. Loading must not write or invoke the fence.
 // Valid entries (including arbitrary note data and extra fields) must remain readable;
 // syntactically cut objects are still covered by echo-journal-check.mts.
+// Invalid entries must also fail before append calls the write guard, so callers bypassing
+// TypeScript cannot write a journal that the next open would reject.
 //
 // No server, Pi fork, or model key. Usage: node --import tsx checks/echo-shape-check.mts
 // The repository's checks runner discovers this file automatically.
@@ -123,6 +125,29 @@ try {
   const record = await agent.openRecord(file, guard);
   check("valid notes also open through openRecord", JSON.stringify(record?.latestEntry("marker")) === '{"count":1}');
   check("loading never invokes the write guard", writes === 0, writes);
+
+  // A raw Signal/Update can supply a truthy numeric promptId despite the TypeScript signature.
+  // It must fail before either the guard or the append, keeping the session readable.
+  const writing = await agent.open(file, guard);
+  const before = await readFile(file, "utf8");
+  const writesBefore = writes;
+  const error: unknown = await writing.recordPrompt(1 as unknown as string, "hi").then(
+    () => undefined,
+    (err: unknown) => err,
+  );
+  check(
+    "recordPrompt rejects a numeric promptId without a retry",
+    error instanceof ApplicationFailure && error.nonRetryable === true,
+    String(error),
+  );
+  check("an invalid append never invokes the write guard", writes === writesBefore, writes);
+  check("an invalid append leaves the journal unchanged", await readFile(file, "utf8") === before);
+  writing.dispose();
+  const readable = await agent.open(file, guard).then(
+    (session) => { session.dispose(); return true; },
+    () => false,
+  );
+  check("the session still opens after rejecting an invalid append", readable);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
