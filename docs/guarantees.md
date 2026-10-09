@@ -58,10 +58,13 @@ Tool calls never write the transcript. The guard stops the transcript write. It 
 tool's external effects, which is what the claim is for.
 
 The fence is checked, not enforced by storage. An attempt that stalls between its check and its
-append can still land that one append. Opening a session can also repair a torn last line before
-any guard runs, and a tool call opens it with no fence token, so a stalled tool attempt that opens
-late can write that one repair. The fence needs exclusive create and a directory listing that
-shows new files at once. On NFS, mount with `actimeo=0` (at least `acdirmin=0,acdirmax=0`).
+append can still land that one append. Loading a current-version Pi session with a valid header
+does not repair its torn tail or change its bytes. Each guarded append starts with a newline,
+so complete entries and batches stay readable even if a superseded writer left a cut line after
+the session opened or last wrote (`pi-journal-check`). Initializing an empty file or migrating an
+older session format can still write during open, before a guard is installed. The fence needs
+exclusive create and a directory listing that shows new files at once. On NFS, mount with
+`actimeo=0` (at least `acdirmin=0,acdirmax=0`).
 
 Tree shipping (`src/tree/`) keeps a lease, since clients and hosts write tree stores and project
 directories outside any Workflow. Its 50-second validity and 60-second reclaim windows allow for

@@ -60,6 +60,9 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
   superseded writer can still write once after its guard, and a rewrite could erase what a newer
   writer added. These recovery rules require atomic appends; see the filesystem limits in
   [guarantees.md](guarantees.md#the-rules).
+  `pi-journal-check` covers late cuts in the shipped Pi adapter, including complete batches. Pi
+  also loads current-version sessions without a repair write; ending a cut tail belongs to the
+  next guarded append.
 - Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
   the seal must write their results together to avoid conflicting writes.
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.
