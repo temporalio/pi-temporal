@@ -67,17 +67,16 @@ try {
   );
   after.dispose();
 
-  // The file is whole when the current writer opens. A superseded writer then passes its last
-  // guard and crashes mid-append, just before the current writer writes. Inject the cut bytes
-  // inside the current guard to reproduce this ordering without a timing race. Both the full
-  // session and the bookkeeping-only record must preserve every complete entry on reopening,
-  // while leaving the earlier bytes (including the torn append) untouched. Repeat on a second
-  // append: protecting only the first write after open is not enough.
+  // A superseded writer can tear its last append after the current writer opened the file.
+  // The guard injects the cut, so the order is fixed and there's no timing race. Two appends,
+  // since a separator on the first write alone isn't enough.
   for (const mode of ["open", "openRecord"] as const) {
     const lateFile = join(root, `late-${mode}.jsonl`);
     await writeFile(lateFile, '{"kind":"note","type":"seed","data":1}\n');
     const cut = '{"kind":"note","type":"stale","data":';
-    const current = await agent[mode](lateFile, () => appendFileSync(lateFile, cut));
+    const injectCut = () => appendFileSync(lateFile, cut);
+    const session = mode === "open" ? await agent.open(lateFile, injectCut) : undefined;
+    const current = session ?? (await agent.openRecord(lateFile, injectCut));
     if (!current) throw new Error("the seeded record must exist");
     for (const n of [1, 2]) {
       const before = await readFile(lateFile, "utf8");
@@ -99,7 +98,7 @@ try {
         (await readFile(lateFile, "utf8")).startsWith(before + cut),
       );
     }
-    if ("dispose" in current && typeof current.dispose === "function") current.dispose();
+    session?.dispose();
   }
 
   // A turn stopped mid-tool ends on its result, with no call-less response after it. The next
