@@ -67,6 +67,11 @@ would break on upgrade. Keep each history once it's recorded, and don't record i
 `replay-check` needs a dev server. It covers only a history the current code writes, from a step
 whose host-queue tool failed after it started.
 
+`package.json` lists `protobufjs` although no code imports it. It makes npm install one copy for
+the whole SDK. The OpenTelemetry exporter pulls an older major, and without the direct dependency
+each SDK package gets its own copy, and the copies can't read each other's types. `replay-check`
+fails then, since it reads a history through the SDK.
+
 ## Real processes, killed or paused
 
 `faux-worker.mts` is a Worker with the real Activities over a real Pi session and a scripted
