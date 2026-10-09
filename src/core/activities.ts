@@ -639,7 +639,13 @@ function makeUncheckedActivities({ agent, store, hostQueue }: CoreActivityOption
     );
     if (!exists) return;
     await withFence(sessionFile, input.fence, async (guard) => {
-      const record = await agent.openRecord(sessionFile, guard);
+      // A record the agent refuses for good is like a missing one, with nothing a retry could add
+      // to. Failing would keep the project from going back, so only its seconds are lost.
+      const record = await agent.openRecord(sessionFile, guard).catch((err: unknown) => {
+        if (!(err instanceof ApplicationFailure && err.nonRetryable)) throw err;
+        say("warn", `kept no seconds for ${sessionFile}: ${err.message}`);
+        return undefined;
+      });
       if (!record) return;
       const known = (record.latestEntry(SESSION_SECONDS) as { seconds?: unknown } | undefined)
         ?.seconds;

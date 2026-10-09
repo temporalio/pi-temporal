@@ -220,8 +220,9 @@ if (patched("snapshot-between-turns")) {
 await runTurn(queue.shift()!);
 ```
 
-The session Workflow has four gates of this kind in `src/core/workflow.ts`, as worked examples:
-`budget-before-step`, `seal-waits-for-cancel`, `adopt-not-cancellable` and `refuse-bad-input`.
+The session Workflow has five gates of this kind in `src/core/workflow.ts`, as worked examples:
+`budget-before-step`, `seal-waits-for-cancel`, `adopt-not-cancellable`, `refuse-bad-input` and
+`refuse-bad-prompt-id`.
 Each has a kept history recorded on the code before it.
 
 Remove the gate in two more releases.

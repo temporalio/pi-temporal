@@ -176,6 +176,13 @@ try {
   await loose.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
   await save("loose-input", loose);
 
+  // A prompt id that older code queued from a Signal and the session now drops. Only a raw client
+  // sends one.
+  const looseId = await session("loose-prompt");
+  await looseId.signal(SIGNALS.submitPrompt, { promptId: 7 as unknown as string, text: "run" });
+  await looseId.executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
+  await save("loose-prompt", looseId);
+
   // Continue-As-New between turns, with a prompt carried over.
   const carried = await session("continue-as-new", { maxHistory: 20 });
   await carried.signal(SIGNALS.submitPrompt, { promptId: "p1", text: "one" });
