@@ -67,12 +67,12 @@ if a superseded writer left a cut line after the session opened or last wrote
 This assumes each append's payload lands in one write; a short write can let another writer's
 bytes interleave with it.
 
-Every Worker that can write the session must use this pin before relying on that recovery
-guarantee, including the embedded Worker in each user's `pi`. In the default profile, embedded
-Workers poll the shared Task Queue and write with the host Pi's `SessionManager`; installing the
-extension does not upgrade that host build. During a rolling deploy, a retry on an old Worker can
-still repair on open without a guard or lose a batch after a late cut. Drain old fleet Workers
-and restart each `pi` on the new fork build, or disable its embedded Worker with
+Every Worker that can write the session must use the pinned fork build before relying on that
+recovery guarantee, including the embedded Worker in each user's `pi`. In the default profile,
+embedded Workers poll the shared Task Queue and write with the host Pi's `SessionManager`;
+installing the extension does not upgrade that host build. During a rolling deploy, a retry on an
+old Worker can still repair on open without a guard or lose a batch after a late cut. Drain old
+fleet Workers and restart each `pi` on the pinned fork build, or disable its embedded Worker with
 `PI_TEMPORAL_EMBEDDED_WORKER=0`. Live turns also write with the host Pi build, so upgrade it before
 relying on their recovery. There is no runtime compatibility gate. The older loader skips blank
 lines, so it can read the new files on rollback, but its writer lacks the new recovery behavior.
@@ -123,7 +123,7 @@ model response.
 | Process dies mid-tool | Unsealed results are lost. Unanswered calls report unknown. | A recovery seal records what it has, a claim without a result reports unknown, and the turn goes on elsewhere. | `pending-check`, `lost-host-check`, `detached-check` |
 | A seal dies after its writes | Not applicable | The retry on another Worker doesn't write twice or re-run the turn-end hook. | `seal-check`, `interrupted-seal-check` |
 | Two attempts overlap | The agent admits one unit at a time. | The fence and write guard refuse a stale transcript write. They don't fence a tool's effects. | `fence-check`, `lease-check`, `lock-gap-check`, `stall-check` |
-| A superseded writer leaves a late torn append | The next append keeps complete entries and batches readable. Requires the new host Pi build and atomic local appends in one write. | Same recovery, provided every writer, including embedded Workers, uses the new build. NFS is excluded. | [pi-journal-check](../checks/pi-journal-check.mts) |
+| A superseded writer leaves a late torn append | The next append keeps complete entries and batches readable. Requires the pinned host Pi build and atomic local appends in one write. | Same recovery, provided every writer, including embedded Workers, uses the pinned build. NFS is excluded. | `pi-journal-check` |
 | A stale dispatch wakes after cleanup | No claims in this mode. | The claim is still there, so it isn't admitted. | `stale-dispatch-check`, `dispatch-check` |
 | The user stops a turn | In-memory results are sealed if the process lives. | A running tool or model call is stopped and reports it, the next unit doesn't start, and the step is sealed with what each tool reported. | `local-turn-check`, `seal-check`, `stepped-step-check` |
 | A turn overspends | No bound. | Soft budgets stop at a boundary. A session already past a session bound runs no step for a new prompt. A run woken after an idle exit learns the session's total from the first step it runs, so its first prompt still pays for one step, and its later prompts pay for none. The hard deadline stops the running unit like a user stop. A command the tool started outside its own process may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
