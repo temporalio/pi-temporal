@@ -17,7 +17,7 @@ type Call = { id: string; name: string; text: string };
 const outcomeStatuses = ["ok", "unknown", "not-run", "failed"] as const;
 type Outcome = { callId: string; status: (typeof outcomeStatuses)[number]; text: string };
 type Prompt = { kind: "prompt"; promptId: string; text: string };
-type Response = { kind: "response"; text: string; calls: Call[]; tokens: number; aborted?: true };
+type Response = { kind: "response"; text: string; calls: Call[]; tokens: number; aborted?: boolean };
 type Result = { kind: "result" } & Outcome;
 // The core's bookkeeping. Not part of the conversation.
 type Note = { kind: "note"; type: string; data: unknown };
@@ -44,16 +44,38 @@ function isEntry(value: unknown): value is Entry {
         Array.isArray(value.calls) && value.calls.every((call: unknown) =>
           isObject(call) && typeof call.id === "string" && typeof call.name === "string" &&
           typeof call.text === "string") &&
-        (value.aborted === undefined || value.aborted === true);
+        (value.aborted === undefined || typeof value.aborted === "boolean");
     case "result":
       return typeof value.callId === "string" && typeof value.text === "string" &&
-        outcomeStatuses.some((status) => status === value.status);
+        (outcomeStatuses as readonly unknown[]).includes(value.status);
     case "note":
       // data is deliberately unknown; JSON omits it when appendEntry receives undefined.
       return typeof value.type === "string";
     default:
       return false;
   }
+}
+
+// A broken file stays broken, so a retry would burn every attempt on the same error.
+const notAnEntry = (file: string, verb: "read" | "written", line: string) =>
+  ApplicationFailure.nonRetryable(
+    `the session ${file} can't be ${verb}: not a session entry: ${line.slice(0, 80)}`,
+  );
+
+/** The line `entry` appends, and the entry a later read takes from it. */
+function encode(file: string, entry: unknown): { line: string; entry: Entry } {
+  let line: string | undefined;
+  try {
+    line = JSON.stringify(entry);
+  } catch {
+    // A BigInt or a cycle has no line to write.
+  }
+  // Checked as read back, not as given. JSON can change a value on the way, as NaN to null.
+  const written: unknown = line === undefined ? undefined : JSON.parse(line);
+  if (line === undefined || !isEntry(written)) {
+    throw notAnEntry(file, "written", line ?? "[unserializable entry]");
+  }
+  return { line, entry: written };
 }
 
 function load(file: string): { entries: Entry[]; torn: boolean } {
@@ -72,13 +94,8 @@ function load(file: string): { entries: Entry[]; torn: boolean } {
       // parses, so skipping it loses no whole entry.
       continue;
     }
-    // A line that parses but isn't an entry is a broken file, not a crash. A broken file stays
-    // broken, so a retry would burn every attempt on the same error.
-    if (!isEntry(parsed)) {
-      throw ApplicationFailure.nonRetryable(
-        `the session ${file} can't be read: not a session entry: ${line.slice(0, 80)}`,
-      );
-    }
+    // A line that parses but isn't an entry is a broken file, not a crash.
+    if (!isEntry(parsed)) throw notAnEntry(file, "read", line);
     entries.push(parsed);
   }
   return { entries, torn };
@@ -88,28 +105,23 @@ function load(file: string): { entries: Entry[]; torn: boolean } {
 function journal(file: string, guard: () => void) {
   const { entries, torn } = load(file);
   let cut = torn;
-  const append = (entry: Entry) => {
-    // Runtime callers can bypass TypeScript. Never write an entry load() would reject.
-    if (!isEntry(entry)) {
-      let preview: string;
-      try {
-        preview = JSON.stringify(entry).slice(0, 80);
-      } catch {
-        // Even an entry with no JSON representation must fail without a retry.
-        preview = "[unserializable entry]";
-      }
-      throw ApplicationFailure.nonRetryable(
-        `the session ${file} can't be written: not a session entry: ${preview}`,
-      );
-    }
-    // Every valid append calls the guard before writing, and stops if it throws. That's the fence.
+  const append = (...batch: Entry[]) => {
+    if (batch.length === 0) return;
+    // Every append calls the guard before writing, and stops if it throws. That's the fence. It
+    // goes before the check below, so a superseded writer reports the fence, not its entry.
     guard();
-    // Only appends, never a rewrite. The fence lets a superseded writer through for one write
-    // after its guard, and an append can't erase what a newer writer added. A newline ends a cut
-    // last line, so it can't join this entry, and every later read skips it.
-    appendFileSync(file, `${cut ? "\n" : ""}${JSON.stringify(entry)}\n`);
-    cut = false;
-    entries.push(entry);
+    // Runtime callers can bypass TypeScript. Never write an entry load() would reject, and check
+    // the whole batch first, so a bad entry can't leave half of it written.
+    const encoded = batch.map((entry) => encode(file, entry));
+    for (const [i, { line, entry }] of encoded.entries()) {
+      if (i > 0) guard();
+      // Only appends, never a rewrite. The fence lets a superseded writer through for one write
+      // after its guard, and an append can't erase what a newer writer added. A newline ends a
+      // cut last line, so it can't join this entry, and every later read skips it.
+      appendFileSync(file, `${cut ? "\n" : ""}${line}\n`);
+      cut = false;
+      entries.push(entry);
+    }
   };
   const latestEntry = (type: string, skip?: (data: unknown) => boolean) => {
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -205,7 +217,12 @@ function openSession(file: string, guard: () => void, tool: EchoTool): AgentSess
       if (!call) throw new Error(`the latest response has no call ${callId}`);
       busy = true;
       try {
-        const outcome: Outcome = { callId, status: "ok", text: await tool(call.text, signal) };
+        const text: unknown = await tool(call.text, signal);
+        // A plain JS tool can resolve to anything, and the seal writes only text. A failed call
+        // still lets the model answer, where an outcome the seal can't write fails the turn.
+        const outcome: Outcome = typeof text === "string"
+          ? { callId, status: "ok", text }
+          : { callId, status: "failed", text: `the tool returned ${typeof text}, not text` };
         return outcome;
       } catch (err) {
         // A stopped or failed tool still reports what happened. Plain JSON, since the core keeps
@@ -224,10 +241,17 @@ function openSession(file: string, guard: () => void, tool: EchoTool): AgentSess
           `the seal expected calls [${expectCalls}], and the session has [${asked}]`,
         );
       }
-      // A retried seal skips what it already wrote, and so decides the same thing.
-      for (const outcome of outcomes as Outcome[]) {
-        if (!answered(outcome.callId)) settle(outcome.callId, outcome.status, outcome.text);
-      }
+      // Kept outcomes come back from a file. One that isn't an object goes to the append as it
+      // is, which rejects it.
+      const results = (outcomes as unknown[]).map((outcome) =>
+        isObject(outcome)
+          ? { kind: "result", callId: outcome.callId, status: outcome.status, text: outcome.text }
+          : outcome,
+      ) as Result[];
+      // A retried seal skips what it already wrote, and so decides the same thing. The rest are
+      // one append, which writes none of them unless every one is an entry. The seal must write a
+      // step's results together.
+      append(...results.filter((r) => !isObject(r) || !answered(r.callId)));
       // No retry and no compaction here, so `postRun` changes nothing. The turn is over once the
       // latest response asked for no tool.
       return { done: asked.length === 0, ...(agentState ? { agentState } : {}) };
