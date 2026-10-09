@@ -50,9 +50,14 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
 - Every append must call the guard first. An unguarded write can let a superseded attempt change
   the session.
 - A crash can cut the last entry in half. Reading must skip a cut entry, and the next append must
-  end it first, so it can't join the new entry. Writes must only append. A superseded writer can
-  still write once after its guard, and a rewrite then could erase what a newer writer added.
-  `echo-journal-check` shows the echo agent doing this.
+  end it first, so it can't join the new entry, even if the cut arrived after the session opened
+  or after an earlier append. Writes must only append. A superseded writer can still write once
+  after its guard, and a rewrite then could erase what a newer writer added. The echo agent
+  prefixes every append with a newline and keeps the trailing newline; its reader ignores empty
+  lines. `echo-journal-check` covers cuts before open for sessions, and after open for sessions
+  and records. The pinned Pi adapter still repairs a torn tail at load and does not isolate late
+  cuts from another writer; this contract gap is tracked in
+  [#51](https://github.com/temporalio/pi-temporal/issues/51).
 - Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
   the seal must write their results together to avoid conflicting writes.
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.

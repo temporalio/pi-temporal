@@ -29,11 +29,9 @@ export interface EchoOptions {
   readonly tool?: EchoTool;
 }
 
-function load(file: string): { entries: Entry[]; torn: boolean } {
-  if (!existsSync(file)) return { entries: [], torn: false };
+function load(file: string): Entry[] {
+  if (!existsSync(file)) return [];
   const text = readFileSync(file, "utf8");
-  // A crash mid-append can leave a cut last line. The next append ends it with a newline first.
-  const torn = text.length > 0 && !text.endsWith("\n");
   const entries: Entry[] = [];
   for (const line of text.split("\n")) {
     if (!line) continue;
@@ -54,21 +52,20 @@ function load(file: string): { entries: Entry[]; torn: boolean } {
     }
     entries.push(parsed as Entry);
   }
-  return { entries, torn };
+  return entries;
 }
 
 /** One file's entries, and the only way to add to them: through the guard. */
 function journal(file: string, guard: () => void) {
-  const { entries, torn } = load(file);
-  let cut = torn;
+  const entries = load(file);
   const append = (entry: Entry) => {
     // Every append calls the guard first, and stops if it throws. That's the fence.
     guard();
     // Only appends, never a rewrite. The fence lets a superseded writer through for one write
-    // after its guard, and an append can't erase what a newer writer added. A newline ends a cut
-    // last line, so it can't join this entry, and every later read skips it.
-    appendFileSync(file, `${cut ? "\n" : ""}${JSON.stringify(entry)}\n`);
-    cut = false;
+    // after its guard, and an append can't erase what a newer writer added. Always prefix a
+    // newline: that last write can leave a cut line even after this journal opened. The separator
+    // keeps it from joining this entry, and later reads skip the cut line and empty lines.
+    appendFileSync(file, `\n${JSON.stringify(entry)}\n`);
     entries.push(entry);
   };
   const latestEntry = (type: string, skip?: (data: unknown) => boolean) => {
