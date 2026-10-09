@@ -235,6 +235,23 @@ pi install git:git@github.com:temporalio/pi-temporal
 pi install -l /path/to/pi-temporal   # this project only
 ```
 
+Both are on npm too. `@temporalio/pi-coding-agent` is the fork, with its `pi` CLI, and
+`@temporalio/pi-temporal` is this package. The fork's version names the pi-temporal release it goes
+with, such as `1.1.0-temporal.0.3.0` for `0.3.0`. The fork's CLI is also called `pi`, so it
+replaces an upstream `pi` installed the same way.
+
+```
+npm install -g @temporalio/pi-coding-agent
+pi install npm:@temporalio/pi-temporal
+```
+
+A Worker in your own project installs the fork under the upstream name, so its imports resolve.
+
+```
+npm install @temporalio/pi-temporal \
+  @earendil-works/pi-coding-agent@npm:@temporalio/pi-coding-agent@1.1.0-temporal.0.3.0
+```
+
 ## Checks
 
 Each `checks/*-check.mts` script checks one contract and exits with a nonzero status on failure.
@@ -262,6 +279,18 @@ npm version 0.3.0 --no-git-tag-version
 # After the bump is on main.
 git tag v0.3.0 origin/main
 git push origin v0.3.0
+```
+
+npm gets the package by hand, the way the Temporal SDK packages are published. The release
+carries the tarball its run built and checked, with its checksum in `SHA256SUMS`. A maintainer
+with publish rights on the `@temporalio` scope publishes that file. Publish the fork's packages
+for the same version first ([TEMPORAL.md](https://github.com/temporalio/pi/blob/main/TEMPORAL.md)
+in the fork), since this package's install steps name them.
+
+```shell
+gh release download v0.3.0 --repo temporalio/pi-temporal --pattern '*.tgz' --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+npm publish temporalio-pi-temporal-0.3.0.tgz --access public
 ```
 
 ## Prior art
