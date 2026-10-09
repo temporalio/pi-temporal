@@ -98,10 +98,10 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
     dispatched, but the step is still sealed.
   - `ModelCall.sequential` means the step's tools must run one at a time, in order.
 
-The pinned Pi adapter starts every append to an existing file with a newline. Its session files
-contain blank separator lines and are not strict JSON Lines; readers and session tooling must
-skip empty lines. `pi-journal-check` covers late cuts and complete batches. Opening a
-current-version Pi session with a valid header is read-only. Empty-file initialization and
+The pinned Pi fork's `SessionManager` starts every append to an existing file with a newline.
+Its session files contain blank separator lines and are not strict JSON Lines; readers and
+session tooling must skip empty lines. `pi-journal-check` covers late cuts and complete batches.
+Opening a current-version Pi session with a valid header is read-only. Empty-file initialization and
 older-format migration still write without a guard; migration rewrites the whole file and can
 erase newer entries. See [guarantees.md](guarantees.md#the-rules).
 

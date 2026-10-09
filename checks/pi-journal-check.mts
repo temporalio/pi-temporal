@@ -88,10 +88,11 @@ try {
     );
     let guards = 0;
     opened.setWriteGuard(() => { guards++; });
-    const kept = opened.appendCustomEntry("kept", 2);
+    opened.appendCustomEntry("kept", 2);
+    const recovered = SessionManager.open(file);
     check(
-      `${mode}: the next guarded append survives reopening`,
-      guards === 1 && SessionManager.open(file).getEntries().some((entry) => entry.id === kept),
+      `${mode}: the next guarded append preserves exactly the entries on reopening`,
+      guards === 1 && isDeepStrictEqual(recovered.getEntries(), opened.getEntries()),
     );
     check(
       `${mode}: the next append preserves earlier bytes`,
