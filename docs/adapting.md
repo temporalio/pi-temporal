@@ -5,8 +5,8 @@ your own agent. Start from [`examples/echo/`](../examples/echo/). It's a whole a
 session file, with a Worker and a client, and it runs with only a dev server: no Pi, no model key,
 no Docker. Pi's implementation in [`src/pi/agent.ts`](../src/pi/agent.ts) is about 220 lines.
 The sections below describe the contract and the modules you can omit.
-For the echo journal's late-cut recovery status, see
-[#46](https://github.com/temporalio/pi-temporal/issues/46).
+Echo builds without the [#46](https://github.com/temporalio/pi-temporal/issues/46) fix separate
+a cut only when they find one at open, which breaks the late-cut rule below. Don't copy that.
 
 ## What your agent must provide
 
