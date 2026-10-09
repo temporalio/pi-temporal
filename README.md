@@ -229,6 +229,8 @@ adds `prepareStep`, `recordPrompt`, `modelCall` / `runToolCall` / `sealStep`, `s
 and `pi.registerTurnExecutor`. [docs/upstream.md](docs/upstream.md) has the plan to upstream it.
 
 You can also install the extension into a fork build of `pi`.
+The host Pi build must also be compatible with the pinned fork; see the
+[journal recovery requirements](docs/guarantees.md#pi-journal-recovery).
 
 ```
 pi install git:git@github.com:temporalio/pi-temporal

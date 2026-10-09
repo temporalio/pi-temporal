@@ -49,6 +49,11 @@ jobs:
             fork.pin
       - run: npm ci
       - run: scripts/setup-fork.sh
+      # Local fork overrides must not weaken CI's validation of the shipped build.
+      - name: Validate the pinned fork
+        run: |
+          . scripts/pinned-fork.sh
+          pinned_fork
       # A pinned release, checked against its published SHA-256, not an unpinned install script.
       - name: Install the Temporal CLI
         env:

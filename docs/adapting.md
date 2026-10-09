@@ -5,8 +5,6 @@ your own agent. Start from [`examples/echo/`](../examples/echo/). It's a whole a
 session file, with a Worker and a client, and it runs with only a dev server: no Pi, no model key,
 no Docker. Pi's implementation in [`src/pi/agent.ts`](../src/pi/agent.ts) is about 220 lines.
 The sections below describe the contract and the modules you can omit.
-Echo builds without the [#46](https://github.com/temporalio/pi-temporal/issues/46) fix separate
-a cut only when they find one at open, which breaks the late-cut rule below. Don't copy that.
 
 ## What your agent must provide
 
@@ -59,7 +57,7 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
   Opening must not repair the file before the guard is installed. Writes must only append: a
   superseded writer can still write once after its guard, and a rewrite could erase what a newer
   writer added. These recovery rules require atomic appends; see the filesystem limits in
-  [guarantees.md](guarantees.md#the-rules).
+  [guarantees.md](guarantees.md#pi-journal-recovery).
 - Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
   the seal must write their results together to avoid conflicting writes.
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.
@@ -97,6 +95,10 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
   - `ModelCall.ended` means the response ended the run, such as an aborted call. Nothing is
     dispatched, but the step is still sealed.
   - `ModelCall.sequential` means the step's tools must run one at a time, in order.
+
+The pinned Pi fork's `SessionManager` implements late-cut recovery with the format, filesystem,
+deployment, and open-time exceptions described in
+[guarantees.md](guarantees.md#pi-journal-recovery).
 
 ## What you can delete
 

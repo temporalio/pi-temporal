@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sourced, not run, from the repository root. `pinned_fork` exits unless `.fork/pi` is a clean
-# checkout of the commit in fork.pin. Images are built from `.fork/pi`, so a stale checkout would
-# build a stale image that looks current.
+# checkout of the commit in fork.pin. Images and linked-package checks use `.fork/pi`, so a stale
+# checkout would build or test the wrong commit.
 pinned_fork() {
   # shellcheck disable=SC1091
   . ./fork.pin
@@ -13,7 +13,8 @@ pinned_fork() {
     exit 1
   }
   [ -z "$(git -C .fork/pi status --porcelain)" ] || {
-    echo "the fork at .fork/pi has uncommitted changes, so the image would not be the pinned build"
+    echo "the fork at .fork/pi has uncommitted changes: commit or stash them," \
+      "then run npm run setup-fork"
     exit 1
   }
 }

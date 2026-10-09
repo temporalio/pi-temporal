@@ -75,9 +75,10 @@ the file, and the agent's write guard refuses an append once a higher token is t
 takes over without waiting for a lease to expire.
 
 Storage doesn't enforce the fence. An attempt that stalls between its check and its append can
-still land that append. On NFS it needs `actimeo=0`. If your session lives in a
-store with compare-and-set, such as object storage with `If-Match` or a database row version, use
-the token there and the gap closes.
+still land that append. [Pi journal recovery](guarantees.md#pi-journal-recovery) defines the
+filesystem requirements and NFS limits. If your session lives in a store with compare-and-set,
+such as object storage with `If-Match` or a database row version, use the token there and the
+gap closes.
 
 The tree store keeps a lease instead (`src/tree/lease.ts`), because clients and hosts write it
 outside any Workflow, so there's no Workflow to number them.
