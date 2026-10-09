@@ -350,8 +350,8 @@ export async function piSession(input: SessionInput): Promise<void> {
 
   const seen = [...(options?.seenPrompts ?? []), ...queue.map((p) => p.promptId)];
   // The prompt goes into history, and Continue-As-New carries a queued one on, so its size is
-  // capped. A bigger input belongs in a file the agent reads. Text that isn't a string used to
-  // throw here and fail the task, so no history holds a prompt that this now refuses.
+  // capped. A bigger input belongs in a file the agent reads. A Signal whose text isn't a string
+  // never got queued, since its Workflow Task failed. So this check needs no patch.
   const problemWith = (p: PromptInput) =>
     !p?.promptId
       ? "a prompt needs an id"

@@ -1,17 +1,8 @@
-// Reproduces #47: a complete {"kind":"response"} used to open successfully, then
-// prepareStep() threw a retryable TypeError reading the missing calls.length.
-// Both open() and openRecord() must reject malformed complete entries at load time with a
-// non-retryable ApplicationFailure identifying the file and offending line. Retrying an
-// unchanged broken journal cannot repair it. Loading must not write or invoke the fence.
-// Valid entries (including arbitrary note data and extra fields) must remain readable;
-// syntactically cut objects are still covered by echo-journal-check.mts.
-// Every append path (prompts, notes, seals) must also reject what it can't write, without a
-// retry and without writing, so callers bypassing TypeScript cannot write a journal that the next
-// open would reject. A seal checks all of its outcomes before writing any. The fence's own error
-// still wins over a bad entry's. A session that can't be read must still be retired.
+// A complete line that isn't an echo entry must fail on load without a retry, and an append
+// must never write one. A retry can't fix a broken file, and a bad entry read as is crashes a
+// later step on every attempt.
 //
 // No server, Pi fork, or model key. Usage: node --import tsx checks/echo-shape-check.mts
-// The repository's checks runner discovers this file automatically.
 
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
