@@ -2,9 +2,18 @@
 
 Each `*-check.mts` script checks one contract and exits nonzero on failure. Its header says what
 it needs. `npm run checks` runs every one that needs neither a model key nor Docker. Most need a
-local Temporal server (`scripts/temporal-dev.sh`). The runner and direct `pi-journal-check`
-invocations refuse a missing, stale, or edited `.fork/pi` with instructions to run
-`npm run setup-fork`.
+local Temporal server (`scripts/temporal-dev.sh`). The runner lets each check report its own
+prerequisites, so unrelated checks can run without Pi. `pi-journal-check` refuses a missing,
+stale, or edited `.fork/pi` by default, with instructions to run `npm run setup-fork`.
+
+When developing the fork, build it and keep it linked into `node_modules`, then use
+`PI_FORK_UNPINNED=1 npm run checks` or
+`PI_FORK_UNPINNED=1 node --import tsx checks/pi-journal-check.mts`. The journal check warns and
+runs every recovery assertion against that linked build; the override skips only its pin
+validation. It does not supply a missing build or skip Pi-dependent checks. CI validates the
+pin separately, and Docker checks keep their strict pin validation. A template with another
+agent can run individual core or echo checks, or remove the Pi-dependent checks it no longer
+uses.
 
 The groups below show test patterns you can copy for your own agent.
 

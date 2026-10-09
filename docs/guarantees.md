@@ -8,11 +8,10 @@ it to a check. Each check covers its named scenario, not every possible interlea
 
 ## The model
 
-Pi owns the conversation and its session file: JSON entries separated by newlines, with blank
-separator lines that readers must skip. Temporal owns Workflow progress and
-dispatches Activities. Worker mode stores dispatch claims and tool results beside the session
-file. Tree shipping adds git bundles of the project. Recovery depends on these records agreeing
-with Temporal history.
+Pi owns the conversation and its [session file](#pi-journal-recovery). Temporal owns Workflow
+progress and dispatches Activities. Worker mode stores dispatch claims and tool results beside
+the session file. Tree shipping adds git bundles of the project. Recovery depends on these
+records agreeing with Temporal history.
 
 Recovery depends on where the turn runs.
 
@@ -59,39 +58,8 @@ Tool calls never write the transcript. The guard stops the transcript write. It 
 tool's external effects, which is what the claim is for.
 
 The fence is checked, not enforced by storage. An attempt that stalls between its check and its
-append can still land that one append. Loading a current-version Pi session with a valid header
-does not repair its torn tail or change its bytes. On local filesystems with atomic `O_APPEND`,
-each guarded append starts with a newline, so complete entries and batches stay readable even
-if a superseded writer left a cut line after the session opened or last wrote
-(`pi-journal-check`). This introduces blank separator lines; session readers must skip them.
-This assumes each append's payload lands in one write; a short write can let another writer's
-bytes interleave with it.
-
-Every Worker that can write the session must use the pinned fork build before relying on that
-recovery guarantee, including the embedded Worker in each user's `pi`. In the default profile,
-embedded Workers poll the shared Task Queue and write with the host Pi's `SessionManager`;
-installing the extension does not upgrade that host build. During a rolling deploy, a retry on an
-old Worker can still repair on open without a guard or lose a batch after a late cut. Drain old
-fleet Workers and restart each `pi` on the pinned fork build, or disable its embedded Worker with
-`PI_TEMPORAL_EMBEDDED_WORKER=0`. Live turns also write with the host Pi build, so upgrade it before
-relying on their recovery. There is no runtime compatibility gate. The older loader skips blank
-lines, so it can read the new files on rollback, but its writer lacks the new recovery behavior.
-
-Empty-file initialization and older-format migration still write during open, before a guard is
-installed. Migration truncates and rewrites the whole file with the entries it loaded, so it
-can erase entries a newer writer appended since that load. The rewrite is not crash-atomic:
-it truncates in place and writes entries one at a time, so a crash can lose the remaining
-transcript even without another writer. Tool Activities open sessions too,
-even with a guard that refuses writes, and are exposed to this unguarded rewrite after a format
-version bump. Guarding or deferring initialization and migration is tracked in
-[#54](https://github.com/temporalio/pi-temporal/issues/54).
-
-The fence needs exclusive create and a directory listing that shows new files at once. On NFS,
-`actimeo=0` (at least `acdirmin=0,acdirmax=0`) addresses listing visibility, but does not make
-`O_APPEND` atomic across clients. A superseded writer on another host can write at a stale offset
-over a newer writer's complete batch; the separator cannot prevent this loss. Transcript
-recovery across NFS clients is therefore not guaranteed; see
-[#53](https://github.com/temporalio/pi-temporal/issues/53).
+append can still land that one append; [Pi journal recovery](#pi-journal-recovery) defines what
+survives it.
 
 Tree shipping (`src/tree/`) keeps a lease, since clients and hosts write tree stores and project
 directories outside any Workflow. Its 50-second validity and 60-second reclaim windows allow for
@@ -115,6 +83,45 @@ Each stepped Activity opens its own `AgentSession`. A step with four tool calls 
 six times. Session-open time grows with the transcript, so splitting a step adds work to each
 model response.
 
+## Pi journal recovery
+
+Pi session files contain JSON entries separated by newlines, including blank separator lines;
+they are not strict JSON Lines, so every reader and session tool must skip empty lines.
+Loading a current-version Pi session with a valid header does not repair its torn tail or change
+its bytes. On local filesystems with atomic `O_APPEND`,
+each guarded append starts with a newline, so complete entries and batches stay readable even
+if a superseded writer left a cut line after the session opened or last wrote
+([`pi-journal-check`](../checks/pi-journal-check.mts)).
+This assumes each append's payload lands in one write; a short write can let another writer's
+bytes interleave with it.
+
+Every Worker that can write the session must use the pinned fork build before relying on that
+recovery guarantee, including the embedded Worker in each user's `pi`. In the default profile,
+embedded Workers poll the shared Task Queue and write with the host Pi's `SessionManager`;
+installing the extension does not upgrade that host build. During a rolling deploy, a retry on an
+old Worker can still repair on open without a guard or lose a batch after a late cut. Drain old
+fleet Workers and restart each `pi` on the pinned fork build, or disable its embedded Worker with
+`PI_TEMPORAL_EMBEDDED_WORKER=0`. Live turns also write with the host Pi build, so upgrade it before
+relying on their recovery. There is no runtime compatibility gate yet; it is tracked in
+[#55](https://github.com/temporalio/pi-temporal/issues/55). The older loader skips blank lines,
+so it can read the new files on rollback, but its writer lacks the new recovery behavior.
+
+Empty-file initialization and older-format migration still write during open, before a guard is
+installed. Migration truncates and rewrites the whole file with the entries it loaded, so it
+can erase entries a newer writer appended since that load. The rewrite is not crash-atomic:
+it truncates in place and writes entries one at a time, so a crash can lose the remaining
+transcript even without another writer. Tool Activities open sessions too,
+even with a guard that refuses writes, and are exposed to this unguarded rewrite after a format
+version bump. Guarding or deferring initialization and migration is tracked in
+[#54](https://github.com/temporalio/pi-temporal/issues/54).
+
+The fence needs exclusive create and a directory listing that shows new files at once. On NFS,
+`actimeo=0` (at least `acdirmin=0,acdirmax=0`) addresses listing visibility, but does not make
+`O_APPEND` atomic across clients. A superseded writer on another host can write at a stale offset
+over a newer writer's complete batch; the separator cannot prevent this loss. Transcript
+recovery across NFS clients is therefore not guaranteed; see
+[#53](https://github.com/temporalio/pi-temporal/issues/53).
+
 ## What recovers
 
 | What fails | Live | Worker | Checks |
@@ -123,7 +130,7 @@ model response.
 | Process dies mid-tool | Unsealed results are lost. Unanswered calls report unknown. | A recovery seal records what it has, a claim without a result reports unknown, and the turn goes on elsewhere. | `pending-check`, `lost-host-check`, `detached-check` |
 | A seal dies after its writes | Not applicable | The retry on another Worker doesn't write twice or re-run the turn-end hook. | `seal-check`, `interrupted-seal-check` |
 | Two attempts overlap | The agent admits one unit at a time. | The fence and write guard refuse a stale transcript write. They don't fence a tool's effects. | `fence-check`, `lease-check`, `lock-gap-check`, `stall-check` |
-| A superseded writer leaves a late torn append | The next append keeps complete entries and batches readable. Requires the pinned host Pi build and atomic local appends in one write. | Same recovery, provided every writer, including embedded Workers, uses the pinned build. NFS is excluded. | `pi-journal-check` |
+| A superseded writer leaves a late torn append | [Pi journal recovery](#pi-journal-recovery) keeps complete entries and batches readable under its stated requirements. | Same contract and limits. | `pi-journal-check` |
 | A stale dispatch wakes after cleanup | No claims in this mode. | The claim is still there, so it isn't admitted. | `stale-dispatch-check`, `dispatch-check` |
 | The user stops a turn | In-memory results are sealed if the process lives. | A running tool or model call is stopped and reports it, the next unit doesn't start, and the step is sealed with what each tool reported. | `local-turn-check`, `seal-check`, `stepped-step-check` |
 | A turn overspends | No bound. | Soft budgets stop at a boundary. A session already past a session bound runs no step for a new prompt. A run woken after an idle exit learns the session's total from the first step it runs, so its first prompt still pays for one step, and its later prompts pay for none. The hard deadline stops the running unit like a user stop. A command the tool started outside its own process may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
@@ -206,9 +213,9 @@ session's tree store, salvage included.
 ## What isn't covered
 
 - Exactly-once effects. A tool result isn't recorded atomically with its effect.
-- Transcript recovery across NFS clients: `actimeo=0` addresses visibility, not atomic appends
-  ([#53](https://github.com/temporalio/pi-temporal/issues/53)). One NFSv4 setup was tested, but not
-  NFSv3 or arbitrary clock skew.
+- [Pi journal recovery limits](#pi-journal-recovery): NFS clients, interleaved short writes,
+  initialization/migration, and incompatible writers. One NFSv4 setup was tested, but not NFSv3
+  or arbitrary clock skew.
 - A process death between `turn_end`'s entries and the `pi.turn-end-dispatched` entry. No check
   pins that window.
 - Live-mode results that were in memory when the process died.

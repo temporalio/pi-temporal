@@ -8,11 +8,6 @@ set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-# Refuse a stale fork once, before running checks against the linked Pi package.
-# shellcheck source=pinned-fork.sh
-. ./scripts/pinned-fork.sh
-pinned_fork
-
 logs="$(mktemp -d)"
 failed=()
 for path in checks/*-check.mts; do

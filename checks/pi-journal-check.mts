@@ -5,6 +5,7 @@
 // Opening a current-version session is read-only; recovery belongs to the next guarded append.
 //
 // No server or model key. Needs the pinned fork (`npm run setup-fork`).
+// For a locally built fork under development, PI_FORK_UNPINNED=1 skips only the pin check.
 // Usage: node --import tsx checks/pi-journal-check.mts
 
 import { spawnSync } from "node:child_process";
@@ -15,13 +16,17 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import type { SessionManager as PiSessionManager } from "@earendil-works/pi-coding-agent";
 
-// Also check direct invocations, before importing a missing or stale linked build.
-const pin = spawnSync("bash", ["-c", ". ./scripts/pinned-fork.sh; pinned_fork"], {
-  cwd: fileURLToPath(new URL("../", import.meta.url)),
-  stdio: "inherit",
-});
-if (pin.error) throw pin.error;
-if (pin.status !== 0) process.exit(pin.status ?? 1);
+// Refuse setup mistakes by default; local fork development still runs every assertion.
+if (process.env.PI_FORK_UNPINNED === "1") {
+  console.warn("pi-journal-check: testing an unpinned or edited linked build (PI_FORK_UNPINNED=1)");
+} else {
+  const pin = spawnSync("bash", ["-c", ". ./scripts/pinned-fork.sh; pinned_fork"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    stdio: "inherit",
+  });
+  if (pin.error) throw pin.error;
+  if (pin.status !== 0) process.exit(pin.status ?? 1);
+}
 const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 
 const failures: string[] = [];

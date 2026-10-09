@@ -229,10 +229,8 @@ adds `prepareStep`, `recordPrompt`, `modelCall` / `runToolCall` / `sealStep`, `s
 and `pi.registerTurnExecutor`. [docs/upstream.md](docs/upstream.md) has the plan to upstream it.
 
 You can also install the extension into a fork build of `pi`.
-Use the commit in `fork.pin` for the host Pi build too: the extension uses that build's
-`SessionManager`, and `pi install` does not upgrade it. Before relying on late-cut recovery,
-upgrade every host Pi and drain old Workers, including embedded Workers polling the shared
-queue. See [docs/guarantees.md](docs/guarantees.md#the-rules).
+The host Pi build must also be compatible with the pinned fork; see the
+[journal recovery requirements](docs/guarantees.md#pi-journal-recovery).
 
 ```
 pi install git:git@github.com:temporalio/pi-temporal

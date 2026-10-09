@@ -6,14 +6,8 @@ changes in the order below, starting with the smallest.
 
 1. **Session write guard.** `SessionManager.setWriteGuard` rejects appends from a writer that no
    longer owns the file. It has no Temporal dependency and can stop a stale writer on any host.
-2. **Append recovery and session format.** Every append to an existing session starts with a
-   newline, keeping a late torn fragment separate from the next complete entry or batch on
-   local filesystems with atomic appends. Session files can contain blank separator lines and
-   are no longer strict JSON Lines; readers and the documented parser must skip empty lines.
-   Loading current-version sessions with valid headers no longer repairs their tails; recovery
-   belongs to the next guarded append. Empty-file initialization and older-format migration
-   still write without a guard during open, and migration can erase newer entries by rewriting
-   the whole file. These behavior changes need explicit upstream review alongside the guard.
+2. **Append recovery and session format.** The separator and read-only-load changes need upstream
+   review alongside the guard; see [the behavior and limits](guarantees.md#pi-journal-recovery).
 3. **Share the model and tool phases of a turn.** An extraction with no new behavior. The normal
    `prompt()` path is the acceptance test.
 4. **Expose the step cursor.** Pause after the model call, run the tools, then close the step.
