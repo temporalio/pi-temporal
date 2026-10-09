@@ -39,6 +39,9 @@ gives, and only a requested cancel stops it.
 
 `writer-marker-check` and `session-root-check` run the core Activities over the echo agent, with no
 Pi. `echo-journal-check` cuts the echo agent's session file mid-append.
+`echo-shape-check` rejects malformed complete entries on load, and before an append or a seal
+writes one, without a retry or a write. It checks that valid entries remain readable, and that a
+session that can't be read is still retired. Neither echo check needs a server.
 
 ## The Workflow with stub Activities, on a dev server
 

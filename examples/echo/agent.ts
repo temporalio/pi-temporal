@@ -14,9 +14,16 @@ import type {
 } from "../../src/core/agent.js";
 
 type Call = { id: string; name: string; text: string };
-type Outcome = { callId: string; status: "ok" | "unknown" | "not-run" | "failed"; text: string };
+const outcomeStatuses = ["ok", "unknown", "not-run", "failed"] as const;
+type Outcome = { callId: string; status: (typeof outcomeStatuses)[number]; text: string };
 type Prompt = { kind: "prompt"; promptId: string; text: string };
-type Response = { kind: "response"; text: string; calls: Call[]; tokens: number; aborted?: true };
+type Response = {
+  kind: "response";
+  text: string;
+  calls: Call[];
+  tokens: number;
+  aborted?: boolean;
+};
 type Result = { kind: "result" } & Outcome;
 // The core's bookkeeping. Not part of the conversation.
 type Note = { kind: "note"; type: string; data: unknown };
@@ -27,6 +34,54 @@ export type EchoTool = (text: string, signal?: AbortSignal) => Promise<string>;
 
 export interface EchoOptions {
   readonly tool?: EchoTool;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isEntry(value: unknown): value is Entry {
+  if (!isObject(value)) return false;
+  switch (value.kind) {
+    case "prompt":
+      return typeof value.promptId === "string" && typeof value.text === "string";
+    case "response":
+      return typeof value.text === "string" && typeof value.tokens === "number" &&
+        Array.isArray(value.calls) && value.calls.every((call: unknown) =>
+          isObject(call) && typeof call.id === "string" && typeof call.name === "string" &&
+          typeof call.text === "string") &&
+        (value.aborted === undefined || typeof value.aborted === "boolean");
+    case "result":
+      return typeof value.callId === "string" && typeof value.text === "string" &&
+        (outcomeStatuses as readonly unknown[]).includes(value.status);
+    case "note":
+      // data is deliberately unknown; JSON omits it when appendEntry receives undefined.
+      return typeof value.type === "string";
+    default:
+      return false;
+  }
+}
+
+// A broken file stays broken, so a retry would burn every attempt on the same error.
+const notAnEntry = (file: string, verb: "read" | "written", line: string) =>
+  ApplicationFailure.nonRetryable(
+    `the session ${file} can't be ${verb}: not a session entry: ${line.slice(0, 80)}`,
+  );
+
+/** The line `entry` appends, and the entry a later read takes from it. */
+function encode(file: string, entry: unknown): { line: string; entry: Entry } {
+  let line: string | undefined;
+  try {
+    line = JSON.stringify(entry);
+  } catch {
+    // A BigInt or a cycle has no line to write.
+  }
+  // Checked as read back, not as given. JSON can change a value on the way, as NaN to null.
+  const written: unknown = line === undefined ? undefined : JSON.parse(line);
+  if (line === undefined || !isEntry(written)) {
+    throw notAnEntry(file, "written", line ?? "[unserializable entry]");
+  }
+  return { line, entry: written };
 }
 
 function load(file: string): Entry[] {
@@ -43,14 +98,9 @@ function load(file: string): Entry[] {
       // parses, so skipping it loses no whole entry.
       continue;
     }
-    // A line that parses but isn't an entry is a broken file, not a crash. A broken file stays
-    // broken, so a retry would burn every attempt on the same error.
-    if (typeof parsed !== "object" || parsed === null || !("kind" in parsed)) {
-      throw ApplicationFailure.nonRetryable(
-        `the session ${file} can't be read: not a session entry: ${line.slice(0, 80)}`,
-      );
-    }
-    entries.push(parsed as Entry);
+    // A line that parses but isn't an entry is a broken file, not a crash.
+    if (!isEntry(parsed)) throw notAnEntry(file, "read", line);
+    entries.push(parsed);
   }
   return entries;
 }
@@ -58,15 +108,24 @@ function load(file: string): Entry[] {
 /** One file's entries, and the only way to add to them: through the guard. */
 function journal(file: string, guard: () => void) {
   const entries = load(file);
-  const append = (entry: Entry) => {
-    // Every append calls the guard first, and stops if it throws. That's the fence.
+  const append = (...batch: Entry[]) => {
+    if (batch.length === 0) return;
+    // Every append calls the guard before writing, and stops if it throws. That's the fence. It
+    // goes before the check below, so a superseded writer reports the fence, not its entry.
     guard();
-    // Only appends, never a rewrite. The fence lets a superseded writer through for one write
-    // after its guard, and an append can't erase what a newer writer added. Always prefix a
-    // newline: that last write can leave a cut line even after this journal opened. The separator
-    // keeps it from joining this entry, and later reads skip the cut line and empty lines.
-    appendFileSync(file, `\n${JSON.stringify(entry)}\n`);
-    entries.push(entry);
+    // Runtime callers can bypass TypeScript. Never write an entry load() would reject, and check
+    // the whole batch first, so a bad entry can't leave half of it written.
+    const encoded = batch.map((entry) => encode(file, entry));
+    for (const [i, { line, entry }] of encoded.entries()) {
+      if (i > 0) guard();
+      // Only appends, never a rewrite. The fence lets a superseded writer through for one write
+      // after its guard, and an append can't erase what a newer writer added. Always prefix a
+      // newline: that last write can leave a cut line even after this journal opened. The
+      // separator keeps it from joining this entry, and later reads skip the cut line and empty
+      // lines.
+      appendFileSync(file, `\n${line}\n`);
+      entries.push(entry);
+    }
   };
   const latestEntry = (type: string, skip?: (data: unknown) => boolean) => {
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -162,7 +221,12 @@ function openSession(file: string, guard: () => void, tool: EchoTool): AgentSess
       if (!call) throw new Error(`the latest response has no call ${callId}`);
       busy = true;
       try {
-        const outcome: Outcome = { callId, status: "ok", text: await tool(call.text, signal) };
+        const text: unknown = await tool(call.text, signal);
+        // A plain JS tool can resolve to anything, and the seal writes only text. A failed call
+        // still lets the model answer, where an outcome the seal can't write fails the turn.
+        const outcome: Outcome = typeof text === "string"
+          ? { callId, status: "ok", text }
+          : { callId, status: "failed", text: `the tool returned ${typeof text}, not text` };
         return outcome;
       } catch (err) {
         // A stopped or failed tool still reports what happened. Plain JSON, since the core keeps
@@ -181,10 +245,17 @@ function openSession(file: string, guard: () => void, tool: EchoTool): AgentSess
           `the seal expected calls [${expectCalls}], and the session has [${asked}]`,
         );
       }
-      // A retried seal skips what it already wrote, and so decides the same thing.
-      for (const outcome of outcomes as Outcome[]) {
-        if (!answered(outcome.callId)) settle(outcome.callId, outcome.status, outcome.text);
-      }
+      // Kept outcomes come back from a file. One that isn't an object goes to the append as it
+      // is, which rejects it.
+      const results = (outcomes as unknown[]).map((outcome) =>
+        isObject(outcome)
+          ? { kind: "result", callId: outcome.callId, status: outcome.status, text: outcome.text }
+          : outcome,
+      ) as Result[];
+      // A retried seal skips what it already wrote, and so decides the same thing. The rest are
+      // one append, which writes none of them unless every one is an entry. The seal must write a
+      // step's results together.
+      append(...results.filter((r) => !isObject(r) || !answered(r.callId)));
       // No retry and no compaction here, so `postRun` changes nothing. The turn is over once the
       // latest response asked for no tool.
       return { done: asked.length === 0, ...(agentState ? { agentState } : {}) };

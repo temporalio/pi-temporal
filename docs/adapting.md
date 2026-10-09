@@ -82,6 +82,11 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
 - A failure that won't change on retry must throw `ApplicationFailure.nonRetryable`, such as a
   bad key or a session file that can't be parsed. Any other error burns all of the Activity's
   retries first.
+- Reading must refuse an entry that parses but isn't one of the agent's own, without a retry.
+  Read as is, it crashes a later step with an error that every retry repeats. An append must
+  check the line it will write the same way, after the guard and before writing, so the session
+  never holds what the next read refuses. A seal checks all of its outcomes before it writes any.
+  `echo-shape-check` shows the echo agent doing this.
 - Retry the provider yourself, inside the step. The Activity retry policy assumes the agent
   does, and only retries what a lost Worker left behind.
 - Return what each method promises.
