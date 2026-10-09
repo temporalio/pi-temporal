@@ -10,3 +10,4 @@ checks/.free-host-worker*.tmp.mts
 
 # Each demo run keeps its logs and its copy of the project here.
 demo/logs/
+lib/

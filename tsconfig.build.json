@@ -1,0 +1,12 @@
+{
+  // The published package. Pi loads the extension from source, and code that imports the
+  // package gets this compiled JS and its types.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "lib",
+    "rootDir": ".",
+    "declaration": true
+  },
+  "include": ["src/**/*.ts", "extensions/**/*.ts"]
+}

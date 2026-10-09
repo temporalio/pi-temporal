@@ -56,16 +56,20 @@ jobs:
         run: npx tsx scripts/release-tag.mts "$TAG" >> "$GITHUB_OUTPUT"
       # The release ships a Workflow bundle, so it must replay what running sessions recorded.
       - run: npx tsx checks/replay-kept-check.mts
-      - name: Build the Workflow bundle
+      # The npm tarball goes on the release too. A maintainer publishes that file by hand, as the
+      # SDK packages are published, so npm gets exactly what this run checked.
+      - name: Build the Workflow bundle and the npm package
         run: |
           npm run bundle
+          npm pack --pack-destination dist
           cd dist
-          sha256sum workflow-bundle.js > SHA256SUMS
+          sha256sum workflow-bundle.js temporalio-pi-temporal-*.tgz > SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
           path: |
             dist/workflow-bundle.js
+            dist/temporalio-pi-temporal-*.tgz
             dist/SHA256SUMS
           if-no-files-found: error
   publish:
@@ -96,9 +100,9 @@ jobs:
           fi
           # A re-run after a failed upload replaces the assets instead of failing on the release.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/workflow-bundle.js dist/SHA256SUMS --clobber
+            gh release upload "$TAG" dist/workflow-bundle.js dist/*.tgz dist/SHA256SUMS --clobber
             exit 0
           fi
           flags=(--verify-tag --generate-notes --title "$TAG")
           if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
-          gh release create "$TAG" "${flags[@]}" dist/workflow-bundle.js dist/SHA256SUMS
+          gh release create "$TAG" "${flags[@]}" dist/workflow-bundle.js dist/*.tgz dist/SHA256SUMS
