@@ -29,6 +29,33 @@ export interface EchoOptions {
   readonly tool?: EchoTool;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isEntry(value: unknown): value is Entry {
+  if (!isObject(value)) return false;
+  switch (value.kind) {
+    case "prompt":
+      return typeof value.promptId === "string" && typeof value.text === "string";
+    case "response":
+      return typeof value.text === "string" && typeof value.tokens === "number" &&
+        Array.isArray(value.calls) && value.calls.every((call: unknown) =>
+          isObject(call) && typeof call.id === "string" && typeof call.name === "string" &&
+          typeof call.text === "string") &&
+        (value.aborted === undefined || value.aborted === true);
+    case "result":
+      return typeof value.callId === "string" && typeof value.text === "string" &&
+        (value.status === "ok" || value.status === "unknown" ||
+          value.status === "not-run" || value.status === "failed");
+    case "note":
+      // data is deliberately unknown; JSON omits it when appendEntry receives undefined.
+      return typeof value.type === "string";
+    default:
+      return false;
+  }
+}
+
 function load(file: string): { entries: Entry[]; torn: boolean } {
   if (!existsSync(file)) return { entries: [], torn: false };
   const text = readFileSync(file, "utf8");
@@ -47,12 +74,12 @@ function load(file: string): { entries: Entry[]; torn: boolean } {
     }
     // A line that parses but isn't an entry is a broken file, not a crash. A broken file stays
     // broken, so a retry would burn every attempt on the same error.
-    if (typeof parsed !== "object" || parsed === null || !("kind" in parsed)) {
+    if (!isEntry(parsed)) {
       throw ApplicationFailure.nonRetryable(
         `the session ${file} can't be read: not a session entry: ${line.slice(0, 80)}`,
       );
     }
-    entries.push(parsed as Entry);
+    entries.push(parsed);
   }
   return { entries, torn };
 }
