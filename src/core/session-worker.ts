@@ -2,7 +2,7 @@
 // which runs one in-process so `/background` works with no separate Worker. The caller brings the
 // Activities, so this file knows nothing about the agent.
 
-import { fileURLToPath } from "node:url";
+import { siblingModule } from "./paths.js";
 import {
   NativeConnection,
   Worker,
@@ -16,7 +16,7 @@ import { type Tracing, workerTracing } from "./tracing.js";
 const HEARTBEAT_THROTTLE = "3 seconds";
 
 // Core only, so a Worker built here runs with no agent's Workflows in its bundle.
-const CORE_WORKFLOWS = fileURLToPath(new URL("./workflows.ts", import.meta.url));
+const CORE_WORKFLOWS = siblingModule(import.meta.url, "./workflows");
 
 const defined = <T extends object>(options: T): Partial<T> =>
   Object.fromEntries(
