@@ -142,6 +142,24 @@ try {
   );
   check("an invalid append never invokes the write guard", writes === writesBefore, writes);
   check("an invalid append leaves the journal unchanged", await readFile(file, "utf8") === before);
+
+  // The validation diagnostic must not throw a retryable TypeError when JSON.stringify cannot
+  // serialize the rejected value. The error still needs to be non-retryable and leave no write.
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  for (const [label, promptId] of [["BigInt", 1n], ["circular", circular]] as const) {
+    const error: unknown = await writing.recordPrompt(promptId as unknown as string, "hi").then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    check(
+      `recordPrompt rejects a ${label} promptId without a retry`,
+      error instanceof ApplicationFailure && error.nonRetryable === true && error.message.includes(file),
+      String(error),
+    );
+    check(`a ${label} invalid append never invokes the write guard`, writes === writesBefore, writes);
+    check(`a ${label} invalid append leaves the journal unchanged`, await readFile(file, "utf8") === before);
+  }
   writing.dispose();
   const readable = await agent.open(file, guard).then(
     (session) => { session.dispose(); return true; },
