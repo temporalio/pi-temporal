@@ -42,6 +42,8 @@ Pi. `echo-journal-check` cuts the echo agent's session file mid-append.
 `echo-shape-check` rejects malformed complete entries on load, and before an append or a seal
 writes one, without a retry or a write. It checks that valid entries remain readable, and that a
 session that can't be read is still retired. Neither echo check needs a server.
+`pi-journal-check` exercises late torn appends and read-only loading against the pinned Pi fork,
+including complete multi-entry batches. Neither journal check needs a server or model key.
 
 ## The Workflow with stub Activities, on a dev server
 
