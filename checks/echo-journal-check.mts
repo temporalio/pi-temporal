@@ -1,10 +1,12 @@
 // Checks that the echo agent recovers from a crash in the middle of an append. The next append
-// must end the cut last line, and later opens must skip it. It must also not rewrite the file,
-// since a superseded writer may still append once and must not erase a newer writer's entries.
+// must end the cut last line even if it arrived after open, and later opens must skip it.
+// It must also not rewrite the file, since a superseded writer may still append once and must
+// not erase a newer writer's entries.
 // Any agent's session format needs the same rule (docs/adapting.md).
 //
 // No server and no model key. Usage: npx tsx checks/echo-journal-check.mts
 
+import { appendFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +66,40 @@ try {
     await readFile(sharedFile, "utf8"),
   );
   after.dispose();
+
+  // A superseded writer can tear its last append after the current writer opened the file.
+  // The guard injects the cut, so the order is fixed and there's no timing race. Two appends,
+  // since a separator on the first write alone isn't enough.
+  for (const mode of ["open", "openRecord"] as const) {
+    const lateFile = join(root, `late-${mode}.jsonl`);
+    await writeFile(lateFile, '{"kind":"note","type":"seed","data":1}\n');
+    const cut = '{"kind":"note","type":"stale","data":';
+    const injectCut = () => appendFileSync(lateFile, cut);
+    const session = mode === "open" ? await agent.open(lateFile, injectCut) : undefined;
+    const current = session ?? (await agent.openRecord(lateFile, injectCut));
+    if (!current) throw new Error("the seeded record must exist");
+    for (const n of [1, 2]) {
+      const before = await readFile(lateFile, "utf8");
+      current.appendEntry(`current-${n}`, n);
+      check(
+        `${mode}: append ${n} is visible in memory`,
+        current.latestEntry(`current-${n}`) === n,
+      );
+      const recovered = await agent.open(lateFile, guard);
+      check(
+        `${mode}: complete entries survive a late torn append ${n} after reopening`,
+        recovered.latestEntry("seed") === 1 &&
+          [1, 2].slice(0, n).every((i) => recovered.latestEntry(`current-${i}`) === i),
+        await readFile(lateFile, "utf8"),
+      );
+      recovered.dispose();
+      check(
+        `${mode}: append ${n} preserves all earlier bytes, including the torn entry`,
+        (await readFile(lateFile, "utf8")).startsWith(before + cut),
+      );
+    }
+    session?.dispose();
+  }
 
   // A turn stopped mid-tool ends on its result, with no call-less response after it. The next
   // prompt must ask for its own echo, not answer from the stopped turn's result.

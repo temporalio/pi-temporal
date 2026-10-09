@@ -5,6 +5,8 @@ your own agent. Start from [`examples/echo/`](../examples/echo/). It's a whole a
 session file, with a Worker and a client, and it runs with only a dev server: no Pi, no model key,
 no Docker. Pi's implementation in [`src/pi/agent.ts`](../src/pi/agent.ts) is about 220 lines.
 The sections below describe the contract and the modules you can omit.
+Echo builds without the [#46](https://github.com/temporalio/pi-temporal/issues/46) fix separate
+a cut only when they find one at open, which breaks the late-cut rule below. Don't copy that.
 
 ## What your agent must provide
 
@@ -49,10 +51,15 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
 
 - Every append must call the guard first. An unguarded write can let a superseded attempt change
   the session.
-- A crash can cut the last entry in half. Reading must skip a cut entry, and the next append must
-  end it first, so it can't join the new entry. Writes must only append. A superseded writer can
-  still write once after its guard, and a rewrite then could erase what a newer writer added.
-  `echo-journal-check` shows the echo agent doing this.
+- A crash can cut the last entry in half. Reading must skip a cut entry, and every later append
+  must keep it separate from the new entries, including a complete batch. This must hold when
+  another writer leaves the cut after the session opened or after an earlier successful append.
+  Checking the tail before an append isn't enough, since the cut can land between the check and
+  the append; separate every append unconditionally.
+  Opening must not repair the file before the guard is installed. Writes must only append: a
+  superseded writer can still write once after its guard, and a rewrite could erase what a newer
+  writer added. These recovery rules require atomic appends; see the filesystem limits in
+  [guarantees.md](guarantees.md#the-rules).
 - Tool calls must return outcomes without writing to the session. Calls can run in parallel, so
   the seal must write their results together to avoid conflicting writes.
 - Outcomes must survive `JSON.stringify` because they wait in a file until the seal reads them.

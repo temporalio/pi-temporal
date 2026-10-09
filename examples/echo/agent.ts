@@ -84,11 +84,9 @@ function encode(file: string, entry: unknown): { line: string; entry: Entry } {
   return { line, entry: written };
 }
 
-function load(file: string): { entries: Entry[]; torn: boolean } {
-  if (!existsSync(file)) return { entries: [], torn: false };
+function load(file: string): Entry[] {
+  if (!existsSync(file)) return [];
   const text = readFileSync(file, "utf8");
-  // A crash mid-append can leave a cut last line. The next append ends it with a newline first.
-  const torn = text.length > 0 && !text.endsWith("\n");
   const entries: Entry[] = [];
   for (const line of text.split("\n")) {
     if (!line) continue;
@@ -104,13 +102,12 @@ function load(file: string): { entries: Entry[]; torn: boolean } {
     if (!isEntry(parsed)) throw notAnEntry(file, "read", line);
     entries.push(parsed);
   }
-  return { entries, torn };
+  return entries;
 }
 
 /** One file's entries, and the only way to add to them: through the guard. */
 function journal(file: string, guard: () => void) {
-  const { entries, torn } = load(file);
-  let cut = torn;
+  const entries = load(file);
   const append = (...batch: Entry[]) => {
     if (batch.length === 0) return;
     // Every append calls the guard before writing, and stops if it throws. That's the fence. It
@@ -122,10 +119,11 @@ function journal(file: string, guard: () => void) {
     for (const [i, { line, entry }] of encoded.entries()) {
       if (i > 0) guard();
       // Only appends, never a rewrite. The fence lets a superseded writer through for one write
-      // after its guard, and an append can't erase what a newer writer added. A newline ends a
-      // cut last line, so it can't join this entry, and every later read skips it.
-      appendFileSync(file, `${cut ? "\n" : ""}${line}\n`);
-      cut = false;
+      // after its guard, and an append can't erase what a newer writer added. Always prefix a
+      // newline: that last write can leave a cut line even after this journal opened. The
+      // separator keeps it from joining this entry, and later reads skip the cut line and empty
+      // lines.
+      appendFileSync(file, `\n${line}\n`);
       entries.push(entry);
     }
   };
