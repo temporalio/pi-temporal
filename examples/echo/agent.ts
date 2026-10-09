@@ -14,7 +14,8 @@ import type {
 } from "../../src/core/agent.js";
 
 type Call = { id: string; name: string; text: string };
-type Outcome = { callId: string; status: "ok" | "unknown" | "not-run" | "failed"; text: string };
+const outcomeStatuses = ["ok", "unknown", "not-run", "failed"] as const;
+type Outcome = { callId: string; status: (typeof outcomeStatuses)[number]; text: string };
 type Prompt = { kind: "prompt"; promptId: string; text: string };
 type Response = { kind: "response"; text: string; calls: Call[]; tokens: number; aborted?: true };
 type Result = { kind: "result" } & Outcome;
@@ -46,8 +47,7 @@ function isEntry(value: unknown): value is Entry {
         (value.aborted === undefined || value.aborted === true);
     case "result":
       return typeof value.callId === "string" && typeof value.text === "string" &&
-        (value.status === "ok" || value.status === "unknown" ||
-          value.status === "not-run" || value.status === "failed");
+        outcomeStatuses.some((status) => status === value.status);
     case "note":
       // data is deliberately unknown; JSON omits it when appendEntry receives undefined.
       return typeof value.type === "string";
@@ -89,7 +89,13 @@ function journal(file: string, guard: () => void) {
   const { entries, torn } = load(file);
   let cut = torn;
   const append = (entry: Entry) => {
-    // Every append calls the guard first, and stops if it throws. That's the fence.
+    // Runtime callers can bypass TypeScript. Never write an entry load() would reject.
+    if (!isEntry(entry)) {
+      throw ApplicationFailure.nonRetryable(
+        `the session ${file} can't be written: not a session entry: ${JSON.stringify(entry).slice(0, 80)}`,
+      );
+    }
+    // Every valid append calls the guard before writing, and stops if it throws. That's the fence.
     guard();
     // Only appends, never a rewrite. The fence lets a superseded writer through for one write
     // after its guard, and an append can't erase what a newer writer added. A newline ends a cut
