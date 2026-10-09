@@ -91,8 +91,15 @@ function journal(file: string, guard: () => void) {
   const append = (entry: Entry) => {
     // Runtime callers can bypass TypeScript. Never write an entry load() would reject.
     if (!isEntry(entry)) {
+      let preview: string;
+      try {
+        preview = JSON.stringify(entry).slice(0, 80);
+      } catch {
+        // Even an entry with no JSON representation must fail without a retry.
+        preview = "[unserializable entry]";
+      }
       throw ApplicationFailure.nonRetryable(
-        `the session ${file} can't be written: not a session entry: ${JSON.stringify(entry).slice(0, 80)}`,
+        `the session ${file} can't be written: not a session entry: ${preview}`,
       );
     }
     // Every valid append calls the guard before writing, and stops if it throws. That's the fence.
