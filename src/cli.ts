@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // The `pi-temporal` CLI starts, watches, stops and schedules Worker-owned sessions from anywhere.
 // It follows a session without a running Pi process. The Workflow holds control state, and the
 // session file holds the conversation. Queries and file reads expose both.
