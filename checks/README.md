@@ -78,6 +78,12 @@ model, run as a child process so a check can `SIGKILL` or `SIGSTOP` it mid-Activ
 `SIGKILL`s a Worker while the echo tool runs, and checks that a new Worker reports the tool's
 outcome as unknown instead of running it again. Start here to test your own agent.
 
+## The published package
+
+`package-check` packs the npm package and installs the tarball in a new project. Then it runs the
+echo example from it, whole-step and stepped, and the `pi-temporal` bin. A file the package leaves
+out fails here, not after a publish. It needs the npm registry for the package's dependencies.
+
 ## Docker
 
 The scripts in `../docker/` run Workers in separate containers, over NFS, and across a container

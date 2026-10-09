@@ -1,10 +1,56 @@
 {
-  "name": "pi-temporal",
+  "name": "@temporalio/pi-temporal",
   "version": "0.2.0",
-  "private": true,
   "license": "MIT",
   "description": "Temporal-backed durable executor for the Pi coding agent",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/temporalio/pi-temporal.git"
+  },
+  "homepage": "https://github.com/temporalio/pi-temporal#readme",
+  "bugs": {
+    "url": "https://github.com/temporalio/pi-temporal/issues"
+  },
   "type": "module",
+  "exports": {
+    "./core/*": {
+      "types": "./lib/src/core/*.d.ts",
+      "default": "./lib/src/core/*.js"
+    },
+    "./pi/*": {
+      "types": "./lib/src/pi/*.d.ts",
+      "default": "./lib/src/pi/*.js"
+    },
+    "./tree/*": {
+      "types": "./lib/src/tree/*.d.ts",
+      "default": "./lib/src/tree/*.js"
+    },
+    "./config": {
+      "types": "./lib/src/config.d.ts",
+      "default": "./lib/src/config.js"
+    },
+    "./client": {
+      "types": "./lib/src/client.d.ts",
+      "default": "./lib/src/client.js"
+    },
+    "./workflow-bundle": {
+      "types": "./lib/src/workflow-bundle.d.ts",
+      "default": "./lib/src/workflow-bundle.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "pi-temporal": "lib/src/cli.js",
+    "pi-temporal-worker": "lib/src/worker.js"
+  },
+  "files": [
+    "lib",
+    "src",
+    "extensions",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
   "keywords": [
     "pi-package"
   ],
@@ -21,7 +67,9 @@
     "typecheck": "tsc --noEmit",
     "checks": "scripts/run-checks.sh",
     "worker": "tsx src/worker.ts",
-    "bundle": "tsx scripts/bundle.mts"
+    "bundle": "tsx scripts/bundle.mts",
+    "build": "tsc -p tsconfig.build.json && cp src/core/failure-converter.cjs lib/src/core/",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
@@ -50,5 +98,8 @@
     "@temporalio/testing": "~1.22.0",
     "tsx": "^4.23.15",
     "typescript": "^5.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
