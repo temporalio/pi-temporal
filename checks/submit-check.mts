@@ -1,5 +1,5 @@
 // Checks how a prompt reaches a session. The session checks each prompt and runs a resent one
-// once. With no Worker to accept the Update, the prompt still lands as a Signal and runs once a
+// once. It refuses an id or text that isn't a string, from an Update or a Signal. With no Worker to accept the Update, the prompt still lands as a Signal and runs once a
 // Worker comes. A client waiting for the session to go quiet gets the turn's outcome.
 //
 // Needs a Temporal server, no model key. Usage: npx tsx checks/submit-check.mts
@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
+import { ApplicationFailure } from "@temporalio/common";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { sendPrompt } from "../src/core/client.js";
 import { sessionStart } from "../src/client.js";
@@ -63,6 +64,9 @@ const startWorker = async () => {
 };
 const quiet = (sessionId: string) =>
   client.workflow.getHandle(workflowId(sessionId)).executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
+// A session whose Workflow Task fails never goes quiet.
+const within = <T,>(ms: number, promise: Promise<T>) =>
+  Promise.race([promise, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms))]);
 
 const sessions: string[] = [];
 try {
@@ -124,6 +128,39 @@ try {
     (err: unknown) => String(err),
   );
   check("an empty prompt is refused", /needs text/.test(empty), empty);
+
+  // A raw Update or Signal can carry any JSON. An id that isn't a string would reach the agent,
+  // where 1 and "1" can name one prompt, and text that isn't one can't be trimmed.
+  const bad = [
+    ["a numeric id", { promptId: 1, text: "numeric id" }, /id must be a string/],
+    ["numeric text", { promptId: randomUUID(), text: 5 }, /needs text/],
+  ] as const;
+  const open = client.workflow.getHandle(workflowId(session));
+  for (const [label, input, refusal] of bad) {
+    const refused = await open.executeUpdate(UPDATES.submit, { args: [input] }).then(
+      () => undefined,
+      (err: unknown) => (err as { cause?: unknown }).cause ?? err,
+    );
+    check(
+      `an Update with ${label} is refused as a bad prompt`,
+      refused instanceof ApplicationFailure && refused.type === "BadPrompt" &&
+        refusal.test(refused.message),
+      String(refused),
+    );
+  }
+  // A Signal can't answer, so a bad one is dropped, and the session goes on to the next prompt.
+  for (const [label, input] of bad) {
+    const next = { promptId: randomUUID(), text: `after ${label}` };
+    await open.signal("submitPrompt", input);
+    await open.signal("submitPrompt", next);
+    const settled = await within(10_000, quiet(session));
+    check(
+      `a Signal with ${label} is dropped, and the session goes on`,
+      settled?.finished?.promptId === next.promptId && ran.get(next.promptId) === 1 &&
+        !(ran as Map<unknown, number>).has(input.promptId),
+      { settled, ran: (ran as Map<unknown, number>).get(input.promptId) },
+    );
+  }
 
   // More prompts queued than the session remembers finished ones. A resent prompt that's still
   // queued must be refused, or it runs twice.
