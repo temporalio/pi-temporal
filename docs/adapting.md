@@ -54,6 +54,8 @@ To send a prompt, use `sendPrompt(client, { taskQueue, sessionId, input }, promp
 - A crash can cut the last entry in half. Reading must skip a cut entry, and every later append
   must keep it separate from the new entries, including a complete batch. This must hold when
   another writer leaves the cut after the session opened or after an earlier successful append.
+  Checking the tail before an append isn't enough, since the cut can land between the check and
+  the append; separate every append unconditionally.
   Opening must not repair the file before the guard is installed. Writes must only append: a
   superseded writer can still write once after its guard, and a rewrite could erase what a newer
   writer added. These recovery rules require atomic appends; see the filesystem limits in
