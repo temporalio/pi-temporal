@@ -82,7 +82,8 @@ const openers = {
   },
   openRecord: async () => { await agent.openRecord(file, guard); },
 };
-const rejection = (promise: Promise<unknown>) => promise.then(() => undefined, (err: unknown) => err);
+const rejection = (promise: Promise<unknown>) =>
+  promise.then(() => undefined, (err: unknown) => err);
 const thrown = (write: () => unknown) => rejection((async () => write())());
 const nonRetryable = (err: unknown, path = file) =>
   err instanceof ApplicationFailure && err.nonRetryable === true && err.message.includes(path);
@@ -98,7 +99,8 @@ try {
     // cut objects can be skipped.
     for (const ending of ["\n", "", '\n{"kind":"prom']) {
       const contents = `${JSON.stringify(note)}\n${line}${ending}`;
-      const how = ending === "\n" ? "with a newline" : ending ? "before a cut tail" : "without a newline";
+      const how =
+        ending === "\n" ? "with a newline" : ending ? "before a cut tail" : "without a newline";
       await writeFile(file, contents);
       for (const [name, open] of Object.entries(openers)) {
         const error: unknown = await open().then(() => undefined, (err: unknown) => err);
@@ -108,7 +110,10 @@ try {
           String(error),
         );
       }
-      check(`${label}: loading leaves the journal unchanged`, await readFile(file, "utf8") === contents);
+      check(
+        `${label}: loading leaves the journal unchanged`,
+        await readFile(file, "utf8") === contents,
+      );
     }
   }
 
@@ -128,14 +133,23 @@ try {
   check("valid entries can still prepare a step", session.prepareStep() === false);
   check("valid responses retain their token counts", session.spend()?.tokens === 10);
   check("valid prompts remain readable", session.hasPrompt("p1"));
-  check("note data remains unrestricted", JSON.stringify(session.latestEntry("marker")) === '{"count":1}');
+  check(
+    "note data remains unrestricted",
+    JSON.stringify(session.latestEntry("marker")) === '{"count":1}',
+  );
   session.dispose();
   const record = await agent.openRecord(file, guard);
-  check("valid notes also open through openRecord", JSON.stringify(record?.latestEntry("marker")) === '{"count":1}');
+  check(
+    "valid notes also open through openRecord",
+    JSON.stringify(record?.latestEntry("marker")) === '{"count":1}',
+  );
   check("loading never invokes the write guard", writes === 0, writes);
 
   // Every reader asks for aborted === true, so false is as harmless as leaving it out.
-  await writeFile(file, jsonl(prompt, { kind: "response", text: "", calls: [], tokens: 0, aborted: false }));
+  await writeFile(
+    file,
+    jsonl(prompt, { kind: "response", text: "", calls: [], tokens: 0, aborted: false }),
+  );
   for (const [name, open] of Object.entries(openers)) {
     const error = await rejection(open());
     check(`${name} accepts a response with aborted false`, error === undefined, String(error));
@@ -147,19 +161,33 @@ try {
   const writing = await agent.open(file, guard);
   const before = await readFile(file, "utf8");
   const error = await rejection(writing.recordPrompt(1 as unknown as string, "hi"));
-  check("recordPrompt rejects a numeric promptId without a retry", nonRetryable(error), String(error));
+  check(
+    "recordPrompt rejects a numeric promptId without a retry",
+    nonRetryable(error),
+    String(error),
+  );
   check("an invalid append leaves the journal unchanged", await readFile(file, "utf8") === before);
 
   // The validation diagnostic must not throw a retryable TypeError when JSON.stringify cannot
   // serialize the rejected value. The error still needs to be non-retryable and leave no write.
   for (const [label, value] of [["BigInt", 1n], ["circular", circular]] as const) {
     const error = await rejection(writing.recordPrompt(value as unknown as string, "hi"));
-    check(`recordPrompt rejects a ${label} promptId without a retry`, nonRetryable(error), String(error));
-    check(`a ${label} invalid append leaves the journal unchanged`, await readFile(file, "utf8") === before);
+    check(
+      `recordPrompt rejects a ${label} promptId without a retry`,
+      nonRetryable(error),
+      String(error),
+    );
+    check(
+      `a ${label} invalid append leaves the journal unchanged`,
+      await readFile(file, "utf8") === before,
+    );
     // Note data is free-form, but it still needs a line to be written as.
     const noted = await thrown(() => writing.appendEntry("marker", value));
     check(`appendEntry rejects ${label} data without a retry`, nonRetryable(noted), String(noted));
-    check(`${label} note data leaves the journal unchanged`, await readFile(file, "utf8") === before);
+    check(
+      `${label} note data leaves the journal unchanged`,
+      await readFile(file, "utf8") === before,
+    );
   }
 
   // A superseded or cancelled attempt reports the fence, not the entry it was asked to write.
@@ -187,7 +215,11 @@ try {
     },
     (err: unknown) => String(err),
   );
-  check("the session still opens after rejecting invalid appends, as written", reopened === kept, reopened);
+  check(
+    "the session still opens after rejecting invalid appends, as written",
+    reopened === kept,
+    reopened,
+  );
 
   // A seal checks every outcome before it writes any, so a bad one can't leave a step half-sealed
   // with no retry to finish it.
@@ -204,8 +236,15 @@ try {
     ["a primitive outcome", "c2"],
   ] as const) {
     const error = await rejection(seal([ok, outcome]));
-    check(`sealStep rejects ${label} without a retry`, nonRetryable(error, sealFile), String(error));
-    check(`${label} writes none of the step's outcomes`, await readFile(sealFile, "utf8") === sealed);
+    check(
+      `sealStep rejects ${label} without a retry`,
+      nonRetryable(error, sealFile),
+      String(error),
+    );
+    check(
+      `${label} writes none of the step's outcomes`,
+      await readFile(sealFile, "utf8") === sealed,
+    );
   }
   const done = await rejection(seal([ok, { ...ok, callId: "c2" }]));
   check(
@@ -224,12 +263,19 @@ try {
   ] as const).entries()) {
     const toolFile = join(root, `tool-${i}.jsonl`);
     await writeFile(toolFile, jsonl(prompt, response));
-    const tooled = await echoAgent({ tool: async () => value as unknown as string }).open(toolFile, guard);
+    const tool = async () => value as unknown as string;
+    const tooled = await echoAgent({ tool }).open(toolFile, guard);
     // Through JSON, as the core keeps it in a file until the seal reads it.
     const outcome = JSON.parse(JSON.stringify(await tooled.runToolCall("c1")));
     check(`a tool that returns ${label} is a failed call`, outcome?.status === "failed", outcome);
-    const error = await rejection(tooled.sealStep([outcome], { expectCalls: ["c1"], postRun: true }));
-    check(`and that failed call can be sealed`, error === undefined && tooled.answered("c1"), String(error));
+    const error = await rejection(
+      tooled.sealStep([outcome], { expectCalls: ["c1"], postRun: true }),
+    );
+    check(
+      `and that failed call can be sealed`,
+      error === undefined && tooled.answered("c1"),
+      String(error),
+    );
     tooled.dispose();
   }
 
@@ -250,10 +296,10 @@ try {
   await writeFile(idleFile, jsonl(prompt, { ...response, calls: [] }));
   const idle = await retire(idleFile);
   const counted = await agent.openRecord(idleFile, guard);
+  const seconds = JSON.stringify(counted?.latestEntry("pi-temporal.session-seconds"));
   check(
     "an idle session is retired with the Workflow's seconds",
-    idle === undefined && retired.includes(idleFile) &&
-      JSON.stringify(counted?.latestEntry("pi-temporal.session-seconds")) === '{"turn":"t1","seconds":5}',
+    idle === undefined && retired.includes(idleFile) && seconds === '{"turn":"t1","seconds":5}',
     String(idle),
   );
   const brokenFile = join(root, "broken.jsonl");
@@ -270,5 +316,6 @@ try {
   await rm(root, { recursive: true, force: true });
 }
 
-console.log(failures.length === 0 ? "echo-shape-check: OK" : `echo-shape-check: ${failures.length} failed`);
-process.exit(failures.length === 0 ? 0 : 1);
+const bad = failures.length;
+console.log(bad === 0 ? "echo-shape-check: OK" : `echo-shape-check: ${bad} failed`);
+process.exit(bad === 0 ? 0 : 1);

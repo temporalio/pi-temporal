@@ -1,6 +1,7 @@
 // Checks how a prompt reaches a session. The session checks each prompt and runs a resent one
-// once. It refuses an id or text that isn't a string, from an Update or a Signal. With no Worker to accept the Update, the prompt still lands as a Signal and runs once a
-// Worker comes. A client waiting for the session to go quiet gets the turn's outcome.
+// once. It refuses an id or text that isn't a string, from an Update or a Signal. With no Worker
+// to accept the Update, the prompt still lands as a Signal and runs once a Worker comes. A client
+// waiting for the session to go quiet gets the turn's outcome.
 //
 // Needs a Temporal server, no model key. Usage: npx tsx checks/submit-check.mts
 
@@ -66,7 +67,10 @@ const quiet = (sessionId: string) =>
   client.workflow.getHandle(workflowId(sessionId)).executeUpdate<Quiet, []>(UPDATES.waitForQuiet);
 // A session whose Workflow Task fails never goes quiet.
 const within = <T,>(ms: number, promise: Promise<T>) =>
-  Promise.race([promise, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms))]);
+  Promise.race([
+    promise,
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms)),
+  ]);
 
 const sessions: string[] = [];
 try {

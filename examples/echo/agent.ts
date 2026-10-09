@@ -17,7 +17,13 @@ type Call = { id: string; name: string; text: string };
 const outcomeStatuses = ["ok", "unknown", "not-run", "failed"] as const;
 type Outcome = { callId: string; status: (typeof outcomeStatuses)[number]; text: string };
 type Prompt = { kind: "prompt"; promptId: string; text: string };
-type Response = { kind: "response"; text: string; calls: Call[]; tokens: number; aborted?: boolean };
+type Response = {
+  kind: "response";
+  text: string;
+  calls: Call[];
+  tokens: number;
+  aborted?: boolean;
+};
 type Result = { kind: "result" } & Outcome;
 // The core's bookkeeping. Not part of the conversation.
 type Note = { kind: "note"; type: string; data: unknown };
