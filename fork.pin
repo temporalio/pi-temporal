@@ -6,4 +6,4 @@
 # stay fetchable after the branch they came from moves on.
 
 PI_FORK_REPO=https://github.com/temporalio/pi.git
-PI_FORK_REF=c9a9e744d3cc852d5c99e938baf90f8e058f7c73
+PI_FORK_REF=d4cf9b8ac865093ba65e865b9382616e31716a63
