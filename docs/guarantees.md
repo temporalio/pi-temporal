@@ -8,7 +8,8 @@ it to a check. Each check covers its named scenario, not every possible interlea
 
 ## The model
 
-Pi owns the conversation and its JSONL session file. Temporal owns Workflow progress and
+Pi owns the conversation and its session file: JSON entries separated by newlines, with blank
+separator lines that readers must skip. Temporal owns Workflow progress and
 dispatches Activities. Worker mode stores dispatch claims and tool results beside the session
 file. Tree shipping adds git bundles of the project. Recovery depends on these records agreeing
 with Temporal history.
@@ -67,13 +68,20 @@ This assumes each append's payload lands in one write; a short write can let ano
 bytes interleave with it.
 
 Every Worker that can write the session must use this pin before relying on that recovery
-guarantee. During a rolling deploy, a retry on an old Worker can still repair on open without a
-guard or lose a batch after a late cut. Drain old Workers first. The older loader skips blank
+guarantee, including the embedded Worker in each user's `pi`. In the default profile, embedded
+Workers poll the shared Task Queue and write with the host Pi's `SessionManager`; installing the
+extension does not upgrade that host build. During a rolling deploy, a retry on an old Worker can
+still repair on open without a guard or lose a batch after a late cut. Drain old fleet Workers
+and restart each `pi` on the new fork build, or disable its embedded Worker with
+`PI_TEMPORAL_EMBEDDED_WORKER=0`. Live turns also write with the host Pi build, so upgrade it before
+relying on their recovery. There is no runtime compatibility gate. The older loader skips blank
 lines, so it can read the new files on rollback, but its writer lacks the new recovery behavior.
 
 Empty-file initialization and older-format migration still write during open, before a guard is
 installed. Migration truncates and rewrites the whole file with the entries it loaded, so it
-can erase entries a newer writer appended since that load. Tool Activities open sessions too,
+can erase entries a newer writer appended since that load. The rewrite is not crash-atomic:
+it truncates in place and writes entries one at a time, so a crash can lose the remaining
+transcript even without another writer. Tool Activities open sessions too,
 even with a guard that refuses writes, and are exposed to this unguarded rewrite after a format
 version bump. Guarding or deferring initialization and migration is tracked in
 [#54](https://github.com/temporalio/pi-temporal/issues/54).
@@ -115,6 +123,7 @@ model response.
 | Process dies mid-tool | Unsealed results are lost. Unanswered calls report unknown. | A recovery seal records what it has, a claim without a result reports unknown, and the turn goes on elsewhere. | `pending-check`, `lost-host-check`, `detached-check` |
 | A seal dies after its writes | Not applicable | The retry on another Worker doesn't write twice or re-run the turn-end hook. | `seal-check`, `interrupted-seal-check` |
 | Two attempts overlap | The agent admits one unit at a time. | The fence and write guard refuse a stale transcript write. They don't fence a tool's effects. | `fence-check`, `lease-check`, `lock-gap-check`, `stall-check` |
+| A superseded writer leaves a late torn append | The next append keeps complete entries and batches readable. Requires the new host Pi build and atomic local appends in one write. | Same recovery, provided every writer, including embedded Workers, uses the new build. NFS is excluded. | [pi-journal-check](../checks/pi-journal-check.mts) |
 | A stale dispatch wakes after cleanup | No claims in this mode. | The claim is still there, so it isn't admitted. | `stale-dispatch-check`, `dispatch-check` |
 | The user stops a turn | In-memory results are sealed if the process lives. | A running tool or model call is stopped and reports it, the next unit doesn't start, and the step is sealed with what each tool reported. | `local-turn-check`, `seal-check`, `stepped-step-check` |
 | A turn overspends | No bound. | Soft budgets stop at a boundary. A session already past a session bound runs no step for a new prompt. A run woken after an idle exit learns the session's total from the first step it runs, so its first prompt still pays for one step, and its later prompts pay for none. The hard deadline stops the running unit like a user stop. A command the tool started outside its own process may continue. The session takes the next prompt. | `budget-check`, `spend-check` |
@@ -197,8 +206,9 @@ session's tree store, salvage included.
 ## What isn't covered
 
 - Exactly-once effects. A tool result isn't recorded atomically with its effect.
-- Shared storage and clocks in general. One NFSv4 setup was tested. NFSv3 and arbitrary clock skew
-  weren't.
+- Transcript recovery across NFS clients: `actimeo=0` addresses visibility, not atomic appends
+  ([#53](https://github.com/temporalio/pi-temporal/issues/53)). One NFSv4 setup was tested, but not
+  NFSv3 or arbitrary clock skew.
 - A process death between `turn_end`'s entries and the `pi.turn-end-dispatched` entry. No check
   pins that window.
 - Live-mode results that were in memory when the process died.

@@ -2,7 +2,9 @@
 
 Each `*-check.mts` script checks one contract and exits nonzero on failure. Its header says what
 it needs. `npm run checks` runs every one that needs neither a model key nor Docker. Most need a
-local Temporal server (`scripts/temporal-dev.sh`).
+local Temporal server (`scripts/temporal-dev.sh`). The runner and direct `pi-journal-check`
+invocations refuse a missing, stale, or edited `.fork/pi` with instructions to run
+`npm run setup-fork`.
 
 The groups below show test patterns you can copy for your own agent.
 

@@ -6,4 +6,4 @@
 # branch it came from moves on.
 
 PI_FORK_REPO=https://github.com/temporalio/pi.git
-PI_FORK_REF=8f71207c89d2fea8b56ad1964fc8ae0f71af030a
+PI_FORK_REF=d021da930e845fb0f6e586dcac9ee98b96cb5ae9

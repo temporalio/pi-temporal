@@ -103,7 +103,8 @@ Its session files contain blank separator lines and are not strict JSON Lines; r
 session tooling must skip empty lines. `pi-journal-check` covers late cuts and complete batches.
 Opening a current-version Pi session with a valid header is read-only. Empty-file initialization
 and older-format migration still write without a guard, an exception to the contract above.
-Migration rewrites the whole file and can erase newer entries; this is tracked in
+Migration rewrites the whole file and can erase newer entries or lose the remaining transcript
+if it crashes during that rewrite; this is tracked in
 [#54](https://github.com/temporalio/pi-temporal/issues/54).
 See [guarantees.md](guarantees.md#the-rules) for filesystem and deployment limits.
 

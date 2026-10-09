@@ -7,11 +7,22 @@
 // No server or model key. Needs the pinned fork (`npm run setup-fork`).
 // Usage: node --import tsx checks/pi-journal-check.mts
 
+import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { SessionManager as PiSessionManager } from "@earendil-works/pi-coding-agent";
+
+// Also check direct invocations, before importing a missing or stale linked build.
+const pin = spawnSync("bash", ["-c", ". ./scripts/pinned-fork.sh; pinned_fork"], {
+  cwd: fileURLToPath(new URL("../", import.meta.url)),
+  stdio: "inherit",
+});
+if (pin.error) throw pin.error;
+if (pin.status !== 0) process.exit(pin.status ?? 1);
+const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 
 const failures: string[] = [];
 const check = (label: string, ok: boolean) => {
@@ -47,7 +58,7 @@ try {
       seed.appendMessage({ role: "user", content: "seed", timestamp: 1 });
       const file = seed.getSessionFile()!;
       const current = SessionManager.open(file);
-      const append = (writer: SessionManager, name: string) => {
+      const append = (writer: PiSessionManager, name: string) => {
         if (mode === "batch") {
           writer.batch(() => {
             writer.appendCustomEntry(`${name}-a`, 1);
