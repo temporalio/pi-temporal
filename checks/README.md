@@ -15,8 +15,10 @@ These checks run logic that needs no Temporal server.
 `storage-repair-check`, `liveness-linux-check`, `release-tag-check`, `session-dir-check`
 
 `echo-journal-check` cuts the echo agent's session file mid-append. `pi-journal-check` drives the
-real `SessionManager` from the pinned Pi fork, checking late torn appends, complete multi-entry
-batches, exact reloaded entries and leaf, and read-only loading. Neither needs a model key.
+`SessionManager` exported by the pinned fork's linked dist build. It checks single-entry and
+framed-batch cuts, complete single and batch appends, exact reloaded entries and leaf, and
+read-only loading. This verifies the package this repo ships, complementing the fork's source
+unit tests. Neither journal check needs a model key.
 
 ## The step driver with injected fakes, no server
 

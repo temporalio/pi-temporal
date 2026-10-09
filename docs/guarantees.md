@@ -66,11 +66,17 @@ if a superseded writer left a cut line after the session opened or last wrote
 This assumes each append's payload lands in one write; a short write can let another writer's
 bytes interleave with it.
 
+Every Worker that can write the session must use this pin before relying on that recovery
+guarantee. During a rolling deploy, a retry on an old Worker can still repair on open without a
+guard or lose a batch after a late cut. Drain old Workers first. The older loader skips blank
+lines, so it can read the new files on rollback, but its writer lacks the new recovery behavior.
+
 Empty-file initialization and older-format migration still write during open, before a guard is
 installed. Migration truncates and rewrites the whole file with the entries it loaded, so it
 can erase entries a newer writer appended since that load. Tool Activities open sessions too,
 even with a guard that refuses writes, and are exposed to this unguarded rewrite after a format
-version bump. Guarding or deferring initialization and migration remains follow-up work.
+version bump. Guarding or deferring initialization and migration is tracked in
+[#54](https://github.com/temporalio/pi-temporal/issues/54).
 
 The fence needs exclusive create and a directory listing that shows new files at once. On NFS,
 `actimeo=0` (at least `acdirmin=0,acdirmax=0`) addresses listing visibility, but does not make
