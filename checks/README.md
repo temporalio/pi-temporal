@@ -3,12 +3,13 @@
 Each `*-check.mts` script checks one contract and exits nonzero on failure. Its header says what
 it needs. `npm run checks` runs every one that needs neither a model key nor Docker. Most need a
 local Temporal server (`scripts/temporal-dev.sh`). The runner lets each check report its own
-prerequisites, so unrelated checks can run without Pi. `pi-journal-check` refuses a missing,
-stale, or edited `.fork/pi` by default, with instructions to run `npm run setup-fork`.
+prerequisites, so unrelated checks can run without Pi. `pi-journal-check` and
+`pi-session-open-check` refuse a missing, stale, or edited `.fork/pi` by default, with
+instructions to run `npm run setup-fork`.
 
 To test a fork change, build it in `.fork/pi`, keep the package linked into `node_modules`, and
-run `PI_FORK_UNPINNED=1 npm run checks`. Only `pi-journal-check` skips its pin validation; it
-still runs every recovery assertion.
+run `PI_FORK_UNPINNED=1 npm run checks`. Both Pi checks skip only their pin validation;
+they still run every recovery assertion.
 
 The groups below show test patterns you can copy for your own agent.
 
@@ -25,6 +26,26 @@ These checks run logic that needs no Temporal server.
 framed-batch cuts, complete single and batch appends, exact reloaded entries and leaf, and
 read-only loading. This verifies the package this repo ships, complementing the fork's source
 unit tests. Neither journal check needs a model key.
+
+`pi-session-open-check` reproduces [issue #54](https://github.com/temporalio/pi-temporal/issues/54)
+against that same exported package. It requires empty, v1 and v2 session opens to be read-only,
+and a refused single or batch persistence operation to preserve the original bytes and memory.
+Its overlap fixture injects a complete append immediately after the full loader reaches EOF,
+then checks that migration and the subsequent guarded write preserve it. A child process exits
+at the first successful session write; reopening must retain the exact original entries.
+The hooks are deterministic, restored after use, and operate only on temporary fixtures.
+
+Run it without a server or model key:
+
+```sh
+node --import tsx checks/pi-session-open-check.mts
+```
+
+This is the first regression commit for the fix. It intentionally exits nonzero against the
+current pin until initialization and migration satisfy the contract. The existing
+`pi-journal-check` remains the passing control for current-version append recovery. The check
+runner picks up the new `*-check.mts` automatically; do not skip it or turn the data-loss
+assertions into expected failures.
 
 ## The step driver with injected fakes, no server
 
