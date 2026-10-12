@@ -6,14 +6,9 @@ local Temporal server (`scripts/temporal-dev.sh`). The runner lets each check re
 prerequisites, so unrelated checks can run without Pi. `pi-journal-check` refuses a missing,
 stale, or edited `.fork/pi` by default, with instructions to run `npm run setup-fork`.
 
-When developing the fork, build it and keep it linked into `node_modules`, then use
-`PI_FORK_UNPINNED=1 npm run checks` or
-`PI_FORK_UNPINNED=1 node --import tsx checks/pi-journal-check.mts`. The journal check warns and
-runs every recovery assertion against that linked build; the override skips only its pin
-validation. It does not supply a missing build or skip Pi-dependent checks. CI validates the
-pin separately, and Docker checks keep their strict pin validation. A template with another
-agent can run individual core or echo checks, or remove the Pi-dependent checks it no longer
-uses.
+To test a fork change, build it in `.fork/pi`, keep the package linked into `node_modules`, and
+run `PI_FORK_UNPINNED=1 npm run checks`. Only `pi-journal-check` skips its pin validation; it
+still runs every recovery assertion.
 
 The groups below show test patterns you can copy for your own agent.
 

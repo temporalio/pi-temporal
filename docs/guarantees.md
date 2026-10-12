@@ -60,6 +60,8 @@ tool's external effects, which is what the claim is for.
 The fence is checked, not enforced by storage. An attempt that stalls between its check and its
 append can still land that one append; [Pi journal recovery](#pi-journal-recovery) defines what
 survives it.
+The fence needs exclusive create and a directory listing that shows new files at once. On NFS,
+mount with `actimeo=0` (at least `acdirmin=0,acdirmax=0`) for listing visibility.
 
 Tree shipping (`src/tree/`) keeps a lease, since clients and hosts write tree stores and project
 directories outside any Workflow. Its 50-second validity and 60-second reclaim windows allow for
@@ -115,11 +117,10 @@ even with a guard that refuses writes, and are exposed to this unguarded rewrite
 version bump. Guarding or deferring initialization and migration is tracked in
 [#54](https://github.com/temporalio/pi-temporal/issues/54).
 
-The fence needs exclusive create and a directory listing that shows new files at once. On NFS,
-`actimeo=0` (at least `acdirmin=0,acdirmax=0`) addresses listing visibility, but does not make
-`O_APPEND` atomic across clients. A superseded writer on another host can write at a stale offset
-over a newer writer's complete batch; the separator cannot prevent this loss. Transcript
-recovery across NFS clients is therefore not guaranteed; see
+The [fence's listing requirements](#the-rules) do not make `O_APPEND` atomic across NFS clients.
+A superseded writer on another host can write at a stale offset over a newer writer's complete
+batch; the separator cannot prevent this loss. Transcript recovery across NFS clients is
+therefore not guaranteed; see
 [#53](https://github.com/temporalio/pi-temporal/issues/53).
 
 ## What recovers
@@ -214,8 +215,9 @@ session's tree store, salvage included.
 
 - Exactly-once effects. A tool result isn't recorded atomically with its effect.
 - [Pi journal recovery limits](#pi-journal-recovery): NFS clients, interleaved short writes,
-  initialization/migration, and incompatible writers. One NFSv4 setup was tested, but not NFSv3
-  or arbitrary clock skew.
+  initialization/migration, and incompatible writers.
+- Shared storage and clocks in general. One NFSv4 setup was tested. NFSv3 and arbitrary clock skew
+  weren't.
 - A process death between `turn_end`'s entries and the `pi.turn-end-dispatched` entry. No check
   pins that window.
 - Live-mode results that were in memory when the process died.
