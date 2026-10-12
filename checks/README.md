@@ -2,7 +2,13 @@
 
 Each `*-check.mts` script checks one contract and exits nonzero on failure. Its header says what
 it needs. `npm run checks` runs every one that needs neither a model key nor Docker. Most need a
-local Temporal server (`scripts/temporal-dev.sh`).
+local Temporal server (`scripts/temporal-dev.sh`). The runner lets each check report its own
+prerequisites, so unrelated checks can run without Pi. `pi-journal-check` refuses a missing,
+stale, or edited `.fork/pi` by default, with instructions to run `npm run setup-fork`.
+
+To test a fork change, build it in `.fork/pi`, keep the package linked into `node_modules`, and
+run `PI_FORK_UNPINNED=1 npm run checks`. Only `pi-journal-check` skips its pin validation; it
+still runs every recovery assertion.
 
 The groups below show test patterns you can copy for your own agent.
 
@@ -13,6 +19,12 @@ These checks run logic that needs no Temporal server.
 `take-fence-check`, `pending-check`, `lease-check`, `lease-recovery-check`, `lock-gap-check`,
 `stall-check`, `session-id-check`, `config-check`, `stale-tip-check`, `worktree-check`,
 `storage-repair-check`, `liveness-linux-check`, `release-tag-check`, `session-dir-check`
+
+`echo-journal-check` cuts the echo agent's session file mid-append. `pi-journal-check` drives the
+`SessionManager` exported by the pinned fork's linked dist build. It checks single-entry and
+framed-batch cuts, complete single and batch appends, exact reloaded entries and leaf, and
+read-only loading. This verifies the package this repo ships, complementing the fork's source
+unit tests. Neither journal check needs a model key.
 
 ## The step driver with injected fakes, no server
 
@@ -38,10 +50,11 @@ call its own environment and `attempt`.
 gives, and only a requested cancel stops it.
 
 `writer-marker-check` and `session-root-check` run the core Activities over the echo agent, with no
-Pi. `echo-journal-check` cuts the echo agent's session file mid-append.
+Pi.
+
 `echo-shape-check` rejects malformed complete entries on load, and before an append or a seal
 writes one, without a retry or a write. It checks that valid entries remain readable, and that a
-session that can't be read is still retired. Neither echo check needs a server.
+session that can't be read is still retired. This check needs no server.
 
 ## The Workflow with stub Activities, on a dev server
 
