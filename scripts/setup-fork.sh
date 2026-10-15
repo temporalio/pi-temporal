@@ -31,12 +31,19 @@ if [ "$(git -C "$dir" rev-parse -q --verify HEAD || true)" != "$PI_FORK_REF" ]; 
   git -C "$dir" checkout -q --detach FETCH_HEAD
 fi
 
-# Fetch packages/ai model data, then build offline. A full build would regenerate model sources
-# from today's catalog and drift from the pinned commit.
+# Build offline, with the model data published for this pi-ai version. The model types come from
+# that data, so today's catalog can break the build of a pin that built yesterday. A published
+# version never changes.
 (
   cd "$dir"
   npm ci
-  npm run -w @earendil-works/pi-ai hydrate-model-data
+  ai="$(node -p 'const p = require("./packages/ai/package.json"); `${p.name}@${p.version}`')"
+  data="$(mktemp -d)"
+  trap 'rm -rf "$data"' EXIT
+  npm pack --silent --pack-destination "$data" "$ai" >/dev/null
+  tar -xzf "$data"/*.tgz -C "$data"
+  rm -rf packages/ai/src/providers/data
+  cp -R "$data/package/dist/providers/data" packages/ai/src/providers/data
   npm run build:offline
 )
 
