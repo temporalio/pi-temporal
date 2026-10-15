@@ -1,8 +1,8 @@
+#!/usr/bin/env node
 // Workers share the session directory so any Worker on the queue can resume a session.
 // The Pi extension runs the same Worker in its own process.
 
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Runtime } from "@temporalio/worker";
 import {
   connectionOptions,
@@ -15,6 +15,7 @@ import {
   TEMPORAL_CREDENTIAL_VARS,
 } from "./config.js";
 import { createSessionWorker } from "./core/session-worker.js";
+import { siblingModule } from "./core/paths.js";
 import { makeActivities } from "./pi/activities.js";
 import { dataConverterFor } from "./core/codec.js";
 import { flushTracing, startTracing } from "./core/tracing.js";
@@ -86,7 +87,7 @@ async function main() {
     ...(cfg.shipTree ? { hostQueueFor: projectDir } : {}),
     dataConverter: dataConverterFor(cfg),
     // Pi's live-turn Workflow too, so this Worker serves every kind of session.
-    workflowsPath: fileURLToPath(new URL("./workflow-bundle.ts", import.meta.url)),
+    workflowsPath: siblingModule(import.meta.url, "./workflow-bundle"),
     workflowBundlePath: process.env.PI_TEMPORAL_WORKFLOW_BUNDLE,
     shutdownGraceTime: cfg.shutdownGrace,
     maxConcurrentActivities: cfg.maxActivities,

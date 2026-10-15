@@ -12,7 +12,6 @@ import type {
   TurnExecutorContext,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import {
   type Client,
   type Connection,
@@ -55,10 +54,11 @@ import {
   sessionFileFor,
   TEMPORAL_CREDENTIAL_VARS,
 } from "../src/config.js";
+import { siblingModule } from "../src/core/paths.js";
 
 const STATUS_KEY = "pi-temporal";
 // Pi's live-turn Workflow beside the core session, for both Workers this extension runs.
-const WORKFLOWS = fileURLToPath(new URL("../src/workflow-bundle.ts", import.meta.url));
+const WORKFLOWS = siblingModule(import.meta.url, "../src/workflow-bundle");
 const POLL_MS = 2000;
 // Shorter than the poll interval, so a Worker that never answers cannot stack polls behind it.
 const QUERY_MS = 1500;
